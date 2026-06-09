@@ -30,7 +30,7 @@
         "https://github.com/Fry-Foundation/fry-edge-miner/releases/latest/download/latest.json"
       ],
       "dialog": true,
-      "pubkey": "PLACEHOLDER_ED25519_PUBKEY"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU1RjdFREM3NThBMDY2MjYKUldRbVpxQll4KzMzVldSQVFXUURzL3RnVjNIcVUrYXZySFdOdlRQdWVYc2tFOEhQV2pUNFZMS04K"
     }
   },
   "bundle": {
