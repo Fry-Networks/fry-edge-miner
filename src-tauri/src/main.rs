@@ -7,13 +7,112 @@ mod integrations;
 mod poc;
 mod supervisor;
 
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use api::client::ApiClient;
+use config::store::ConfigStore;
+use integrations::IntegrationRegistry;
+use supervisor::Supervisor;
+
+/// Shared application state, managed by Tauri
+pub struct AppState {
+    pub config: Arc<ConfigStore>,
+    pub registry: Arc<Mutex<IntegrationRegistry>>,
+    pub supervisor: Arc<Mutex<Supervisor>>,
+    pub api_client: Arc<ApiClient>,
+}
+
 fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     tauri::Builder::default()
+        .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_shell::init())
+        .setup(|app| {
+            use tauri::Manager;
+
+            // Config store
+            let config_dir = app
+                .path()
+                .app_data_dir()
+                .expect("failed to resolve app data dir");
+            let config_store =
+                ConfigStore::new(config_dir).expect("failed to initialize config store");
+            let config_store = Arc::new(config_store);
+
+            // API client (bearer token will be set after registration)
+            let cfg = config_store.get();
+            let api_client = Arc::new(ApiClient::new(cfg.api_base_url.clone(), String::new()));
+
+            // Integration registry with all 5 stubs
+            let mut registry = IntegrationRegistry::new();
+            registry.register(Box::new(integrations::mysterium::MysteriumIntegration));
+            registry.register(Box::new(integrations::presearch::PresearchIntegration));
+            registry.register(Box::new(integrations::diiisco::DiiiscoIntegration));
+            registry.register(Box::new(integrations::space_acres::SpaceAcresIntegration));
+            registry.register(Box::new(integrations::aem::AemIntegration));
+
+            // Restore enabled states from config
+            for (id, enabled) in &cfg.integrations_enabled {
+                registry.set_enabled(id, *enabled);
+            }
+            let registry = Arc::new(Mutex::new(registry));
+
+            // Process supervisor
+            let log_dir = app
+                .path()
+                .app_log_dir()
+                .expect("failed to resolve app log dir");
+            let supervisor = Arc::new(Mutex::new(Supervisor::new(log_dir)));
+
+            // PoC reporter timer (every 10 minutes)
+            let poc_config = config_store.clone();
+            let poc_registry = registry.clone();
+            let poc_client = api_client.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(600));
+                loop {
+                    interval.tick().await;
+                    let cfg = poc_config.get();
+                    if let Some(ref key) = cfg.miner_key {
+                        let doc = {
+                            let reg = poc_registry.lock().unwrap();
+                            poc::reporter::build_poc_doc(key, &reg)
+                        };
+                        if let Err(e) = poc_client
+                            .put_json(&format!("/PoC/{}/hardware", key), &doc)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "PoC submission failed");
+                        }
+                    }
+                }
+            });
+
+            // Manage shared state
+            app.manage(AppState {
+                config: config_store,
+                registry,
+                supervisor,
+                api_client,
+            });
+
+            tracing::info!("FEM initialized — 5 integrations registered");
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::integration::get_integrations,
             commands::integration::toggle_integration,
             commands::device::get_device_info,
-            commands::rewards::get_rewards,
+            commands::device::register_device,
+            commands::rewards::get_reward_summary,
+            commands::rewards::get_poc_slots,
             commands::settings::get_settings,
             commands::settings::save_settings,
         ])
