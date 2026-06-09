@@ -3,6 +3,7 @@ import Dashboard from "./pages/Dashboard"
 import Integrations from "./pages/Integrations"
 import Rewards from "./pages/Rewards"
 import Settings from "./pages/Settings"
+import Updates from "./pages/Updates"
 
 export default function App() {
   return (
@@ -35,6 +36,12 @@ export default function App() {
               Rewards
             </Link>
             <Link
+              to="/updates"
+              className="block px-4 py-3 rounded-lg hover:bg-gray-800 transition text-gray-300 hover:text-white"
+            >
+              Updates
+            </Link>
+            <Link
               to="/settings"
               className="block px-4 py-3 rounded-lg hover:bg-gray-800 transition text-gray-300 hover:text-white"
             >
@@ -49,6 +56,7 @@ export default function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/integrations" element={<Integrations />} />
             <Route path="/rewards" element={<Rewards />} />
+            <Route path="/updates" element={<Updates />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>
