@@ -1,5 +1,6 @@
 pub mod aem;
 pub mod diiisco;
+pub mod download;
 pub mod mysterium;
 pub mod presearch;
 pub mod space_acres;
