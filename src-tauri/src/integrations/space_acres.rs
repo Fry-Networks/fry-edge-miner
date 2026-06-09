@@ -3,7 +3,7 @@ use super::{HealthStatus, Integration, PocGateData};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{info, warn};
 
 pub struct SpaceAcresIntegration;
 
@@ -141,14 +141,16 @@ impl Integration for SpaceAcresIntegration {
 
     async fn health_check(&self) -> HealthStatus {
         let binary = Self::binary_path();
-        if binary.exists() {
-            // Simple check: binary exists and is runnable
-            info!("SpaceAcres health check: binary exists");
-            HealthStatus::Healthy
-        } else {
-            info!("SpaceAcres health check: binary missing");
-            HealthStatus::Stopped
+        if !binary.exists() {
+            return HealthStatus::Stopped;
         }
+        if !has_ssd() {
+            warn!("No SSD detected — SpaceAcres performance will be degraded");
+            return HealthStatus::Unhealthy(
+                "No SSD detected — SpaceAcres performance degraded".to_string(),
+            );
+        }
+        HealthStatus::Healthy
     }
 
     async fn check_update(&self) -> Result<Option<String>> {
@@ -180,11 +182,36 @@ impl Integration for SpaceAcresIntegration {
     }
 
     fn collect_poc_data(&self) -> PocGateData {
-        // Return with poa=true if binary is available
         let binary = Self::binary_path();
         PocGateData {
             poa: binary.exists(),
             ..Default::default()
         }
     }
+}
+
+/// Detect if system has an SSD
+#[cfg(target_os = "windows")]
+fn has_ssd() -> bool {
+    use std::process::Command;
+    Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Get-PhysicalDisk | Where MediaType -eq 'SSD' | Measure-Object | Select -Expand Count",
+        ])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<u32>()
+                .unwrap_or(0)
+                > 0
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn has_ssd() -> bool {
+    false // Platform-specific SSD detection deferred
 }
