@@ -1,5 +1,6 @@
-pub mod reporter;
 pub mod gates;
+pub mod hardware;
+pub mod reporter;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
