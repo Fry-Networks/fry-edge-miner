@@ -1,93 +1,136 @@
-use anyhow::Result;
+use std::time::Duration;
+
 use reqwest::Client;
-use serde_json::Value;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ApiError {
+    #[error("HTTP request failed: {0}")]
+    Request(#[from] reqwest::Error),
+    #[error("HTTP {0}: {1}")]
+    HttpStatus(u16, String),
+}
+
+impl serde::Serialize for ApiError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
 
 pub struct ApiClient {
-    base_url: String,
-    bearer_token: String,
-    http: Client,
+    pub(crate) base_url: String,
+    pub(crate) bearer_token: String,
+    pub(crate) http: Client,
 }
 
 impl ApiClient {
     pub fn new(base_url: String, bearer_token: String) -> Self {
+        let http = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("failed to build HTTP client");
         Self {
             base_url,
             bearer_token,
-            http: Client::new(),
+            http,
         }
     }
 
-    // All 11 hardwareapi endpoints as method stubs
-    pub async fn get_required_version(
+    pub fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base_url, path)
+    }
+
+    pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
+        let resp = self
+            .http
+            .get(self.url(path))
+            .bearer_auth(&self.bearer_token)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ApiError::HttpStatus(status, body));
+        }
+        Ok(resp.json().await?)
+    }
+
+    pub async fn post<T: DeserializeOwned, B: Serialize>(
         &self,
-        _miner_code: &str,
-        _platform: &str,
-    ) -> Result<Value> {
-        todo!()
+        path: &str,
+        body: &B,
+    ) -> Result<T, ApiError> {
+        let resp = self
+            .http
+            .post(self.url(path))
+            .bearer_auth(&self.bearer_token)
+            .json(body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ApiError::HttpStatus(status, body));
+        }
+        Ok(resp.json().await?)
     }
 
-    pub async fn get_supported_installers(&self, _os: &str) -> Result<Value> {
-        todo!()
-    }
-
-    pub async fn get_miner_profile(&self, _miner_key: &str) -> Result<Value> {
-        todo!()
-    }
-
-    pub async fn upsert_installation(
+    pub async fn put_json<B: Serialize>(
         &self,
-        _miner_key: &str,
-        _install_id: &str,
-        _payload: Value,
-    ) -> Result<()> {
-        todo!()
+        path: &str,
+        body: &B,
+    ) -> Result<(), ApiError> {
+        let resp = self
+            .http
+            .put(self.url(path))
+            .bearer_auth(&self.bearer_token)
+            .json(body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ApiError::HttpStatus(status, body));
+        }
+        Ok(())
     }
 
-    pub async fn acquire_lease(
+    pub async fn patch<T: DeserializeOwned, B: Serialize>(
         &self,
-        _miner_key: &str,
-        _install_id: &str,
-        _lease_seconds: u64,
-        _external_ip: Option<&str>,
-    ) -> Result<Value> {
-        todo!()
+        path: &str,
+        body: &B,
+    ) -> Result<T, ApiError> {
+        let resp = self
+            .http
+            .patch(self.url(path))
+            .bearer_auth(&self.bearer_token)
+            .json(body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ApiError::HttpStatus(status, body));
+        }
+        Ok(resp.json().await?)
     }
 
-    pub async fn renew_lease(
-        &self,
-        _miner_key: &str,
-        _install_id: &str,
-        _lease_seconds: u64,
-        _external_ip: Option<&str>,
-    ) -> Result<bool> {
-        todo!()
-    }
-
-    pub async fn lease_status(&self, _miner_key: &str) -> Result<Value> {
-        todo!()
-    }
-
-    pub async fn delete_installation(
-        &self,
-        _miner_key: &str,
-        _install_id: &str,
-    ) -> Result<bool> {
-        todo!()
-    }
-
-    pub async fn get_hardware_doc(&self, _miner_key: &str) -> Result<Value> {
-        todo!()
-    }
-
-    pub async fn put_hardware_doc(
-        &self,
-        _miner_key: &str,
-        _document: Value,
-    ) -> Result<()> {
-        todo!()
-    }
-
-    pub async fn check_ip_status(&self, _external_ip: &str) -> Result<Value> {
-        todo!()
+    pub async fn delete(&self, path: &str) -> Result<(), ApiError> {
+        let resp = self
+            .http
+            .delete(self.url(path))
+            .bearer_auth(&self.bearer_token)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ApiError::HttpStatus(status, body));
+        }
+        Ok(())
     }
 }
