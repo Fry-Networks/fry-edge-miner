@@ -4,6 +4,7 @@ import Integrations from "./pages/Integrations"
 import Rewards from "./pages/Rewards"
 import Settings from "./pages/Settings"
 import Updates from "./pages/Updates"
+import Migration from "./pages/Migration"
 
 export default function App() {
   return (
@@ -58,6 +59,7 @@ export default function App() {
             <Route path="/rewards" element={<Rewards />} />
             <Route path="/updates" element={<Updates />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/migration" element={<Migration />} />
           </Routes>
         </main>
       </div>

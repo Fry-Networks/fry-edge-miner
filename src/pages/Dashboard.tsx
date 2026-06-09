@@ -1,3 +1,6 @@
+import { useState, useEffect } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+import { Link } from 'react-router-dom'
 import { useDevice } from '../hooks/useDevice'
 import { useIntegrations } from '../hooks/useIntegrations'
 import { useRewards } from '../hooks/useRewards'
@@ -13,6 +16,14 @@ export default function Dashboard() {
   } = useIntegrations()
   const { rewards, loading: rewardsLoading } = useRewards()
 
+  const [hasMigration, setHasMigration] = useState(false)
+
+  useEffect(() => {
+    invoke('check_migration').then((info) => {
+      if (info) setHasMigration(true)
+    }).catch(() => {})
+  }, [])
+
   const isLoading = deviceLoading || intLoading || rewardsLoading
 
   return (
@@ -26,6 +37,22 @@ export default function Dashboard() {
           Multi-integration decentralized platform client
         </p>
       </div>
+
+      {/* Migration Banner */}
+      {hasMigration && (
+        <div className="bg-blue-500/10 border border-blue-500/40 rounded-xl p-5 flex items-center justify-between">
+          <div>
+            <p className="text-blue-400 font-medium">FryHub Installation Detected</p>
+            <p className="text-sm text-blue-300/70 mt-1">Migrate your existing miners to FEM for consolidated rewards.</p>
+          </div>
+          <Link
+            to="/migration"
+            className="px-5 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg font-medium transition-colors text-sm"
+          >
+            Migrate Now
+          </Link>
+        </div>
+      )}
 
       {/* Device Info Section */}
       {!device?.registered ? (

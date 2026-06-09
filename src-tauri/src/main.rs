@@ -4,6 +4,7 @@ mod api;
 mod commands;
 mod config;
 mod integrations;
+mod migration;
 mod poc;
 mod supervisor;
 
@@ -115,6 +116,8 @@ fn main() {
             commands::rewards::get_poc_slots,
             commands::settings::get_settings,
             commands::settings::save_settings,
+            commands::migration::check_migration,
+            commands::migration::run_migration,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FEM")
