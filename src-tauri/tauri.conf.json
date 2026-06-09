@@ -1,6 +1,6 @@
 {
   "productName": "Fry Edge Miner",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "build": {
     "beforeBuildCommand": "npm run build",
     "beforeDevCommand": "npm run dev",
@@ -24,11 +24,25 @@
     }
   },
   "identifier": "com.frynetworks.fem",
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Fry-Foundation/fry-edge-miner/releases/latest/download/latest.json"
+      ],
+      "dialog": true,
+      "pubkey": "PLACEHOLDER_ED25519_PUBKEY"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
     "icon": [
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": false
+      }
+    }
   }
 }
