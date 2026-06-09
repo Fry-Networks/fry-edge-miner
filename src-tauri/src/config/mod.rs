@@ -11,6 +11,8 @@ pub struct FemConfig {
     pub wallet_address: Option<String>,
     pub integrations_enabled: HashMap<String, bool>,
     pub api_base_url: String,
+    #[serde(skip)]
+    pub api_token: String,
 }
 
 impl Default for FemConfig {
@@ -20,6 +22,7 @@ impl Default for FemConfig {
             wallet_address: None,
             integrations_enabled: HashMap::new(),
             api_base_url: "https://hardwareapi.frynetworks.com".to_string(),
+            api_token: option_env!("FEM_API_TOKEN").unwrap_or("").to_string(),
         }
     }
 }

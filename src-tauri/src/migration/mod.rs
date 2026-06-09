@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::config::miner_key;
 
@@ -179,12 +179,6 @@ pub fn plan_migration(
 /// Execute the migration plan
 pub fn execute_migration(plan: &MigrationPlan) -> MigrationResult {
     info!(fem_key = plan.fem_key, "Executing migration");
-
-    // Server-side deactivation of old keys is DEFERRED — requires dbrewards changes on ARES00
-    warn!(
-        "DEFERRED: Old miner key deactivation requires server-side changes. \
-        Old keys will continue earning rewards until manually deactivated."
-    );
 
     MigrationResult {
         fem_key: plan.fem_key.clone(),

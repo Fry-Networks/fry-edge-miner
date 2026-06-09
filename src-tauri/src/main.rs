@@ -47,9 +47,9 @@ fn main() {
                 ConfigStore::new(config_dir).expect("failed to initialize config store");
             let config_store = Arc::new(config_store);
 
-            // API client (bearer token will be set after registration)
+            // API client (bearer token baked at compile time via FEM_API_TOKEN env var)
             let cfg = config_store.get();
-            let api_client = Arc::new(ApiClient::new(cfg.api_base_url.clone(), String::new()));
+            let api_client = Arc::new(ApiClient::new(cfg.api_base_url.clone(), cfg.api_token.clone()));
 
             // Integration registry with all 5 stubs
             let mut registry = IntegrationRegistry::new();

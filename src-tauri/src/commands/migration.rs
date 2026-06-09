@@ -65,5 +65,19 @@ pub async fn run_migration(
         "Migration completed"
     );
 
+    // Non-fatal: notify hardwareapi to deactivate old miner keys.
+    // Fire-and-forget — local migration already succeeded.
+    {
+        let api = state.api_client.clone();
+        let fem_key = result.fem_key.clone();
+        let old_keys = result.migrated_keys.clone();
+        tauri::async_runtime::spawn(async move {
+            match crate::api::migration::notify_migration(&api, &fem_key, &old_keys).await {
+                Ok(()) => tracing::info!(fem_key = %fem_key, "Old keys deactivated on backend"),
+                Err(e) => tracing::warn!(fem_key = %fem_key, error = %e, "Old key deactivation failed (non-fatal)"),
+            }
+        });
+    }
+
     Ok(result)
 }
