@@ -51,6 +51,24 @@ impl SpaceAcresIntegration {
 
         Ok((tag_name, download_url))
     }
+
+    fn is_running() -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("tasklist")
+                .output()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .to_lowercase()
+                        .contains("space-acres.exe")
+                })
+                .unwrap_or(false)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            false
+        }
+    }
 }
 
 #[async_trait]
@@ -150,7 +168,11 @@ impl Integration for SpaceAcresIntegration {
                 "No SSD detected — SpaceAcres performance degraded".to_string(),
             );
         }
-        HealthStatus::Healthy
+        if Self::is_running() {
+            HealthStatus::Healthy
+        } else {
+            HealthStatus::Stopped
+        }
     }
 
     async fn check_update(&self) -> Result<Option<String>> {
@@ -182,9 +204,8 @@ impl Integration for SpaceAcresIntegration {
     }
 
     fn collect_poc_data(&self) -> PocGateData {
-        let binary = Self::binary_path();
         PocGateData {
-            poa: binary.exists(),
+            poa: Self::is_running(),
             ..Default::default()
         }
     }

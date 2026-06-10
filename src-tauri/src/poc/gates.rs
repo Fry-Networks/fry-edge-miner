@@ -1,15 +1,20 @@
 use crate::integrations::{IntegrationRegistry, PocGateData};
 
 /// Check PoC gates based on current integration state.
-/// v1: data=true if any integration healthy, online/mac_match/pol/poi/poa default true.
+/// poa: true iff at least one enabled integration reports poa=true via collect_poc_data().
 pub fn check_gates(registry: &IntegrationRegistry) -> PocGateData {
     let has_healthy = registry.enabled_count() > 0;
+    let poa = registry
+        .list()
+        .into_iter()
+        .filter(|i| registry.is_enabled(i.id()))
+        .any(|i| i.collect_poc_data().poa);
     PocGateData {
         data: has_healthy,
         online: true,
         mac_match: true,
         pol: true,
         poi: true,
-        poa: true,
+        poa,
     }
 }

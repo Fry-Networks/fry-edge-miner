@@ -23,6 +23,24 @@ impl MysteriumIntegration {
         return Self::partner_dir().join("myst");
     }
 
+    fn is_running() -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            std::process::Command::new("tasklist")
+                .output()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .to_lowercase()
+                        .contains("myst.exe")
+                })
+                .unwrap_or(false)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            false
+        }
+    }
+
     /// Fetch latest release download URL from GitHub
     async fn fetch_latest_release() -> Result<(String, String)> {
         let client = reqwest::Client::builder()
@@ -178,6 +196,9 @@ impl Integration for MysteriumIntegration {
     }
 
     fn collect_poc_data(&self) -> PocGateData {
-        PocGateData::default()
+        PocGateData {
+            poa: Self::is_running(),
+            ..Default::default()
+        }
     }
 }
