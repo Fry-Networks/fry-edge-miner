@@ -85,10 +85,16 @@ jobs:
       - name: Compose latest.json
         shell: bash
         run: |
-          NSIS_SIG=$(cat src-tauri/target/release/bundle/nsis/*.exe.sig)
           VERSION=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          PRODUCT=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['productName'])")
           PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          NSIS_EXE=$(ls src-tauri/target/release/bundle/nsis/*.exe | head -1 | xargs -I{} basename {})
+          # Match ONLY the current version's exe (avoids stale cached builds)
+          NSIS_EXE=$(ls src-tauri/target/release/bundle/nsis/*_${VERSION}_*-setup.exe 2>/dev/null | head -1 | xargs -I{} basename {})
+          NSIS_SIG_FILE=$(ls src-tauri/target/release/bundle/nsis/*_${VERSION}_*-setup.exe.sig 2>/dev/null | head -1)
+          # GitHub release upload converts spaces to dots in filenames
+          NSIS_EXE_URL=$(echo "$NSIS_EXE" | sed 's/ /./g')
+          NSIS_SIG=$(cat "$NSIS_SIG_FILE")
+          echo "VERSION=$VERSION  EXE=$NSIS_EXE  URL_NAME=$NSIS_EXE_URL  SIG_FILE=$NSIS_SIG_FILE"
           python3 -c "
           import json
           print(json.dumps({
@@ -97,8 +103,8 @@ jobs:
             'pub_date': '${PUB_DATE}',
             'platforms': {
               'windows-x86_64': {
-                'signature': open('src-tauri/target/release/bundle/nsis/' + [f for f in __import__('os').listdir('src-tauri/target/release/bundle/nsis') if f.endswith('.exe.sig')][0]).read().strip(),
-                'url': 'https://github.com/Fry-Foundation/fry-edge-miner/releases/download/v${VERSION}/${NSIS_EXE}'
+                'signature': '''${NSIS_SIG}'''.strip(),
+                'url': 'https://github.com/Fry-Foundation/fry-edge-miner/releases/download/v${VERSION}/${NSIS_EXE_URL}'
               }
             }
           }, indent=2))
