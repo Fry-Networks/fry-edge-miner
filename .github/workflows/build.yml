@@ -78,7 +78,7 @@ jobs:
       - name: Compose latest.json
         shell: bash
         run: |
-          NSIS_SIG=$(cat src-tauri/target/release/bundle/nsis/*.sig)
+          NSIS_SIG=$(cat src-tauri/target/release/bundle/nsis/*.exe.sig)
           VERSION=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
           PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           NSIS_EXE=$(ls src-tauri/target/release/bundle/nsis/*.exe | head -1 | xargs -I{} basename {})
@@ -90,7 +90,7 @@ jobs:
             'pub_date': '${PUB_DATE}',
             'platforms': {
               'windows-x86_64': {
-                'signature': open('src-tauri/target/release/bundle/nsis/' + [f for f in __import__('os').listdir('src-tauri/target/release/bundle/nsis') if f.endswith('.sig')][0]).read().strip(),
+                'signature': open('src-tauri/target/release/bundle/nsis/' + [f for f in __import__('os').listdir('src-tauri/target/release/bundle/nsis') if f.endswith('.exe.sig')][0]).read().strip(),
                 'url': 'https://github.com/Fry-Foundation/fry-edge-miner/releases/download/v${VERSION}/${NSIS_EXE}'
               }
             }
