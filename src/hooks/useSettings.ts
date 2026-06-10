@@ -9,7 +9,7 @@ export function useSettings() {
 
   const fetch = useCallback(async () => {
     try {
-      const data = await invoke<FemConfig>('get_config')
+      const data = await invoke<FemConfig>('get_settings')
       setConfig(data)
       setError(null)
     } catch (e) {
@@ -26,7 +26,7 @@ export function useSettings() {
   const save = useCallback(
     async (newConfig: Partial<FemConfig>) => {
       try {
-        await invoke('save_config', { config: newConfig })
+        await invoke('save_settings', { settings: newConfig })
         await fetch() // re-fetch after save
       } catch (e) {
         setError(String(e))

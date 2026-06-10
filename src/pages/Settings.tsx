@@ -3,20 +3,20 @@ import { useDevice } from '../hooks/useDevice'
 import { useSettings } from '../hooks/useSettings'
 
 export default function Settings() {
-  const { device, setWallet, loading: deviceLoading } = useDevice()
+  const { device, register, loading: deviceLoading } = useDevice()
   const { config, save, loading: configLoading } = useSettings()
   const [walletInput, setWalletInput] = useState('')
   const [apiUrlInput, setApiUrlInput] = useState('')
   const [savedMessage, setSavedMessage] = useState('')
 
-  const handleSaveWallet = async () => {
+  const handleRegister = async () => {
     if (!walletInput.trim()) return
     try {
-      await setWallet(walletInput)
-      setSavedMessage('Wallet updated successfully')
+      await register(walletInput)
+      setSavedMessage('Device registered successfully')
       setTimeout(() => setSavedMessage(''), 3000)
     } catch (error) {
-      setSavedMessage('Failed to save wallet')
+      setSavedMessage(`Registration failed: ${error}`)
     }
   }
 
@@ -89,7 +89,7 @@ export default function Settings() {
                     placeholder="Your Algorand wallet address"
                   />
                   <button
-                    onClick={handleSaveWallet}
+                    onClick={handleRegister}
                     className="px-6 py-2 bg-fry-red/20 text-fry-red hover:bg-fry-red/30 border border-fry-red/50 rounded-lg font-medium transition"
                   >
                     Save

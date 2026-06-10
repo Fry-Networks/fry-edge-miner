@@ -110,7 +110,7 @@ impl IntegrationRegistry {
 
     pub fn register(&mut self, integration: Box<dyn Integration>) {
         let id = integration.id().to_string();
-        self.enabled.insert(id.clone(), true); // enabled by default
+        self.enabled.insert(id.clone(), false); // disabled by default — user enables via UI
         self.integrations.insert(id, integration);
     }
 

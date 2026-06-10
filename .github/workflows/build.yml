@@ -40,6 +40,12 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --version "^2"
 
+      - name: Invalidate cached option_env! artifacts
+        run: |
+          touch src-tauri/src/config/mod.rs
+          touch src-tauri/src/integrations/presearch.rs
+          touch src-tauri/src/integrations/diiisco.rs
+
       - name: Build Tauri app
         run: cargo tauri build
         env:

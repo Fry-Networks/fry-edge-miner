@@ -23,17 +23,32 @@ export function useDevice() {
     fetch()
   }, [fetch])
 
-  const setWallet = useCallback(
-    async (address: string) => {
+  const register = useCallback(
+    async (wallet: string) => {
       try {
-        await invoke('set_wallet_address', { address })
+        const minerKey = await invoke<string>('register_device', { wallet })
         await fetch() // re-fetch after change
+        return minerKey
       } catch (e) {
         setError(String(e))
+        throw e
       }
     },
     [fetch]
   )
 
-  return { device, loading, error, setWallet, refetch: fetch }
+  const deregister = useCallback(
+    async () => {
+      try {
+        await invoke('deregister_device')
+        await fetch()
+      } catch (e) {
+        setError(String(e))
+        throw e
+      }
+    },
+    [fetch]
+  )
+
+  return { device, loading, error, register, deregister, refetch: fetch }
 }

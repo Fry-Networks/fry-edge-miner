@@ -13,8 +13,12 @@ pub struct FemConfig {
     pub install_id: Option<String>,
     pub integrations_enabled: HashMap<String, bool>,
     pub api_base_url: String,
-    #[serde(skip)]
+    #[serde(skip_serializing, default = "default_api_token")]
     pub api_token: String,
+}
+
+fn default_api_token() -> String {
+    option_env!("FEM_API_TOKEN").unwrap_or("").to_string()
 }
 
 impl Default for FemConfig {
