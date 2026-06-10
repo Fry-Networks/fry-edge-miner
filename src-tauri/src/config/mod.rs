@@ -9,6 +9,8 @@ use std::collections::HashMap;
 pub struct FemConfig {
     pub miner_key: Option<String>,
     pub wallet_address: Option<String>,
+    #[serde(default)]
+    pub install_id: Option<String>,
     pub integrations_enabled: HashMap<String, bool>,
     pub api_base_url: String,
     #[serde(skip)]
@@ -20,6 +22,7 @@ impl Default for FemConfig {
         Self {
             miner_key: None,
             wallet_address: None,
+            install_id: None,
             integrations_enabled: HashMap::new(),
             api_base_url: "https://hardwareapi.frynetworks.com".to_string(),
             api_token: option_env!("FEM_API_TOKEN").unwrap_or("").to_string(),

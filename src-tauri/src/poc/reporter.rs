@@ -4,7 +4,7 @@ use chrono::Utc;
 use tracing::{info, warn};
 
 use crate::api::client::{ApiClient, ApiError};
-use crate::api::types::{ApiIntegrationStatus, ApiPocHardwareDoc, ApiPocSlot};
+use crate::api::types::{ApiIntegrationStatus, ApiPocHardwareDoc, ApiPocSlot, PocDocumentWrapper};
 use crate::integrations::IntegrationRegistry;
 use crate::poc::gates::check_gates;
 
@@ -94,8 +94,9 @@ pub async fn submit_poc(
         "Submitting PoC data"
     );
 
+    let wrapped = PocDocumentWrapper { document: doc };
     match client
-        .put_json(&format!("/PoC/{}/hardware", miner_key), &doc)
+        .put_json(&format!("/PoC/{}/hardware", miner_key), &wrapped)
         .await
     {
         Ok(()) => {

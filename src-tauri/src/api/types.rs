@@ -12,47 +12,64 @@ pub struct VersionInfo {
     pub multiplier_per_tool: Option<f64>,
 }
 
-// --- Installation ---
+// --- Installation (matches server InstallationHeartbeat, models.py) ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InstallationRequest {
+pub struct InstallationHeartbeat {
     pub miner_key: String,
     pub install_id: String,
-    pub software_version: String,
-    pub poc_version: String,
-    pub platform: String,
-    pub mac_address: Option<String>,
+    #[serde(rename = "minerCode", skip_serializing_if = "Option::is_none")]
+    pub miner_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub software_version_installed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub poc_version_installed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_installed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InstallationResponse {
-    pub success: bool,
-    pub message: Option<String>,
+pub struct GenericOk {
+    pub ok: bool,
 }
 
-// --- Lease ---
+// --- Lease (matches server LeaseAction + LeaseResponse, models.py) ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LeaseRequest {
-    pub miner_key: String,
-    pub install_id: String,
+pub struct LeaseAction {
     pub lease_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
+}
+
+impl Default for LeaseAction {
+    fn default() -> Self {
+        Self { lease_seconds: 900, external_ip: None }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeaseResponse {
     pub granted: bool,
+    #[serde(default)]
     pub expires_at: Option<String>,
+    #[serde(default)]
+    pub holder_install_id: Option<String>,
+    #[serde(default)]
+    pub ttl_seconds: Option<i64>,
+    #[serde(default)]
     pub error_code: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LeaseStatus {
-    pub active: bool,
-    pub miner_key: Option<String>,
-    pub install_id: Option<String>,
-    pub expires_at: Option<String>,
+// --- PoC Document Wrapper (matches server HardwareDocument, models.py:341) ---
+
+#[derive(Debug, Serialize)]
+pub struct PocDocumentWrapper {
+    pub document: ApiPocHardwareDoc,
 }
 
 // --- Credentials ---

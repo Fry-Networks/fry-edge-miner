@@ -75,7 +75,7 @@ fn main() {
                 .expect("failed to resolve app log dir");
             let supervisor = Arc::new(Mutex::new(Supervisor::new(log_dir)));
 
-            // PoC reporter timer (every 10 minutes)
+            // PoC reporter + lease renewal timer (every 10 minutes)
             let poc_config = config_store.clone();
             let poc_registry = registry.clone();
             let poc_client = api_client.clone();
@@ -85,15 +85,53 @@ fn main() {
                     interval.tick().await;
                     let cfg = poc_config.get();
                     if let Some(ref key) = cfg.miner_key {
+                        // --- PoC submission (wrapped in {"document": ...}) ---
                         let doc = {
                             let reg = poc_registry.lock().unwrap();
                             poc::reporter::build_poc_doc(key, &reg)
                         };
+                        let wrapped = api::types::PocDocumentWrapper { document: doc };
                         if let Err(e) = poc_client
-                            .put_json(&format!("/PoC/{}/hardware", key), &doc)
+                            .put_json(&format!("/PoC/{}/hardware", key), &wrapped)
                             .await
                         {
                             tracing::warn!(error = %e, "PoC submission failed");
+                        }
+
+                        // --- Lease renewal (acquire or renew each tick) ---
+                        if let Some(ref install_id) = cfg.install_id {
+                            let action = api::types::LeaseAction::default();
+                            // Try renew first; if denied (no active lease), acquire
+                            match api::leases::renew(&poc_client, key, install_id, &action).await {
+                                Ok(resp) if resp.granted => {
+                                    tracing::debug!(
+                                        miner_key = key.as_str(),
+                                        ttl = resp.ttl_seconds,
+                                        "Lease renewed"
+                                    );
+                                }
+                                _ => {
+                                    // Renew failed or denied — try acquire
+                                    match api::leases::acquire(&poc_client, key, install_id, &action).await {
+                                        Ok(resp) if resp.granted => {
+                                            tracing::info!(
+                                                miner_key = key.as_str(),
+                                                "Lease acquired"
+                                            );
+                                        }
+                                        Ok(resp) => {
+                                            tracing::warn!(
+                                                miner_key = key.as_str(),
+                                                error_code = resp.error_code.as_deref().unwrap_or("none"),
+                                                "Lease denied"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, "Lease acquire failed");
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -115,6 +153,7 @@ fn main() {
             commands::integration::toggle_integration,
             commands::device::get_device_info,
             commands::device::register_device,
+            commands::device::deregister_device,
             commands::rewards::get_reward_summary,
             commands::rewards::get_poc_slots,
             commands::settings::get_settings,
