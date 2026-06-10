@@ -16,7 +16,7 @@ export function PoCSlotGrid({ slots }: PoCSlotGridProps) {
   const cells = Array.from({ length: GRID_SIZE }).map((_, idx) => {
     const slot = slotMap.get(idx)
     if (!slot) {
-      return { index: idx, color: 'bg-gray-800', slot: null }
+      return { index: idx, color: 'bg-fry-border', slot: null }
     }
 
     // Determine color based on gates
@@ -29,7 +29,7 @@ export function PoCSlotGrid({ slots }: PoCSlotGridProps) {
       slot.poa
 
     if (allGatesPassing) {
-      return { index: idx, color: 'bg-emerald-500', slot }
+      return { index: idx, color: 'bg-fry-neon', slot }
     } else if (
       slot.data ||
       slot.online ||
@@ -38,16 +38,16 @@ export function PoCSlotGrid({ slots }: PoCSlotGridProps) {
       slot.poi ||
       slot.poa
     ) {
-      return { index: idx, color: 'bg-amber-500', slot }
+      return { index: idx, color: 'bg-fry-warning', slot }
     } else {
-      return { index: idx, color: 'bg-red-500', slot }
+      return { index: idx, color: 'bg-fry-error', slot }
     }
   })
 
   return (
     <div className="space-y-4">
       {/* Grid */}
-      <div className="grid grid-cols-12 gap-1 bg-gray-800/30 p-4 rounded-xl">
+      <div className="grid grid-cols-12 gap-1 bg-fry-border/30 p-4 rounded-xl">
         {cells.map((cell) => (
           <div
             key={cell.index}
@@ -66,12 +66,12 @@ export function PoCSlotGrid({ slots }: PoCSlotGridProps) {
 
             {/* Tooltip */}
             {hoveredSlot === cell.index && cell.slot && (
-              <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 bg-gray-950 border border-gray-700 rounded px-3 py-2 text-xs text-gray-300 whitespace-nowrap z-10">
+              <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 bg-fry-bg border border-fry-border rounded px-3 py-2 text-xs text-fry-text whitespace-nowrap z-10">
                 <div className="font-semibold">Slot {cell.index}</div>
-                <div className="text-gray-500">
+                <div className="text-fry-text-muted">
                   {cell.slot.tools_count} tools
                 </div>
-                <div className="text-gray-500">
+                <div className="text-fry-text-muted">
                   Multiplier: {cell.slot.multiplier.toFixed(2)}x
                 </div>
               </div>
@@ -81,21 +81,21 @@ export function PoCSlotGrid({ slots }: PoCSlotGridProps) {
       </div>
 
       {/* Legend */}
-      <div className="flex gap-4 text-xs text-gray-400">
+      <div className="flex gap-4 text-xs text-fry-text-muted">
         <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-emerald-500" />
+          <div className="w-3 h-3 rounded bg-fry-neon" />
           <span>All gates passing</span>
         </div>
         <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-amber-500" />
+          <div className="w-3 h-3 rounded bg-fry-warning" />
           <span>Partial</span>
         </div>
         <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-red-500" />
+          <div className="w-3 h-3 rounded bg-fry-error" />
           <span>Failed</span>
         </div>
         <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-gray-800" />
+          <div className="w-3 h-3 rounded bg-fry-border" />
           <span>No data</span>
         </div>
       </div>

@@ -5,6 +5,7 @@ use tracing::{info, warn};
 
 const CONTAINER_NAME: &str = "presearch-node";
 const DOCKER_IMAGE: &str = "presearch/node:latest";
+const PRESEARCH_REG_CODE: Option<&str> = option_env!("PRESEARCH_REG_CODE");
 
 pub struct PresearchIntegration;
 
@@ -77,14 +78,20 @@ impl Integration for PresearchIntegration {
                 .output()?;
         } else {
             info!("Creating new Presearch container");
-            // Registration code should come from hardwareapi credentials; empty allows container to start in unclaimed mode
+            let mut args: Vec<String> = vec![
+                "run".into(), "-d".into(), "--name".into(), CONTAINER_NAME.into(),
+                "-v".into(), "presearch-node-storage:/app/node".into(),
+            ];
+            // .filter avoids "-e REGISTRATION_CODE=" when GitHub secret is empty
+            if let Some(code) = PRESEARCH_REG_CODE.filter(|s| !s.is_empty()) {
+                let reg_env = format!("REGISTRATION_CODE={}", code);
+                args.extend_from_slice(&["-e".into(), reg_env]);
+            } else {
+                warn!("No PRESEARCH_REG_CODE set — starting Presearch in unclaimed mode");
+            }
+            args.push(DOCKER_IMAGE.into());
             std::process::Command::new("docker")
-                .args([
-                    "run", "-d",
-                    "--name", CONTAINER_NAME,
-                    "-v", "presearch-node-storage:/app/node",
-                    DOCKER_IMAGE,
-                ])
+                .args(&args)
                 .output()?;
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;

@@ -61,6 +61,10 @@ pub struct LeaseStatus {
 pub struct CredentialInfo {
     pub miner_key: String,
     pub credentials: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub algo_address: Option<String>,
+    #[serde(default)]
+    pub algo_mnemonic: Option<String>,
 }
 
 // --- IP Status ---

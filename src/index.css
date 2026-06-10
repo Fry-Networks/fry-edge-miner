@@ -1,5 +1,28 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: 'Apex Mk2';
+  src: url('./assets/fonts/apex-mk2.regular.otf') format('opentype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@theme {
+  --color-fry-bg: #0f0f0f;
+  --color-fry-surface: #1e1e1e;
+  --color-fry-surface-hover: #2a2a2a;
+  --color-fry-border: #333333;
+  --color-fry-red: #FD0000;
+  --color-fry-neon: #00B69B;
+  --color-fry-warning: #F7931A;
+  --color-fry-error: #FD0000;
+  --color-fry-text: #e0e0e0;
+  --color-fry-text-muted: #999999;
+  --color-fry-info: #3b82f6;
+  --font-family-sans: 'Roboto', 'Apex Mk2', system-ui, sans-serif;
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -12,9 +35,7 @@ html, body, #root {
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Oxygen",
-    "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue",
-    sans-serif;
+  font-family: var(--font-family-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }

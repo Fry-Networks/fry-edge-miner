@@ -30,7 +30,7 @@
         "https://github.com/Fry-Foundation/fry-edge-miner/releases/latest/download/latest.json"
       ],
       "dialog": true,
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU4RjRDNDZBNDcwMjk4QTgKUldTb21BSkhhc1QwV0F6V1dxeFF4bEhFWmVGMGM0SmYrQTgwNzJOKzJXNzFDQTZLVVFNQzVWQjkK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRGMkQyMzc2MjUwOUNERkIKUldUN3pRa2xkaU10VDNyTHNwVVN0NUxNUjlndGNzbHI4UUtJRG5OcWlNOWtKQm9KbVZmd0drT0oK"
     }
   },
   "bundle": {

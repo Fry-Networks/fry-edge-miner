@@ -15,7 +15,7 @@ export function RewardBar({ active, total, proportion }: RewardBarProps) {
           <div
             key={idx}
             className={`flex-1 h-3 rounded ${
-              idx < active ? 'bg-emerald-500' : 'bg-gray-700'
+              idx < active ? 'bg-fry-neon' : 'bg-fry-border'
             }`}
           />
         ))}
@@ -23,10 +23,10 @@ export function RewardBar({ active, total, proportion }: RewardBarProps) {
 
       {/* Label */}
       <div className="flex justify-between items-center">
-        <span className="text-sm text-gray-400">
+        <span className="text-sm text-fry-text-muted">
           {active}/{total} active
         </span>
-        <span className="text-sm font-semibold text-emerald-400">
+        <span className="text-sm font-semibold text-fry-neon">
           {percentage}%
         </span>
       </div>

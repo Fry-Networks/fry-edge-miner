@@ -74,8 +74,8 @@ export default function Migration() {
   if (step === 0) {
     return (
       <div className="p-8">
-        <div className="bg-gray-900/80 border border-gray-800/60 rounded-xl p-8 text-center">
-          <div className="animate-pulse text-gray-400">Checking for existing FryHub installation...</div>
+        <div className="bg-fry-surface/80 border border-fry-border/60 rounded-xl p-8 text-center">
+          <div className="animate-pulse text-fry-text-muted">Checking for existing FryHub installation...</div>
         </div>
       </div>
     )
@@ -84,9 +84,9 @@ export default function Migration() {
   if (step === -1) {
     return (
       <div className="p-8">
-        <div className="bg-gray-900/80 border border-gray-800/60 rounded-xl p-8 text-center">
-          <h2 className="text-xl font-semibold text-white mb-2">No Migration Needed</h2>
-          <p className="text-gray-400">No existing FryHub installation was detected on this machine.</p>
+        <div className="bg-fry-surface/80 border border-fry-border/60 rounded-xl p-8 text-center">
+          <h2 className="text-xl font-semibold text-fry-text mb-2">No Migration Needed</h2>
+          <p className="text-fry-text-muted">No existing FryHub installation was detected on this machine.</p>
         </div>
       </div>
     )
@@ -94,24 +94,24 @@ export default function Migration() {
 
   return (
     <div className="p-8 space-y-6">
-      <h1 className="text-3xl font-bold text-white">FryHub → FEM Migration</h1>
+      <h1 className="text-3xl font-bold text-fry-text">FryHub → FEM Migration</h1>
 
       {/* Step 1: Detected */}
       {step >= 1 && migrationInfo && (
-        <div className="bg-gray-900/80 border border-gray-800/60 rounded-xl p-6 space-y-4">
+        <div className="bg-fry-surface/80 border border-fry-border/60 rounded-xl p-6 space-y-4">
           <div className="flex items-center gap-3">
-            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-400 text-sm font-bold">1</span>
-            <h2 className="text-lg font-semibold text-white">Existing Installation Detected</h2>
+            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-fry-red/20 text-fry-red text-sm font-bold">1</span>
+            <h2 className="text-lg font-semibold text-fry-text">Existing Installation Detected</h2>
           </div>
-          <p className="text-gray-400 ml-11">
+          <p className="text-fry-text-muted ml-11">
             Found {migrationInfo.found_keys.length} active miner{migrationInfo.found_keys.length > 1 ? 's' : ''} in FryHub:
           </p>
           <div className="ml-11 space-y-2">
             {migrationInfo.found_keys.map((mk) => (
-              <div key={mk.key} className="flex items-center gap-3 bg-gray-800/50 rounded-lg px-4 py-3">
-                <span className="text-xs font-mono bg-gray-700 px-2 py-1 rounded text-gray-300">{mk.miner_type}</span>
-                <span className="text-gray-300">{mk.display_name}</span>
-                <span className="text-xs text-gray-500 font-mono ml-auto">{mk.key.slice(0, 20)}...</span>
+              <div key={mk.key} className="flex items-center gap-3 bg-fry-border/50 rounded-lg px-4 py-3">
+                <span className="text-xs font-mono bg-fry-border px-2 py-1 rounded text-fry-text">{mk.miner_type}</span>
+                <span className="text-fry-text">{mk.display_name}</span>
+                <span className="text-xs text-fry-text-muted font-mono ml-auto">{mk.key.slice(0, 20)}...</span>
               </div>
             ))}
           </div>
@@ -119,7 +119,7 @@ export default function Migration() {
             <div className="ml-11">
               <button
                 onClick={() => setStep(2)}
-                className="px-6 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg font-medium transition-colors"
+                className="px-6 py-2 bg-fry-red/60 hover:bg-fry-red/50 rounded-lg font-medium transition-colors"
               >
                 Continue
               </button>
@@ -130,47 +130,47 @@ export default function Migration() {
 
       {/* Step 2: Confirm */}
       {step >= 2 && migrationInfo && (
-        <div className="bg-gray-900/80 border border-gray-800/60 rounded-xl p-6 space-y-4">
+        <div className="bg-fry-surface/80 border border-fry-border/60 rounded-xl p-6 space-y-4">
           <div className="flex items-center gap-3">
-            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-400 text-sm font-bold">2</span>
-            <h2 className="text-lg font-semibold text-white">Migration Plan</h2>
+            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-fry-red/20 text-fry-red text-sm font-bold">2</span>
+            <h2 className="text-lg font-semibold text-fry-text">Migration Plan</h2>
           </div>
-          <p className="text-gray-400 ml-11">
+          <p className="text-fry-text-muted ml-11">
             FEM will consolidate your miners into a single device with these integrations enabled:
           </p>
           <div className="ml-11 flex flex-wrap gap-2">
             {migrationInfo.suggested_integrations.map((id) => (
-              <span key={id} className="px-3 py-1 bg-emerald-500/20 text-emerald-400 rounded-full text-sm">
+              <span key={id} className="px-3 py-1 bg-fry-red/20 text-fry-red rounded-full text-sm">
                 {INTEGRATION_LABELS[id] || id}
               </span>
             ))}
           </div>
           <div className="ml-11 space-y-3">
             <label className="block">
-              <span className="text-sm text-gray-400">Wallet Address</span>
+              <span className="text-sm text-fry-text-muted">Wallet Address</span>
               <input
                 type="text"
                 value={wallet}
                 onChange={(e) => setWallet(e.target.value)}
                 placeholder="Enter your Algorand wallet address (58 chars)"
-                className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white placeholder-gray-600 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500/50"
+                className="mt-1 block w-full bg-fry-surface-hover border border-fry-border rounded-lg px-4 py-2 text-fry-text placeholder-fry-text-muted/50 focus:border-fry-red focus:ring-1 focus:ring-fry-red/50"
               />
             </label>
           </div>
           {error && (
-            <p className="ml-11 text-red-400 text-sm">{error}</p>
+            <p className="ml-11 text-fry-error text-sm">{error}</p>
           )}
           {step === 2 && (
             <div className="ml-11 flex gap-3">
               <button
                 onClick={executeMigration}
-                className="px-6 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg font-medium transition-colors"
+                className="px-6 py-2 bg-fry-red/60 hover:bg-fry-red/50 rounded-lg font-medium transition-colors"
               >
                 Migrate to FEM
               </button>
               <button
                 onClick={() => setStep(1)}
-                className="px-6 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg font-medium transition-colors"
+                className="px-6 py-2 bg-fry-border hover:bg-fry-border/80 rounded-lg font-medium transition-colors text-fry-text"
               >
                 Back
               </button>
@@ -181,12 +181,12 @@ export default function Migration() {
 
       {/* Step 3: Migrating */}
       {step === 3 && (
-        <div className="bg-gray-900/80 border border-gray-800/60 rounded-xl p-6">
+        <div className="bg-fry-surface/80 border border-fry-border/60 rounded-xl p-6">
           <div className="flex items-center gap-3">
-            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-amber-500/20 text-amber-400 text-sm font-bold">3</span>
-            <h2 className="text-lg font-semibold text-white">Migrating...</h2>
+            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-fry-warning/20 text-fry-warning text-sm font-bold">3</span>
+            <h2 className="text-lg font-semibold text-fry-text">Migrating...</h2>
           </div>
-          <div className="ml-11 mt-3 animate-pulse text-gray-400">
+          <div className="ml-11 mt-3 animate-pulse text-fry-text-muted">
             Setting up your Fry Edge Miner device...
           </div>
         </div>
@@ -194,27 +194,27 @@ export default function Migration() {
 
       {/* Step 4: Done */}
       {step === 4 && result && (
-        <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-6 space-y-4">
+        <div className="bg-fry-neon/10 border border-fry-neon/30 rounded-xl p-6 space-y-4">
           <div className="flex items-center gap-3">
-            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-400 text-sm font-bold">✓</span>
-            <h2 className="text-lg font-semibold text-emerald-400">Migration Complete</h2>
+            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-fry-neon/20 text-fry-neon text-sm font-bold">✓</span>
+            <h2 className="text-lg font-semibold text-fry-neon">Migration Complete</h2>
           </div>
           <div className="ml-11 space-y-3">
             <div>
-              <p className="text-sm text-gray-500">New FEM Key</p>
-              <p className="font-mono text-sm text-white break-all">{result.fem_key}</p>
+              <p className="text-sm text-fry-text-muted">New FEM Key</p>
+              <p className="font-mono text-sm text-fry-text break-all">{result.fem_key}</p>
             </div>
             <div>
-              <p className="text-sm text-gray-500">Enabled Integrations</p>
+              <p className="text-sm text-fry-text-muted">Enabled Integrations</p>
               <div className="flex flex-wrap gap-2 mt-1">
                 {result.enabled_integrations.map((id) => (
-                  <span key={id} className="px-3 py-1 bg-emerald-500/20 text-emerald-400 rounded-full text-sm">
+                  <span key={id} className="px-3 py-1 bg-fry-neon/20 text-fry-neon rounded-full text-sm">
                     {INTEGRATION_LABELS[id] || id}
                   </span>
                 ))}
               </div>
             </div>
-            <p className="text-xs text-gray-500 mt-4">
+            <p className="text-xs text-fry-text-muted/60 mt-4">
               Your old miner keys will be deactivated after the next reward cycle.
             </p>
           </div>

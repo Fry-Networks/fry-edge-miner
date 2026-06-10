@@ -55,7 +55,10 @@ fn main() {
             let mut registry = IntegrationRegistry::new();
             registry.register(Box::new(integrations::mysterium::MysteriumIntegration));
             registry.register(Box::new(integrations::presearch::PresearchIntegration));
-            registry.register(Box::new(integrations::diiisco::DiiiscoIntegration));
+            registry.register(Box::new(integrations::diiisco::DiiiscoIntegration {
+                api_client: api_client.clone(),
+                config: config_store.clone(),
+            }));
             registry.register(Box::new(integrations::space_acres::SpaceAcresIntegration));
             registry.register(Box::new(integrations::aem::AemIntegration));
 

@@ -9,13 +9,13 @@ export default function Integrations() {
       {/* Page Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-4xl font-bold text-white mb-2">Integrations</h1>
-          <p className="text-gray-400">
+          <h1 className="text-4xl font-bold text-fry-text mb-2">Integrations</h1>
+          <p className="text-fry-text-muted">
             Enable or disable earning integrations
           </p>
         </div>
-        <div className="bg-emerald-500/20 border border-emerald-500/50 rounded-lg px-4 py-2">
-          <p className="text-sm font-medium text-emerald-400">
+        <div className="bg-fry-red/20 border border-fry-red/50 rounded-lg px-4 py-2">
+          <p className="text-sm font-medium text-fry-red">
             {integrations.filter((i) => i.enabled).length}/{integrations.length} Active
           </p>
         </div>
@@ -27,10 +27,10 @@ export default function Integrations() {
           {Array.from({ length: 5 }).map((_, idx) => (
             <div
               key={idx}
-              className="bg-gray-900/80 border border-gray-800/60 rounded-xl p-5 animate-pulse"
+              className="bg-fry-surface/80 border border-fry-border/60 rounded-xl p-5 animate-pulse"
             >
-              <div className="h-6 bg-gray-800 rounded mb-4" />
-              <div className="h-32 bg-gray-800 rounded" />
+              <div className="h-6 bg-fry-border rounded mb-4" />
+              <div className="h-32 bg-fry-border rounded" />
             </div>
           ))}
         </div>

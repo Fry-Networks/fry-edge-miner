@@ -1,14 +1,26 @@
 use super::{HealthStatus, Integration, PocGateData};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::{info, warn};
+use crate::api::client::ApiClient;
+use crate::config::store::ConfigStore;
 
-const DEPLOY_DIR: &str = "C:/tmp/diiisco-deploy";
 const HEALTH_URL: &str = "http://localhost:8181/health";
-const BEARER_TOKEN: &str = "sk-diiisco-prod-key";
+const DIIISCO_BEARER_TOKEN: Option<&str> = option_env!("DIIISCO_BEARER_TOKEN");
 
-pub struct DiiiscoIntegration;
+pub struct DiiiscoIntegration {
+    pub api_client: Arc<ApiClient>,
+    pub config: Arc<ConfigStore>,
+}
+
+fn deploy_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .expect("no local data dir")
+        .join("FryEdgeMiner")
+        .join("diiisco")
+}
 
 fn docker_available() -> bool {
     std::process::Command::new("docker")
@@ -20,8 +32,8 @@ fn docker_available() -> bool {
         .unwrap_or(false)
 }
 
-fn compose_file() -> std::path::PathBuf {
-    Path::new(DEPLOY_DIR).join("docker-compose.yml")
+fn compose_file() -> PathBuf {
+    deploy_dir().join("docker-compose.yml")
 }
 
 #[async_trait]
@@ -39,25 +51,58 @@ impl Integration for DiiiscoIntegration {
             warn!("Docker not available — Diiisco requires Docker");
             return Ok(());
         }
-        let compose = compose_file();
-        if !compose.exists() {
-            warn!(
-                "DEFERRED: Diiisco deploy directory not found at {}. \
-                Requires git clone + ALGO credentials to initialize.",
-                DEPLOY_DIR
-            );
-            return Ok(());
-        }
-        info!("Pulling Diiisco images");
+
+        let deploy_dir = dirs::data_local_dir()
+            .ok_or_else(|| anyhow::anyhow!("Cannot resolve local app data dir"))?
+            .join("FryEdgeMiner")
+            .join("diiisco");
+
+        // Write Docker files from embedded content
+        let node_dir = deploy_dir.join("diiisco-node");
+        tokio::fs::create_dir_all(&node_dir).await?;
+        tokio::fs::write(
+            deploy_dir.join("docker-compose.yml"),
+            include_str!("diiisco_deploy/docker-compose.yml"),
+        )
+        .await?;
+        tokio::fs::write(
+            node_dir.join("Dockerfile"),
+            include_str!("diiisco_deploy/diiisco-node/Dockerfile"),
+        )
+        .await?;
+
+        // Fetch credentials from hardwareapi
+        let cfg = self.config.get();
+        let miner_key = cfg.miner_key.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("Miner key not set — complete device registration before installing Diiisco")
+        })?;
+        let creds = crate::api::credentials::lookup(&self.api_client, miner_key).await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch credentials: {}", e))?;
+        let algo_address = creds.algo_address.ok_or_else(|| {
+            anyhow::anyhow!("Device has no Algorand wallet — re-register or contact support")
+        })?;
+        let algo_mnemonic = creds.algo_mnemonic.ok_or_else(|| {
+            anyhow::anyhow!("Device Algorand mnemonic unavailable — contact support")
+        })?;
+
+        // Docker compose build with credentials as env vars (NOT command-line args)
+        let bearer = DIIISCO_BEARER_TOKEN.unwrap_or("sk-diiisco-prod-key");
+        info!("Building Diiisco Docker image");
         let output = std::process::Command::new("docker")
-            .args(["compose", "-f", &compose.to_string_lossy(), "pull"])
+            .args(["compose", "build"])
+            .env("ALGO_ADDRESS", &algo_address)
+            .env("ALGO_MNEMONIC", &algo_mnemonic)
+            .env("DIIISCO_API_KEY", bearer)
+            .current_dir(&deploy_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .output()?;
+
         if !output.status.success() {
-            warn!(
-                stderr = %String::from_utf8_lossy(&output.stderr),
-                "Failed to pull Diiisco images"
-            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("docker compose build failed: {}", stderr);
         }
+        info!("Diiisco install complete — image built with per-device wallet");
         Ok(())
     }
 
@@ -67,7 +112,7 @@ impl Integration for DiiiscoIntegration {
         }
         let compose = compose_file();
         if !compose.exists() {
-            anyhow::bail!("Diiisco deploy directory not found at {}", DEPLOY_DIR);
+            anyhow::bail!("Diiisco deploy directory not found at {}", deploy_dir().display());
         }
         info!("Starting Diiisco containers");
         let output = std::process::Command::new("docker")
@@ -98,12 +143,16 @@ impl Integration for DiiiscoIntegration {
         if !docker_available() {
             return HealthStatus::Unhealthy("Docker not available".to_string());
         }
+        let token = DIIISCO_BEARER_TOKEN.unwrap_or("");
+        if DIIISCO_BEARER_TOKEN.is_none() {
+            warn!("No DIIISCO_BEARER_TOKEN set — health check may fail");
+        }
         let client = reqwest::Client::new();
         match tokio::time::timeout(
             tokio::time::Duration::from_secs(5),
             client
                 .get(HEALTH_URL)
-                .bearer_auth(BEARER_TOKEN)
+                .bearer_auth(token)
                 .send(),
         )
         .await
