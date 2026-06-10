@@ -52,12 +52,59 @@ jobs:
         with:
           name: fem-installer-nsis
           path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      - name: Upload NSIS .sig
+        uses: actions/upload-artifact@v4
+        with:
+          name: fem-installer-nsis-sig
+          path: src-tauri/target/release/bundle/nsis/*.sig
+          if-no-files-found: error
 
       - name: Upload MSI installer
         uses: actions/upload-artifact@v4
         with:
           name: fem-installer-msi
           path: src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
+
+      - name: Upload MSI .sig
+        uses: actions/upload-artifact@v4
+        with:
+          name: fem-installer-msi-sig
+          path: src-tauri/target/release/bundle/msi/*.sig
+          if-no-files-found: error
+
+      - name: Compose latest.json
+        shell: bash
+        run: |
+          NSIS_SIG=$(cat src-tauri/target/release/bundle/nsis/*.sig)
+          VERSION=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          NSIS_EXE=$(ls src-tauri/target/release/bundle/nsis/*.exe | head -1 | xargs -I{} basename {})
+          python3 -c "
+          import json
+          print(json.dumps({
+            'version': '${VERSION}',
+            'notes': 'FEM ${VERSION}',
+            'pub_date': '${PUB_DATE}',
+            'platforms': {
+              'windows-x86_64': {
+                'signature': open('src-tauri/target/release/bundle/nsis/' + [f for f in __import__('os').listdir('src-tauri/target/release/bundle/nsis') if f.endswith('.sig')][0]).read().strip(),
+                'url': 'https://github.com/Fry-Foundation/fry-edge-miner/releases/download/v${VERSION}/${NSIS_EXE}'
+              }
+            }
+          }, indent=2))
+          " > latest.json
+          echo "Generated latest.json:"
+          cat latest.json
+
+      - name: Upload latest.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: fem-latest-json
+          path: latest.json
+          if-no-files-found: error
 
   release-upload:
     needs: build-windows
@@ -74,4 +121,7 @@ jobs:
         with:
           files: |
             fem-installer-nsis/*.exe
+            fem-installer-nsis-sig/*.sig
             fem-installer-msi/*.msi
+            fem-installer-msi-sig/*.sig
+            fem-latest-json/latest.json
