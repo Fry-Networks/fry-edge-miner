@@ -3,7 +3,7 @@ import { useDevice } from '../hooks/useDevice'
 import { useSettings } from '../hooks/useSettings'
 
 export default function Settings() {
-  const { device, register, loading: deviceLoading } = useDevice()
+  const { device, register, deregister, loading: deviceLoading } = useDevice()
   const { config, save, loading: configLoading } = useSettings()
   const [walletInput, setWalletInput] = useState('')
   const [apiUrlInput, setApiUrlInput] = useState('')
@@ -28,6 +28,18 @@ export default function Settings() {
       setTimeout(() => setSavedMessage(''), 3000)
     } catch (error) {
       setSavedMessage('Failed to save API URL')
+    }
+  }
+
+  const handleDeregister = async () => {
+    if (!window.confirm('Are you sure you want to deregister this device? This will remove your miner key and stop all integrations.')) return
+    try {
+      await deregister()
+      setWalletInput('')
+      setSavedMessage('Device deregistered successfully')
+      setTimeout(() => setSavedMessage(''), 3000)
+    } catch (error) {
+      setSavedMessage(`Deregistration failed: ${error}`)
     }
   }
 
@@ -99,6 +111,21 @@ export default function Settings() {
                   Rewards will be sent to this address
                 </p>
               </div>
+
+              {/* Deregister */}
+              {device?.miner_key && (
+                <div className="pt-4 border-t border-fry-border/40">
+                  <button
+                    onClick={handleDeregister}
+                    className="px-6 py-2 bg-red-600/20 text-red-400 hover:bg-red-600/30 border border-red-500/50 rounded-lg font-medium transition text-sm"
+                  >
+                    Deregister Device
+                  </button>
+                  <p className="text-xs text-fry-text-muted/60 mt-1">
+                    Remove this device from the network and clear your miner key
+                  </p>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -144,7 +171,7 @@ export default function Settings() {
           <div className="space-y-3 text-sm">
             <div className="flex justify-between">
               <span className="text-fry-text-muted">App Version</span>
-              <span className="text-fry-text font-mono">0.2.0</span>
+              <span className="text-fry-text font-mono">0.2.1</span>
             </div>
             <div className="flex justify-between">
               <span className="text-fry-text-muted">Build Type</span>
