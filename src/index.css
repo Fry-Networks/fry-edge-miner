@@ -8,19 +8,33 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: 'Apex Mk2';
+  src: url('./assets/fonts/apex-mk2.light-condensed.otf') format('opentype');
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+
 @theme {
   --color-fry-bg: #0f0f0f;
   --color-fry-surface: #1e1e1e;
   --color-fry-surface-hover: #2a2a2a;
+  --color-fry-surface-2: #252525;
   --color-fry-border: #333333;
+  --color-fry-border-subtle: #2a2a2a;
   --color-fry-red: #FD0000;
+  --color-fry-red-dim: #8b0000;
   --color-fry-neon: #00B69B;
+  --color-fry-neon-dim: #007d6c;
   --color-fry-warning: #F7931A;
   --color-fry-error: #FD0000;
   --color-fry-text: #e0e0e0;
   --color-fry-text-muted: #999999;
   --color-fry-info: #3b82f6;
-  --font-family-sans: 'Roboto', 'Apex Mk2', system-ui, sans-serif;
+  --font-family-sans: 'Roboto', system-ui, sans-serif;
+  --font-family-brand: 'Apex Mk2', 'Roboto', system-ui, sans-serif;
+  --font-family-mono: 'Roboto Mono', 'Menlo', 'Consolas', monospace;
 }
 
 * {
@@ -38,4 +52,21 @@ body {
   font-family: var(--font-family-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-fry-bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-fry-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-fry-surface-hover);
 }

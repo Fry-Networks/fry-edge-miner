@@ -12,6 +12,7 @@ export function StatusIndicator({
 }: StatusIndicatorProps) {
   let bgColor = 'bg-fry-text-muted'
   let label = 'Unknown'
+  let pulse = false
 
   // Determine color and label based on status
   if (typeof status === 'string') {
@@ -21,6 +22,7 @@ export function StatusIndicator({
       case 'Running':
         bgColor = 'bg-fry-neon'
         label = status
+        pulse = true
         break
       // Warning/Transitional states
       case 'Starting':
@@ -29,6 +31,7 @@ export function StatusIndicator({
       case 'Restarting':
         bgColor = 'bg-fry-warning'
         label = status
+        pulse = true
         break
       // Error/Offline states
       case 'Unhealthy':
@@ -53,8 +56,8 @@ export function StatusIndicator({
 
   return (
     <span className="flex items-center gap-2">
-      <span className={`h-2.5 w-2.5 rounded-full ${bgColor}`} />
-      {showLabel && <span className="text-sm text-fry-text">{label}</span>}
+      <span className={`h-2 w-2 rounded-full ${bgColor} ${pulse ? 'animate-pulse' : ''}`} />
+      {showLabel && <span className="text-xs text-fry-text-muted">{label}</span>}
     </span>
   )
 }

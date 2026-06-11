@@ -1,4 +1,5 @@
 import { useIntegrations } from '../hooks/useIntegrations'
+import { PageHeader } from '../components/PageHeader'
 
 export default function Updates() {
   const { integrations, loading } = useIntegrations()
@@ -8,65 +9,64 @@ export default function Updates() {
   }
 
   return (
-    <div className="p-8 space-y-8">
-      {/* Page Header */}
-      <div>
-        <h1 className="text-4xl font-bold text-fry-text mb-2">Updates</h1>
-        <p className="text-fry-text-muted">Monitor FEM and partner versions</p>
-      </div>
+    <div className="p-6 lg:p-8 space-y-6">
+      <PageHeader title="Updates" subtitle="Monitor FEM and integration versions" />
 
       {/* Status Card */}
-      <div className="bg-fry-neon/20 border border-fry-neon/50 rounded-xl p-6">
-        <p className="text-fry-neon font-medium mb-1">Up to date</p>
-        <p className="text-sm text-fry-neon/90">
-          FEM is running the latest version
-        </p>
+      <div className="bg-fry-surface border-l-4 border-l-fry-neon border border-fry-border rounded-lg p-5">
+        <div className="flex items-center gap-3">
+          <span className="h-2 w-2 rounded-full bg-fry-neon animate-pulse" />
+          <div>
+            <p className="text-sm font-medium text-fry-text">Up to date</p>
+            <p className="text-xs text-fry-text-muted">FEM is running the latest version</p>
+          </div>
+        </div>
       </div>
 
       {/* Check Updates Button */}
       <button
         onClick={handleCheckUpdates}
-        className="px-6 py-3 bg-fry-red/20 text-fry-red hover:bg-fry-red/30 border border-fry-red/50 rounded-lg font-medium transition"
+        className="inline-flex items-center gap-2 px-5 py-2 bg-fry-surface border border-fry-border hover:bg-fry-surface-hover text-fry-text text-sm font-medium rounded-lg transition-colors"
       >
+        <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M14 8A6 6 0 114.8 3.8" />
+          <path d="M14 2v4h-4" />
+        </svg>
         Check for Updates
       </button>
 
       {/* Partner Versions */}
-      <div className="space-y-4">
-        <h2 className="text-xl font-semibold text-fry-text">Partner Versions</h2>
+      <div className="space-y-3">
+        <p className="text-xs font-medium uppercase tracking-widest text-fry-text-muted">Partner Versions</p>
 
         {loading ? (
-          <div className="space-y-2">
+          <div className="space-y-1">
             {Array.from({ length: 5 }).map((_, idx) => (
               <div
                 key={idx}
-                className="bg-fry-surface/80 border border-fry-border/60 rounded-xl p-4 animate-pulse"
+                className="rounded-lg p-3 animate-pulse"
               >
-                <div className="h-6 bg-fry-border rounded" />
+                <div className="h-4 bg-fry-border-subtle rounded w-32" />
               </div>
             ))}
           </div>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-1">
             {integrations.map((integration) => (
               <div
                 key={integration.id}
-                className="bg-fry-surface/80 border border-fry-border/60 rounded-xl p-4 flex items-center justify-between"
+                className="flex items-center justify-between px-4 py-3 rounded-lg hover:bg-fry-surface-hover transition-colors"
               >
-                <div>
-                  <p className="text-fry-text font-medium">
-                    {integration.display_name}
-                  </p>
-                </div>
-                <div>
-                  {integration.version ? (
-                    <p className="text-fry-text-muted font-mono text-sm">
-                      v{integration.version}
-                    </p>
-                  ) : (
-                    <p className="text-fry-text-muted/60 text-sm">No version</p>
-                  )}
-                </div>
+                <span className="text-sm font-medium text-fry-text">
+                  {integration.display_name}
+                </span>
+                {integration.version ? (
+                  <span className="font-mono text-xs bg-fry-surface-2 text-fry-text-muted px-2 py-0.5 rounded">
+                    v{integration.version}
+                  </span>
+                ) : (
+                  <span className="text-xs text-fry-text-muted italic">Not installed</span>
+                )}
               </div>
             ))}
           </div>

@@ -12,6 +12,11 @@ export function PoCSlotGrid({ slots }: PoCSlotGridProps) {
   // Create a map of slot_index -> slot for fast lookup
   const slotMap = new Map(slots.map((s) => [s.slot_index, s]))
 
+  // Count passing slots
+  const allPassCount = slots.filter(
+    (s) => s.data && s.online && s.mac_match && s.pol && s.poi && s.poa
+  ).length
+
   // Generate 144 cells
   const cells = Array.from({ length: GRID_SIZE }).map((_, idx) => {
     const slot = slotMap.get(idx)
@@ -45,9 +50,34 @@ export function PoCSlotGrid({ slots }: PoCSlotGridProps) {
   })
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
+      {/* Header with count + legend */}
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-fry-text-muted">
+          {allPassCount}/{slots.length} slots passing all gates
+        </span>
+        <div className="flex gap-3 text-xs text-fry-text-muted">
+          <div className="flex items-center gap-1.5">
+            <div className="w-2.5 h-2.5 rounded-sm bg-fry-neon" />
+            <span>Pass</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="w-2.5 h-2.5 rounded-sm bg-fry-warning" />
+            <span>Partial</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="w-2.5 h-2.5 rounded-sm bg-fry-error" />
+            <span>Fail</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="w-2.5 h-2.5 rounded-sm bg-fry-border" />
+            <span>Empty</span>
+          </div>
+        </div>
+      </div>
+
       {/* Grid */}
-      <div className="grid grid-cols-12 gap-1 bg-fry-border/30 p-4 rounded-xl">
+      <div className="grid grid-cols-12 gap-[3px] bg-fry-border/30 p-4 rounded-xl">
         {cells.map((cell) => (
           <div
             key={cell.index}
@@ -56,7 +86,7 @@ export function PoCSlotGrid({ slots }: PoCSlotGridProps) {
             onMouseLeave={() => setHoveredSlot(null)}
           >
             <div
-              className={`w-full aspect-square rounded ${cell.color} cursor-default transition opacity-80 hover:opacity-100`}
+              className={`w-full aspect-square rounded-sm ${cell.color} cursor-default transition opacity-80 hover:opacity-100`}
               title={
                 cell.slot
                   ? `Slot ${cell.index}: ${cell.slot.tools_count} tools`
@@ -64,9 +94,15 @@ export function PoCSlotGrid({ slots }: PoCSlotGridProps) {
               }
             />
 
-            {/* Tooltip */}
+            {/* Tooltip — flips below for top 2 rows */}
             {hoveredSlot === cell.index && cell.slot && (
-              <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 bg-fry-bg border border-fry-border rounded px-3 py-2 text-xs text-fry-text whitespace-nowrap z-10">
+              <div
+                className={`absolute left-1/2 transform -translate-x-1/2 bg-fry-bg border border-fry-border rounded px-3 py-2 text-xs text-fry-text whitespace-nowrap z-50 ${
+                  cell.index < 24
+                    ? 'top-full mt-1'
+                    : 'bottom-full mb-2'
+                }`}
+              >
                 <div className="font-semibold">Slot {cell.index}</div>
                 <div className="text-fry-text-muted">
                   {cell.slot.tools_count} tools
@@ -78,26 +114,6 @@ export function PoCSlotGrid({ slots }: PoCSlotGridProps) {
             )}
           </div>
         ))}
-      </div>
-
-      {/* Legend */}
-      <div className="flex gap-4 text-xs text-fry-text-muted">
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-fry-neon" />
-          <span>All gates passing</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-fry-warning" />
-          <span>Partial</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-fry-error" />
-          <span>Failed</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-fry-border" />
-          <span>No data</span>
-        </div>
       </div>
     </div>
   )

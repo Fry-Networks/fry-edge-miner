@@ -1,25 +1,23 @@
 import { useIntegrations } from '../hooks/useIntegrations'
 import { IntegrationCard } from '../components/IntegrationCard'
+import { PageHeader } from '../components/PageHeader'
 
 export default function Integrations() {
   const { integrations, loading, toggle } = useIntegrations()
 
+  const enabledCount = integrations.filter((i) => i.enabled).length
+
   return (
-    <div className="p-8 space-y-8">
-      {/* Page Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-4xl font-bold text-fry-text mb-2">Integrations</h1>
-          <p className="text-fry-text-muted">
-            Enable or disable earning integrations
-          </p>
-        </div>
-        <div className="bg-fry-red/20 border border-fry-red/50 rounded-lg px-4 py-2">
-          <p className="text-sm font-medium text-fry-red">
-            {integrations.filter((i) => i.enabled).length}/{integrations.length} Active
-          </p>
-        </div>
-      </div>
+    <div className="p-6 lg:p-8 space-y-6">
+      <PageHeader
+        title="Integrations"
+        subtitle="Enable or disable earning integrations"
+        action={
+          <span className="bg-fry-surface border border-fry-border text-fry-text-muted text-xs px-3 py-1 rounded-full">
+            <span className="text-fry-neon font-medium">{enabledCount}</span>/{integrations.length} active
+          </span>
+        }
+      />
 
       {/* Integration Grid */}
       {loading ? (
@@ -27,10 +25,17 @@ export default function Integrations() {
           {Array.from({ length: 5 }).map((_, idx) => (
             <div
               key={idx}
-              className="bg-fry-surface/80 border border-fry-border/60 rounded-xl p-5 animate-pulse"
+              className="bg-fry-surface border border-fry-border rounded-xl p-5 animate-pulse"
             >
-              <div className="h-6 bg-fry-border rounded mb-4" />
-              <div className="h-32 bg-fry-border rounded" />
+              <div className="flex items-center justify-between mb-3">
+                <div className="h-4 w-20 bg-fry-border-subtle rounded" />
+                <div className="h-5 w-9 bg-fry-border-subtle rounded-full" />
+              </div>
+              <div className="space-y-2 border-t border-fry-border-subtle pt-3">
+                <div className="h-3 bg-fry-border-subtle rounded" />
+                <div className="h-3 bg-fry-border-subtle rounded" />
+                <div className="h-3 bg-fry-border-subtle rounded" />
+              </div>
             </div>
           ))}
         </div>
