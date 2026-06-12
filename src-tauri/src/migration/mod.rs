@@ -9,7 +9,6 @@ const FRYHUB_DATA_DIR: &str = "C:/ProgramData/FryNetworks";
 
 const MINER_PREFIXES: &[(&str, &str)] = &[
     ("BM", "Bandwidth Miner"),
-    ("AEM", "AI Edge Miner"),
     ("RDN", "Compute Node"),
     ("SDN", "Storage Decentralization Node"),
     ("SVN", "Storage Validator Node"),
@@ -25,7 +24,6 @@ fn map_type_to_integrations(miner_type: &str) -> Vec<&'static str> {
         "BM" => vec!["mysterium"],
         "RDN" => vec!["presearch", "diiisco"],
         "SDN" | "SVN" => vec!["space_acres"],
-        "AEM" => vec!["aem"],
         _ => vec![],
     }
 }

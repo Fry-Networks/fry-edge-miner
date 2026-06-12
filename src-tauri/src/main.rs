@@ -60,7 +60,6 @@ fn main() {
                 config: config_store.clone(),
             }));
             registry.register(Box::new(integrations::space_acres::SpaceAcresIntegration));
-            registry.register(Box::new(integrations::aem::AemIntegration));
 
             // Restore enabled states from config
             for (id, enabled) in &cfg.integrations_enabled {
