@@ -143,7 +143,7 @@ impl Integration for SpaceAcresIntegration {
         #[cfg(target_os = "windows")]
         {
             let _ = std::process::Command::new("taskkill")
-                .args(&["/IM", "space-acres.exe", "/F"])
+                .args(["/IM", "space-acres.exe", "/F"])
                 .output();
         }
         #[cfg(not(target_os = "windows"))]

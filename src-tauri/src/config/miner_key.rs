@@ -3,6 +3,7 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 
 const PREFIX: &str = "FEM";
+#[allow(dead_code)] // Used by registration flow
 const HEX_LEN: usize = 32;
 
 /// Generate a new FEM miner key: "FEM-" + 32 lowercase hex chars (16 random bytes)
@@ -13,6 +14,7 @@ pub fn generate() -> String {
 }
 
 /// Parse a miner key into (prefix, hex) components, validating format
+#[allow(dead_code)] // Used by registration flow
 pub fn parse(key: &str) -> Result<(String, String)> {
     let parts: Vec<&str> = key.splitn(2, '-').collect();
     if parts.len() != 2 {
@@ -38,6 +40,7 @@ pub fn parse(key: &str) -> Result<(String, String)> {
     Ok((prefix.to_string(), hex_part.to_string()))
 }
 
+#[allow(dead_code)] // Used by registration flow
 pub fn is_valid(key: &str) -> bool {
     parse(key).is_ok()
 }

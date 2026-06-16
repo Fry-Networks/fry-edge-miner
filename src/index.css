@@ -17,24 +17,29 @@
 }
 
 @theme {
-  --color-fry-bg: #0f0f0f;
-  --color-fry-surface: #1e1e1e;
-  --color-fry-surface-hover: #2a2a2a;
-  --color-fry-surface-2: #252525;
-  --color-fry-border: #333333;
-  --color-fry-border-subtle: #2a2a2a;
-  --color-fry-red: #FD0000;
-  --color-fry-red-dim: #8b0000;
+  --color-fry-bg: #0b101a;
+  --color-fry-surface: #111827;
+  --color-fry-surface-hover: #1a2640;
+  --color-fry-surface-2: #172135;
+  --color-fry-border: #1f2a3d;
+  --color-fry-border-subtle: #182234;
+  --color-fry-red: #ef4444;
+  --color-fry-red-dim: #991b1b;
   --color-fry-neon: #00B69B;
   --color-fry-neon-dim: #007d6c;
-  --color-fry-warning: #F7931A;
-  --color-fry-error: #FD0000;
-  --color-fry-text: #e0e0e0;
-  --color-fry-text-muted: #999999;
+  --color-fry-warning: #f97316;
+  --color-fry-error: #ef4444;
+  --color-fry-text: #e5e7eb;
+  --color-fry-text-muted: #94a3b8;
   --color-fry-info: #3b82f6;
   --font-family-sans: 'Roboto', system-ui, sans-serif;
   --font-family-brand: 'Apex Mk2', 'Roboto', system-ui, sans-serif;
   --font-family-mono: 'Roboto Mono', 'Menlo', 'Consolas', monospace;
+}
+
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 
 * {

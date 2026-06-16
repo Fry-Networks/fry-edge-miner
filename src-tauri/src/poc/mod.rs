@@ -19,6 +19,7 @@ pub struct PocSlot {
     pub multiplier: f64,
 }
 
+#[allow(dead_code)] // Phase 3: PoC submission types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntegrationPocData {
     pub enabled: bool,
@@ -26,6 +27,7 @@ pub struct IntegrationPocData {
     pub version: Option<String>,
 }
 
+#[allow(dead_code)] // Phase 3: PoC submission types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PocHardwareDoc {
     pub miner_key: String,

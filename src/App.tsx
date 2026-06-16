@@ -1,112 +1,108 @@
 import { useState, useEffect } from 'react'
 import { BrowserRouter as Router, Routes, Route, NavLink } from 'react-router-dom'
 import { getVersion } from '@tauri-apps/api/app'
+import { LayoutDashboard, Plug, Coins, ArrowUpCircle, Settings as SettingsIcon } from 'lucide-react'
+import { useDevice } from './hooks/useDevice'
 import Dashboard from './pages/Dashboard'
 import Integrations from './pages/Integrations'
 import Rewards from './pages/Rewards'
-import Settings from './pages/Settings'
+import SettingsPage from './pages/Settings'
 import Updates from './pages/Updates'
 import Migration from './pages/Migration'
 
-const icons = {
-  dashboard: (
-    <svg className="w-4 h-4 shrink-0" viewBox="0 0 16 16" fill="currentColor">
-      <rect x="1" y="1" width="6" height="6" rx="1" />
-      <rect x="9" y="1" width="6" height="6" rx="1" />
-      <rect x="1" y="9" width="6" height="6" rx="1" />
-      <rect x="9" y="9" width="6" height="6" rx="1" />
-    </svg>
-  ),
-  integrations: (
-    <svg className="w-4 h-4 shrink-0" viewBox="0 0 16 16" fill="currentColor">
-      <rect x="1" y="2" width="14" height="2" rx="1" />
-      <rect x="1" y="7" width="14" height="2" rx="1" />
-      <rect x="1" y="12" width="14" height="2" rx="1" />
-    </svg>
-  ),
-  rewards: (
-    <svg className="w-4 h-4 shrink-0" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="8" cy="8" r="6" />
-      <path d="M6 8h4M8 6v4" />
-    </svg>
-  ),
-  updates: (
-    <svg className="w-4 h-4 shrink-0" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M7 13V5.4L4.7 7.7 3.3 6.3 8 1.6l4.7 4.7-1.4 1.4L9 5.4V13z" />
-    </svg>
-  ),
-  settings: (
-    <svg className="w-4 h-4 shrink-0" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-      <circle cx="8" cy="8" r="2.5" />
-      <path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.3 3.3l1.4 1.4M11.3 11.3l1.4 1.4M3.3 12.7l1.4-1.4M11.3 4.7l1.4-1.4" />
-    </svg>
-  ),
-}
-
 const navItems = [
-  { to: '/', label: 'Dashboard', icon: icons.dashboard, end: true },
-  { to: '/integrations', label: 'Integrations', icon: icons.integrations },
-  { to: '/rewards', label: 'Rewards', icon: icons.rewards },
-  { to: '/updates', label: 'Updates', icon: icons.updates },
-  { to: '/settings', label: 'Settings', icon: icons.settings },
+  { to: '/', label: 'Dashboard', Icon: LayoutDashboard, end: true },
+  { to: '/integrations', label: 'Integrations', Icon: Plug },
+  { to: '/rewards', label: 'Rewards', Icon: Coins },
+  { to: '/updates', label: 'Updates', Icon: ArrowUpCircle },
+  { to: '/settings', label: 'Settings', Icon: SettingsIcon },
 ]
+
+function GlobeSVG() {
+  return (
+    <svg
+      viewBox="0 0 80 80"
+      fill="none"
+      stroke="#ef4444"
+      strokeOpacity="0.15"
+      strokeWidth="1"
+      className="w-20 h-20 absolute -right-4 -top-4 pointer-events-none"
+      aria-hidden="true"
+    >
+      <circle cx="40" cy="40" r="36" />
+      <ellipse cx="40" cy="40" rx="20" ry="36" />
+      <ellipse cx="40" cy="40" rx="36" ry="14" />
+      <line x1="4" y1="40" x2="76" y2="40" />
+      <line x1="40" y1="4" x2="40" y2="76" />
+      <ellipse cx="40" cy="40" rx="10" ry="36" />
+    </svg>
+  )
+}
 
 export default function App() {
   const [version, setVersion] = useState<string>('\u2014')
+  const { device } = useDevice()
+
   useEffect(() => {
-    getVersion().then((v) => setVersion(`v${v}`)).catch(() => setVersion('v0.2.2'))
+    getVersion().then((v) => setVersion(`v${v}`)).catch(() => setVersion('v0.2.3'))
   }, [])
+
+  const keyPreview = device?.miner_key
+    ? device.miner_key.slice(0, 12) + '\u2026'
+    : '\u2014'
 
   return (
     <Router>
       <div className="flex h-screen bg-fry-bg text-fry-text">
         {/* Sidebar */}
-        <aside className="relative w-64 bg-fry-surface border-r border-fry-border flex flex-col">
-          {/* Brand */}
-          <div className="px-5 py-5 border-b border-fry-border-subtle">
-            <p className="font-brand text-lg tracking-wide text-fry-text leading-none">
+        <aside className="relative w-60 bg-fry-surface border-r border-fry-border flex flex-col shrink-0">
+          {/* Brand header */}
+          <div className="relative overflow-hidden px-5 py-5 border-b border-fry-border-subtle">
+            <GlobeSVG />
+            <p className="font-brand text-base tracking-wide text-fry-text leading-none relative z-10">
               Fry Edge Miner
             </p>
-            <p className="text-[10px] text-fry-text-muted mt-1 tracking-widest uppercase">
+            <p className="text-[10px] text-fry-text-muted mt-1 tracking-widest uppercase relative z-10">
               Edge Mining Client
             </p>
           </div>
 
           {/* Nav */}
-          <nav className="px-3 space-y-0.5 mt-2 pb-14 overflow-y-auto flex-1">
-            {navItems.map((item) => (
+          <nav className="px-2 space-y-0.5 mt-2 pb-20 overflow-y-auto flex-1">
+            {navItems.map(({ to, label, Icon, end }) => (
               <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
+                key={to}
+                to={to}
+                end={end}
                 className={({ isActive }) =>
-                  `flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm transition-colors ${
+                  `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
                     isActive
-                      ? 'bg-fry-surface-hover text-fry-red font-medium'
-                      : 'text-fry-text-muted hover:bg-fry-surface-hover hover:text-fry-text'
+                      ? 'bg-fry-surface-2 border-l-2 border-fry-red text-fry-red font-medium'
+                      : 'text-fry-text-muted hover:bg-fry-surface-2 hover:text-fry-text border-l-2 border-transparent'
                   }`
                 }
               >
-                {item.icon}
-                {item.label}
+                <Icon className="w-4 h-4 shrink-0" />
+                {label}
               </NavLink>
             ))}
           </nav>
 
-          {/* Version footer */}
-          <div className="absolute bottom-0 left-0 right-0 px-4 py-3 border-t border-fry-border-subtle bg-fry-surface">
-            <p className="text-[10px] text-fry-text-muted">{version}</p>
+          {/* Device + version footer */}
+          <div className="absolute bottom-0 left-0 right-0 px-4 py-3 border-t border-fry-border-subtle bg-fry-surface space-y-1">
+            <p className="text-[10px] text-fry-text-muted font-mono truncate">{keyPreview}</p>
+            <p className="text-[10px] text-fry-text-muted/60">{version}</p>
           </div>
         </aside>
 
-        {/* Main Content */}
+        {/* Main content */}
         <main className="flex-1 overflow-y-auto">
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/integrations" element={<Integrations />} />
             <Route path="/rewards" element={<Rewards />} />
             <Route path="/updates" element={<Updates />} />
-            <Route path="/settings" element={<Settings />} />
+            <Route path="/settings" element={<SettingsPage />} />
             <Route path="/migration" element={<Migration />} />
           </Routes>
         </main>

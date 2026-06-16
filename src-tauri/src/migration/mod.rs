@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -57,11 +57,11 @@ pub struct MigrationResult {
     pub migrated_keys: Vec<String>,
 }
 
-/// Detect FryHub installation by scanning known data directories
-pub fn detect_fryhub() -> Option<FryHubInstallation> {
-    let data_dir = PathBuf::from(FRYHUB_DATA_DIR);
+/// Detect FryHub installation by scanning a given data directory
+pub fn detect_fryhub_at(data_dir_path: &str) -> Option<FryHubInstallation> {
+    let data_dir = PathBuf::from(data_dir_path);
     if !data_dir.exists() {
-        info!("No FryHub data directory found at {}", FRYHUB_DATA_DIR);
+        info!("No FryHub data directory found at {}", data_dir_path);
         return None;
     }
 
@@ -94,12 +94,17 @@ pub fn detect_fryhub() -> Option<FryHubInstallation> {
     Some(FryHubInstallation {
         found_keys,
         wallet: None, // Wallet detection from FryHub config is complex — user provides during migration
-        data_dir: FRYHUB_DATA_DIR.to_string(),
+        data_dir: data_dir_path.to_string(),
     })
 }
 
+/// Detect FryHub installation at the default data directory
+pub fn detect_fryhub() -> Option<FryHubInstallation> {
+    detect_fryhub_at(FRYHUB_DATA_DIR)
+}
+
 /// Search a miner directory for key files
-fn find_miner_key_in_dir(dir: &PathBuf, code: &str) -> Option<DetectedMinerKey> {
+fn find_miner_key_in_dir(dir: &Path, code: &str) -> Option<DetectedMinerKey> {
     // Check for config/miner_key.txt or similar key storage
     let key_file = dir.join("config").join("miner_key.txt");
     if key_file.exists() {
@@ -171,6 +176,67 @@ pub fn plan_migration(
         integrations,
         wallet: wallet.or(installation.wallet.clone()),
         source_keys,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_detection_and_mapping() {
+        let fixture = std::env::var("FEM_TEST_FIXTURE_DIR")
+            .expect("FEM_TEST_FIXTURE_DIR must be set to fixture path");
+
+        // FAIL CLOSED: detection MUST return Some
+        let inst = detect_fryhub_at(&fixture)
+            .expect("detect_fryhub_at must find installations in fixture dir");
+
+        // FAIL CLOSED: must find expected keys
+        assert!(
+            !inst.found_keys.is_empty(),
+            "Must detect at least one miner key"
+        );
+
+        let plan = plan_migration(&inst, Some("TESTADDR".to_string()));
+
+        // BM fallback detection (config dir exists, no miner_key.txt)
+        let bm_found = inst.found_keys.iter().any(|k| k.miner_type == "BM");
+        assert!(bm_found, "BM miner must be detected (fallback path)");
+
+        // RDN maps to presearch+diiisco
+        let rdn_found = inst.found_keys.iter().any(|k| k.miner_type == "RDN");
+        assert!(rdn_found, "RDN miner must be detected");
+        assert!(
+            plan.integrations.contains(&"presearch".to_string()),
+            "RDN must map to presearch"
+        );
+        assert!(
+            plan.integrations.contains(&"diiisco".to_string()),
+            "RDN must map to diiisco"
+        );
+
+        // SDN maps to space_acres
+        let sdn_found = inst.found_keys.iter().any(|k| k.miner_type == "SDN");
+        assert!(sdn_found, "SDN miner must be detected");
+        assert!(
+            plan.integrations.contains(&"space_acres".to_string()),
+            "SDN must map to space_acres"
+        );
+
+        // Verify RDN has the fake test key (not production)
+        let rdn_key = inst
+            .found_keys
+            .iter()
+            .find(|k| k.miner_type == "RDN")
+            .unwrap();
+        assert!(
+            rdn_key.key.contains("TESTFIXTURE"),
+            "RDN key must be test fixture key, not production"
+        );
+
+        // No production API calls: this test only calls detect + plan,
+        // never execute_migration or notify_migration
     }
 }
 

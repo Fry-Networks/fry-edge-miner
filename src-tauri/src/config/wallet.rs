@@ -20,6 +20,7 @@ pub fn validate_address(address: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)] // Used by registration flow
 pub fn is_valid_address(address: &str) -> bool {
     validate_address(address).is_ok()
 }

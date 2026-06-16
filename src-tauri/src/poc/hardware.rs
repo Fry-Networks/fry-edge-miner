@@ -1,9 +1,9 @@
 /// Hardware probing stubs for Phase 4 AEM integration.
 /// GPS, audio, and sensor data collection will be implemented
 /// when AEM hardware probing is ready.
-
 use serde::{Deserialize, Serialize};
 
+#[allow(dead_code)] // Phase 4: hardware probing
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GpsData {
     pub latitude: f64,
@@ -11,12 +11,14 @@ pub struct GpsData {
     pub accuracy: f64,
 }
 
+#[allow(dead_code)] // Phase 4: hardware probing
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioFingerprint {
     pub hash: String,
     pub timestamp: String,
 }
 
+#[allow(dead_code)] // Phase 4: hardware probing
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SensorData {
     pub temperature: Option<f64>,
@@ -24,16 +26,19 @@ pub struct SensorData {
 }
 
 /// Stub: returns mock GPS data
+#[allow(dead_code)] // Phase 4: hardware probing
 pub fn probe_gps() -> Option<GpsData> {
     None // Phase 4: real GPS probing
 }
 
 /// Stub: returns mock audio fingerprint
+#[allow(dead_code)] // Phase 4: hardware probing
 pub fn probe_audio() -> Option<AudioFingerprint> {
     None // Phase 4: real audio capture + fingerprinting
 }
 
 /// Stub: returns mock sensor data
+#[allow(dead_code)] // Phase 4: hardware probing
 pub fn probe_sensors() -> Option<SensorData> {
     None // Phase 4: real sensor reading
 }

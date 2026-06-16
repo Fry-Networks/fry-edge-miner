@@ -114,8 +114,6 @@ impl Integration for PresearchIntegration {
         }
         if container_running() {
             HealthStatus::Healthy
-        } else if container_exists() {
-            HealthStatus::Stopped
         } else {
             HealthStatus::Stopped
         }

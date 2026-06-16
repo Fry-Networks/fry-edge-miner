@@ -6,57 +6,56 @@ interface StatusIndicatorProps {
   showLabel?: boolean
 }
 
-export function StatusIndicator({
-  status,
-  showLabel = true,
-}: StatusIndicatorProps) {
-  let bgColor = 'bg-fry-text-muted'
+export function StatusIndicator({ status, showLabel = true }: StatusIndicatorProps) {
+  let colorClass = 'bg-fry-text-muted'
+  let glowColor: string | null = null
   let label = 'Unknown'
   let pulse = false
 
-  // Determine color and label based on status
   if (typeof status === 'string') {
     switch (status) {
-      // Healthy/Running states
       case 'Healthy':
       case 'Running':
-        bgColor = 'bg-fry-neon'
+        colorClass = 'bg-fry-neon'
+        glowColor = '#00B69B'
         label = status
         pulse = true
         break
-      // Warning/Transitional states
       case 'Starting':
       case 'Installing':
       case 'Updating':
       case 'Restarting':
-        bgColor = 'bg-fry-warning'
+        colorClass = 'bg-fry-warning'
+        glowColor = '#f97316'
         label = status
         pulse = true
         break
-      // Error/Offline states
       case 'Unhealthy':
       case 'Failed':
-        bgColor = 'bg-fry-error'
+        colorClass = 'bg-fry-error'
         label = status
         break
-      // Disabled/Stopped states
       case 'Disabled':
       case 'Stopped':
-        bgColor = 'bg-fry-text-muted'
+        colorClass = 'bg-fry-text-muted'
         label = status
         break
       default:
-        bgColor = 'bg-fry-text-muted'
+        colorClass = 'bg-fry-text-muted'
         label = status
     }
   } else if ('Unhealthy' in status) {
-    bgColor = 'bg-fry-error'
+    colorClass = 'bg-fry-error'
     label = getHealthLabel(status)
   }
 
+  const dotStyle = pulse && glowColor
+    ? { boxShadow: `0 0 6px ${glowColor}`, animation: 'status-pulse 2s ease-in-out infinite' }
+    : undefined
+
   return (
     <span className="flex items-center gap-2">
-      <span className={`h-2 w-2 rounded-full ${bgColor} ${pulse ? 'animate-pulse' : ''}`} />
+      <span className={`h-2.5 w-2.5 rounded-full shrink-0 ${colorClass}`} style={dotStyle} />
       {showLabel && <span className="text-xs text-fry-text-muted">{label}</span>}
     </span>
   )

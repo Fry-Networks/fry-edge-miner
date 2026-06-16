@@ -10,7 +10,9 @@ use tracing::{info, warn};
 pub struct ManagedProcess {
     child: Child,
     pub integration_id: String,
+    #[allow(dead_code)] // Phase 3: process metadata
     pub started_at: DateTime<Utc>,
+    #[allow(dead_code)] // Phase 3: process metadata
     pub log_dir: PathBuf,
 }
 

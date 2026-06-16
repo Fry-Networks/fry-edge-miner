@@ -32,6 +32,7 @@ pub async fn renew(
 }
 
 /// GET /installations/{miner_key}/leases/current — check lease status
+#[allow(dead_code)] // Phase 2: lease polling
 pub async fn status(client: &ApiClient, miner_key: &str) -> Result<LeaseResponse, ApiError> {
     client
         .get(&format!("/installations/{}/leases/current", miner_key))

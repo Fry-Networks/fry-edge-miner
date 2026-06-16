@@ -4,7 +4,6 @@ import { PageHeader } from '../components/PageHeader'
 
 export default function Integrations() {
   const { integrations, loading, toggle } = useIntegrations()
-
   const enabledCount = integrations.filter((i) => i.enabled).length
 
   return (
@@ -19,17 +18,13 @@ export default function Integrations() {
         }
       />
 
-      {/* Integration Grid */}
       {loading ? (
         <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
           {Array.from({ length: 5 }).map((_, idx) => (
-            <div
-              key={idx}
-              className="bg-fry-surface border border-fry-border rounded-xl p-5 animate-pulse"
-            >
+            <div key={idx} className="bg-fry-surface border border-fry-border rounded-xl p-5 animate-pulse">
               <div className="flex items-center justify-between mb-3">
                 <div className="h-4 w-20 bg-fry-border-subtle rounded" />
-                <div className="h-5 w-9 bg-fry-border-subtle rounded-full" />
+                <div className="h-6 w-11 bg-fry-border-subtle rounded-full" />
               </div>
               <div className="space-y-2 border-t border-fry-border-subtle pt-3">
                 <div className="h-3 bg-fry-border-subtle rounded" />

@@ -1,6 +1,7 @@
 use serde::Serialize;
+use std::sync::atomic::Ordering;
 
-const FEM_BASE_REWARD: f64 = 59.52;
+const DEFAULT_BASE_REWARD: f64 = 59.52;
 
 #[derive(Debug, Serialize)]
 pub struct RewardSummary {
@@ -8,6 +9,7 @@ pub struct RewardSummary {
     pub total_count: u32,
     pub proportion: f64,
     pub estimated_daily: f64,
+    pub base_reward: f64,
 }
 
 #[tauri::command]
@@ -16,11 +18,17 @@ pub async fn get_reward_summary(
 ) -> Result<RewardSummary, String> {
     let registry = state.registry.lock().map_err(|e| e.to_string())?;
     let proportion = registry.proportion();
+
+    let bits = state.cached_base_reward.load(Ordering::Relaxed);
+    let cached = f64::from_bits(bits);
+    let base_reward = if cached > 0.0 { cached } else { DEFAULT_BASE_REWARD };
+
     Ok(RewardSummary {
         active_count: registry.enabled_count(),
         total_count: registry.total_count(),
         proportion,
-        estimated_daily: FEM_BASE_REWARD * proportion,
+        estimated_daily: base_reward * proportion,
+        base_reward,
     })
 }
 
