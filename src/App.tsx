@@ -3,6 +3,7 @@ import { BrowserRouter as Router, Routes, Route, NavLink } from 'react-router-do
 import { getVersion } from '@tauri-apps/api/app'
 import { LayoutDashboard, Plug, Coins, ArrowUpCircle, Settings as SettingsIcon } from 'lucide-react'
 import { useDevice } from './hooks/useDevice'
+import fryLogoWhite from './assets/fry-logo-white.svg'
 import Dashboard from './pages/Dashboard'
 import Integrations from './pages/Integrations'
 import Rewards from './pages/Rewards'
@@ -18,24 +19,14 @@ const navItems = [
   { to: '/settings', label: 'Settings', Icon: SettingsIcon },
 ]
 
-function GlobeSVG() {
+function BrandLogo() {
   return (
-    <svg
-      viewBox="0 0 80 80"
-      fill="none"
-      stroke="#ef4444"
-      strokeOpacity="0.15"
-      strokeWidth="1"
-      className="w-20 h-20 absolute -right-4 -top-4 pointer-events-none"
+    <img
+      src={fryLogoWhite}
+      alt=""
+      className="w-20 h-20 absolute -right-4 -top-4 pointer-events-none opacity-15"
       aria-hidden="true"
-    >
-      <circle cx="40" cy="40" r="36" />
-      <ellipse cx="40" cy="40" rx="20" ry="36" />
-      <ellipse cx="40" cy="40" rx="36" ry="14" />
-      <line x1="4" y1="40" x2="76" y2="40" />
-      <line x1="40" y1="4" x2="40" y2="76" />
-      <ellipse cx="40" cy="40" rx="10" ry="36" />
-    </svg>
+    />
   )
 }
 
@@ -58,7 +49,7 @@ export default function App() {
         <aside className="relative w-60 bg-fry-surface border-r border-fry-border flex flex-col shrink-0">
           {/* Brand header */}
           <div className="relative overflow-hidden px-5 py-5 border-b border-fry-border-subtle">
-            <GlobeSVG />
+            <BrandLogo />
             <p className="font-brand text-base tracking-wide text-fry-text leading-none relative z-10">
               Fry Edge Miner
             </p>
