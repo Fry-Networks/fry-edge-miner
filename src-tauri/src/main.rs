@@ -8,6 +8,7 @@ mod migration;
 mod poc;
 mod supervisor;
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,6 +23,7 @@ pub struct AppState {
     pub registry: Arc<Mutex<IntegrationRegistry>>,
     pub supervisor: Arc<Mutex<Supervisor>>,
     pub api_client: Arc<ApiClient>,
+    pub cached_base_reward: Arc<AtomicU64>,
 }
 
 fn main() {
@@ -51,9 +53,21 @@ fn main() {
             let cfg = config_store.get();
             let api_client = Arc::new(ApiClient::new(cfg.api_base_url.clone(), cfg.api_token.clone()));
 
-            // Integration registry with all 5 stubs
+            // Process supervisor (created before registry — MysteriumIntegration needs Arc<Mutex<Supervisor>>)
+            let log_dir = app
+                .path()
+                .app_log_dir()
+                .expect("failed to resolve app log dir");
+            let supervisor = Arc::new(Mutex::new(Supervisor::new(log_dir.clone())));
+
+            // Integration registry
             let mut registry = IntegrationRegistry::new();
-            registry.register(Box::new(integrations::mysterium::MysteriumIntegration));
+            registry.register(Box::new(integrations::mysterium::MysteriumIntegration {
+                api_client: api_client.clone(),
+                config: config_store.clone(),
+                supervisor: supervisor.clone(),
+                log_dir: log_dir.clone(),
+            }));
             registry.register(Box::new(integrations::presearch::PresearchIntegration));
             registry.register(Box::new(integrations::diiisco::DiiiscoIntegration {
                 api_client: api_client.clone(),
@@ -65,29 +79,32 @@ fn main() {
             for (id, enabled) in &cfg.integrations_enabled {
                 registry.set_enabled(id, *enabled);
             }
+            let integration_count = registry.total_count();
             let registry = Arc::new(Mutex::new(registry));
 
-            // Process supervisor
-            let log_dir = app
-                .path()
-                .app_log_dir()
-                .expect("failed to resolve app log dir");
-            let supervisor = Arc::new(Mutex::new(Supervisor::new(log_dir)));
+            let cached_base_reward = Arc::new(AtomicU64::new(0));
 
             // PoC reporter + lease renewal timer (every 10 minutes)
             let poc_config = config_store.clone();
             let poc_registry = registry.clone();
             let poc_client = api_client.clone();
+            let poc_base_reward = cached_base_reward.clone();
             tauri::async_runtime::spawn(async move {
+                // Verify runtime supports block_in_place — panics at first poll if
+                // current_thread, not 10 min later in the reward path. Same worker
+                // context as compute_health_map.
+                tokio::task::block_in_place(|| {});
+
                 let mut interval = tokio::time::interval(Duration::from_secs(600));
                 loop {
                     interval.tick().await;
                     let cfg = poc_config.get();
                     if let Some(ref key) = cfg.miner_key {
                         // --- PoC submission (wrapped in {"document": ...}) ---
+                        let health_map = poc::reporter::compute_health_map(&poc_registry);
                         let doc = {
                             let reg = poc_registry.lock().unwrap();
-                            poc::reporter::build_poc_doc(key, &reg)
+                            poc::reporter::build_poc_doc(key, &reg, &health_map)
                         };
                         let wrapped = api::types::PocDocumentWrapper { document: doc };
                         if let Err(e) = poc_client
@@ -132,6 +149,18 @@ fn main() {
                                 }
                             }
                         }
+
+                        // Refresh cached base_reward from /versions/FEM
+                        match api::versions::check_version(&poc_client, "FEM", "windows").await {
+                            Ok(info) => {
+                                if let Some(br) = info.base_reward {
+                                    poc_base_reward.store(br.to_bits(), Ordering::Relaxed);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::debug!(error = %e, "base_reward fetch failed, using cached/default");
+                            }
+                        }
                     }
                 }
             });
@@ -142,9 +171,10 @@ fn main() {
                 registry,
                 supervisor,
                 api_client,
+                cached_base_reward,
             });
 
-            tracing::info!("FEM initialized — 5 integrations registered");
+            tracing::info!("FEM initialized — {integration_count} integrations registered");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
