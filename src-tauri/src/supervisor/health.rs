@@ -1,13 +1,13 @@
 use std::time::Duration;
 
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::integrations::HealthStatus;
 
 /// Event emitted by the health check loop
-#[allow(dead_code)] // Phase 3: supervisor health loop
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct HealthEvent {
     pub integration_id: String,
     pub status: HealthStatus,
@@ -15,7 +15,6 @@ pub struct HealthEvent {
 }
 
 /// Configuration for health check behavior
-#[allow(dead_code)] // Phase 3: supervisor health loop
 pub struct HealthCheckConfig {
     pub check_interval: Duration,
     pub max_restarts: u32,
@@ -35,7 +34,6 @@ impl Default for HealthCheckConfig {
 /// Run a health check loop for a single integration.
 /// Calls `check_fn` periodically and sends events to `tx`.
 /// On unhealthy status, calls `restart_fn` with exponential backoff.
-#[allow(dead_code)] // Phase 3: supervisor health loop
 pub async fn health_check_loop<C, R>(
     integration_id: String,
     config: HealthCheckConfig,

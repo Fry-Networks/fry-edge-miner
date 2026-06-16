@@ -103,6 +103,17 @@ impl Supervisor {
             .collect()
     }
 
+    /// Restart a crashed integration by stopping (if tracked) and re-spawning.
+    pub fn restart_integration(
+        &mut self,
+        id: &str,
+        command: &str,
+        args: &[&str],
+    ) -> std::io::Result<()> {
+        let _ = self.stop_integration(id);
+        self.start_integration(id, command, args)
+    }
+
     /// Clean shutdown of all processes
     pub fn shutdown(&mut self) {
         info!("Supervisor shutting down all integrations");

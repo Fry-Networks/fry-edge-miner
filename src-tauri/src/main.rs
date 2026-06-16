@@ -84,6 +84,82 @@ fn main() {
 
             let cached_base_reward = Arc::new(AtomicU64::new(0));
 
+            // --- Health monitoring: auto-restart with exponential backoff ---
+            {
+                use integrations::HealthStatus;
+                use supervisor::health::{health_check_loop, HealthCheckConfig, HealthEvent};
+                use tokio::sync::mpsc;
+
+                let (health_tx, mut health_rx) = mpsc::channel::<HealthEvent>(64);
+
+                let integration_ids: Vec<String> = {
+                    let reg = registry.lock().unwrap();
+                    reg.list().iter().map(|i| i.id().to_string()).collect()
+                };
+
+                for id in integration_ids {
+                    let check_registry = registry.clone();
+                    let restart_registry = registry.clone();
+                    let id_check = id.clone();
+                    let id_restart = id.clone();
+                    let tx = health_tx.clone();
+
+                    let check_fn = move || {
+                        let reg = check_registry.lock().unwrap();
+                        if !reg.is_enabled(&id_check) {
+                            return HealthStatus::Stopped;
+                        }
+                        match reg.get(&id_check) {
+                            Some(integration) => tokio::task::block_in_place(|| {
+                                tokio::runtime::Handle::current()
+                                    .block_on(integration.health_check())
+                            }),
+                            None => HealthStatus::Unknown,
+                        }
+                    };
+
+                    let restart_fn = move || {
+                        let reg = restart_registry.lock().unwrap();
+                        match reg.get(&id_restart) {
+                            Some(integration) => {
+                                let _ = tokio::task::block_in_place(|| {
+                                    tokio::runtime::Handle::current()
+                                        .block_on(integration.stop())
+                                });
+                                tokio::task::block_in_place(|| {
+                                    tokio::runtime::Handle::current()
+                                        .block_on(integration.start())
+                                })
+                                .is_ok()
+                            }
+                            None => false,
+                        }
+                    };
+
+                    tauri::async_runtime::spawn(health_check_loop(
+                        id,
+                        HealthCheckConfig::default(),
+                        check_fn,
+                        restart_fn,
+                        tx,
+                    ));
+                }
+
+                // Drop the original sender so the channel closes when all loops exit
+                drop(health_tx);
+
+                // Forward health events to frontend
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    use tauri::Emitter;
+                    while let Some(event) = health_rx.recv().await {
+                        if let Err(e) = app_handle.emit("health-event", &event) {
+                            tracing::warn!(error = %e, "Failed to emit health event");
+                        }
+                    }
+                });
+            }
+
             // PoC reporter + lease renewal timer (every 10 minutes)
             let poc_config = config_store.clone();
             let poc_registry = registry.clone();
