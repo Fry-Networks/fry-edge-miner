@@ -1,15 +1,26 @@
-use super::download::{download_file, partners_base_dir};
+use super::download::partners_base_dir;
 use super::{HealthStatus, Integration, PocGateData};
+use crate::api::client::ApiClient;
+use crate::config::store::ConfigStore;
+use crate::supervisor::Supervisor;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
-use tracing::{info, warn};
+use std::sync::{Arc, Mutex};
+use tracing::info;
 
-const GITHUB_RELEASES_API: &str =
-    "https://api.github.com/repos/mysteriumnetwork/node/releases/latest";
-const WINDOWS_ASSET_NAME: &str = "myst_windows_amd64.zip";
+/// Log level passed to sdk_client.exe — confirmed from live NSSM earner's AppParameters.
+const SDK_LOG_LEVEL: &str = "info";
 
-pub struct MysteriumIntegration;
+/// QUIC connection success marker (verbatim from live earner stderr, Go zerolog format).
+const QUIC_CONNECTED_MARKER: &str = "Connected to QUIC server";
+
+pub struct MysteriumIntegration {
+    pub api_client: Arc<ApiClient>,
+    pub config: Arc<ConfigStore>,
+    pub supervisor: Arc<Mutex<Supervisor>>,
+    pub log_dir: PathBuf,
+}
 
 impl MysteriumIntegration {
     fn partner_dir() -> PathBuf {
@@ -18,79 +29,27 @@ impl MysteriumIntegration {
 
     fn binary_path() -> PathBuf {
         #[cfg(target_os = "windows")]
-        return Self::partner_dir().join("myst.exe");
+        return Self::partner_dir().join("sdk_client.exe");
         #[cfg(not(target_os = "windows"))]
-        return Self::partner_dir().join("myst");
+        return Self::partner_dir().join("sdk_client");
     }
 
-    fn is_running() -> bool {
-        #[cfg(target_os = "windows")]
-        {
-            std::process::Command::new("tasklist")
-                .output()
-                .map(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .to_lowercase()
-                        .contains("myst.exe")
-                })
-                .unwrap_or(false)
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            false
-        }
-    }
-
-    /// Fetch latest release download URL from GitHub
-    async fn fetch_latest_release() -> Result<(String, String)> {
-        let client = reqwest::Client::builder()
-            .user_agent("FEM/0.2")
-            .build()?;
-        let response = client.get(GITHUB_RELEASES_API).send().await?;
-        if !response.status().is_success() {
-            anyhow::bail!("Failed to fetch release: HTTP {}", response.status());
-        }
-        let json: serde_json::Value = response.json().await?;
-        let tag = json["tag_name"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("No tag_name"))?
-            .to_string();
-        let assets = json["assets"]
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("No assets"))?;
-        let url = assets
-            .iter()
-            .find_map(|a| {
-                if a["name"].as_str() == Some(WINDOWS_ASSET_NAME) {
-                    a["browser_download_url"].as_str().map(|s| s.to_string())
-                } else {
-                    None
+    /// Strip ANSI escape sequences from a log line (zerolog colored output).
+    fn strip_ansi(s: &str) -> String {
+        let mut result = String::with_capacity(s.len());
+        let mut in_escape = false;
+        for c in s.chars() {
+            if c == '\x1b' {
+                in_escape = true;
+            } else if in_escape {
+                if c == 'm' {
+                    in_escape = false;
                 }
-            })
-            .ok_or_else(|| anyhow::anyhow!("No {} asset found", WINDOWS_ASSET_NAME))?;
-        Ok((tag, url))
-    }
-
-    /// Extract myst binary from downloaded zip
-    fn extract_zip(zip_path: &std::path::Path, dest_dir: &std::path::Path) -> Result<()> {
-        let file = std::fs::File::open(zip_path)?;
-        let mut archive = zip::ZipArchive::new(file)?;
-        for i in 0..archive.len() {
-            let mut entry = archive.by_index(i)?;
-            let name = entry.name().to_string();
-            if name.contains("myst") && (name.ends_with(".exe") || !name.contains('.')) {
-                let dest = dest_dir.join(
-                    std::path::Path::new(&name)
-                        .file_name()
-                        .unwrap_or_else(|| std::ffi::OsStr::new("myst")),
-                );
-                let mut out = std::fs::File::create(&dest)?;
-                std::io::copy(&mut entry, &mut out)?;
-                info!(extracted = ?dest, "Extracted MystNodes binary");
-                return Ok(());
+            } else {
+                result.push(c);
             }
         }
-        anyhow::bail!("No myst binary found in zip archive")
+        result
     }
 }
 
@@ -105,99 +64,134 @@ impl Integration for MysteriumIntegration {
     }
 
     async fn install(&self) -> Result<()> {
-        let partner_dir = Self::partner_dir();
         let binary = Self::binary_path();
-
         if binary.exists() {
-            info!(path = ?binary, "MystNodes binary already installed");
+            info!(path = ?binary, "sdk_client binary already present");
             return Ok(());
         }
-
-        std::fs::create_dir_all(&partner_dir)?;
-
-        info!("Installing MystNodes from GitHub release");
-        let (version, download_url) = Self::fetch_latest_release().await?;
-        info!(version = %version, "Found MystNodes release");
-
-        let zip_path = partner_dir.join(WINDOWS_ASSET_NAME);
-        download_file(&download_url, &zip_path).await?;
-
-        Self::extract_zip(&zip_path, &partner_dir)?;
-        std::fs::remove_file(&zip_path).ok(); // cleanup zip
-
-        info!(version = %version, "MystNodes installed");
-        Ok(())
+        // TODO: backend partner-binary distribution for sdk_client pending
+        anyhow::bail!(
+            "sdk_client binary not found at {} — backend partner-binary distribution pending",
+            binary.display()
+        );
     }
 
     async fn start(&self) -> Result<()> {
         let binary = Self::binary_path();
         if !binary.exists() {
-            anyhow::bail!("MystNodes binary not found at {:?}", binary);
+            anyhow::bail!("sdk_client binary not found at {}", binary.display());
         }
-        info!(binary = ?binary, "Starting MystNodes");
-        let _ = std::process::Command::new(&binary)
-            .arg("service")
-            .arg("--agreed-terms-and-conditions")
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("Failed to start MystNodes: {}", e))?;
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+        // Credential fetch (Diiisco pattern)
+        let cfg = self.config.get();
+        let miner_key = cfg.miner_key.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("Miner key not set — complete device registration before starting MystNodes")
+        })?;
+
+        let creds = crate::api::credentials::lookup(&self.api_client, miner_key)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch credentials: {}", e))?;
+
+        // Extract mystnodes_user_token — fail-closed if missing (no user-claimable fallback)
+        let token = creds
+            .mystnodes_user_token
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "mystnodes_user_token not found or empty in device credentials — \
+                     contact support to provision a Mysterium token for this device"
+                )
+            })?;
+
+        let binary_str = binary.to_string_lossy().to_string();
+        let token_arg = format!("--user.token={}", token);
+        let log_level_arg = format!("--log.level={}", SDK_LOG_LEVEL);
+        let args = [token_arg.as_str(), log_level_arg.as_str()];
+
+        // Lock supervisor in explicit scope — guard drops at }
+        {
+            let mut sup = self.supervisor.lock().unwrap();
+            sup.start_integration("mysterium", &binary_str, &args)
+                .map_err(|e| anyhow::anyhow!("Failed to spawn sdk_client: {}", e))?;
+        }
+
+        info!("Mysterium SDK client started (token redacted)");
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        #[cfg(target_os = "windows")]
         {
-            let _ = std::process::Command::new("taskkill")
-                .args(&["/IM", "myst.exe", "/F"])
-                .output();
+            let mut sup = self.supervisor.lock().unwrap();
+            sup.stop_integration("mysterium")
+                .map_err(|e| anyhow::anyhow!("Failed to stop sdk_client: {}", e))?;
         }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = std::process::Command::new("killall")
-                .arg("myst")
-                .output();
-        }
-        info!("Stopped MystNodes");
+        info!("Mysterium SDK client stopped");
         Ok(())
     }
 
     async fn health_check(&self) -> HealthStatus {
-        let client = reqwest::Client::new();
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            client.get("http://127.0.0.1:4449/healthcheck").send(),
-        )
-        .await
-        {
-            Ok(Ok(resp)) if resp.status().is_success() => HealthStatus::Healthy,
-            Ok(Ok(resp)) => HealthStatus::Unhealthy(format!("HTTP {}", resp.status())),
-            Ok(Err(e)) => HealthStatus::Unhealthy(e.to_string()),
-            Err(_) => HealthStatus::Unhealthy("Timeout".to_string()),
+        // Check process alive — guard drops at }
+        let process_alive = {
+            let mut sup = self.supervisor.lock().unwrap();
+            matches!(sup.get_status("mysterium"), HealthStatus::Healthy)
+        };
+
+        if !process_alive {
+            return HealthStatus::Stopped;
+        }
+
+        // Read BOTH log files (sdk_client writes to stderr; stdout typically empty)
+        let stdout_path = self.log_dir.join("mysterium").join("mysterium_stdout.log");
+        let stderr_path = self.log_dir.join("mysterium").join("mysterium_stderr.log");
+
+        let stdout_content = tokio::fs::read_to_string(&stdout_path).await.unwrap_or_default();
+        let stderr_content = tokio::fs::read_to_string(&stderr_path).await.unwrap_or_default();
+
+        // Combine recent tail (last 50 lines of each)
+        let recent_lines: Vec<String> = stdout_content
+            .lines()
+            .chain(stderr_content.lines())
+            .rev()
+            .take(50)
+            .map(Self::strip_ansi)
+            .collect();
+
+        // Check for error markers — anchored, space-bounded (zerolog: INF/WRN/ERR/FTL)
+        let has_errors = recent_lines
+            .iter()
+            .any(|l| l.contains(" ERR ") || l.contains(" FTL "));
+
+        if has_errors {
+            return HealthStatus::Unhealthy("Error detected in SDK client logs".to_string());
+        }
+
+        // Check for QUIC connection success
+        let quic_connected = recent_lines
+            .iter()
+            .any(|l| l.contains(QUIC_CONNECTED_MARKER));
+
+        if quic_connected {
+            HealthStatus::Healthy
+        } else {
+            // Process up but QUIC not yet connected
+            HealthStatus::Starting
         }
     }
 
     async fn check_update(&self) -> Result<Option<String>> {
-        match Self::fetch_latest_release().await {
-            Ok((version, _)) => Ok(Some(version)),
-            Err(e) => {
-                warn!(error = %e, "Failed to check MystNodes updates");
-                Ok(None)
-            }
-        }
-    }
-
-    async fn apply_update(&self, _version: &str) -> Result<()> {
-        self.stop().await?;
-        let binary = Self::binary_path();
-        if binary.exists() {
-            std::fs::rename(&binary, binary.with_extension("exe.bak"))?;
-        }
-        self.install().await
+        // TODO: partner binary version check via /versions/mysterium
+        Ok(None)
     }
 
     fn collect_poc_data(&self) -> PocGateData {
+        // Sync — supervisor status only (process-alive, sibling convention)
+        let status = {
+            let mut sup = self.supervisor.lock().unwrap();
+            sup.get_status("mysterium")
+        };
         PocGateData {
-            poa: Self::is_running(),
+            poa: matches!(status, HealthStatus::Healthy),
             ..Default::default()
         }
     }

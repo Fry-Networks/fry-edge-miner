@@ -10,6 +10,7 @@ pub struct VersionInfo {
     pub limit: Option<u32>,
     pub multiplier_base: Option<f64>,
     pub multiplier_per_tool: Option<f64>,
+    pub base_reward: Option<f64>,
 }
 
 // --- Installation (matches server InstallationHeartbeat, models.py) ---
@@ -77,15 +78,19 @@ pub struct PocDocumentWrapper {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialInfo {
     pub miner_key: String,
-    pub credentials: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub credentials: Option<HashMap<String, serde_json::Value>>,
     #[serde(default)]
     pub algo_address: Option<String>,
     #[serde(default)]
     pub algo_mnemonic: Option<String>,
+    #[serde(default)]
+    pub mystnodes_user_token: Option<String>,
 }
 
 // --- IP Status ---
 
+#[allow(dead_code)] // Pre-built: used by future API endpoints
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpStatus {
     pub external_ip: String,
@@ -94,6 +99,7 @@ pub struct IpStatus {
 
 // --- Supported Miners ---
 
+#[allow(dead_code)] // Pre-built: used by future API endpoints
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupportedMiner {
     pub code: String,
@@ -137,6 +143,7 @@ pub struct ApiPocHardwareDoc {
 
 // --- Miner Profile ---
 
+#[allow(dead_code)] // Pre-built: used by future API endpoints
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MinerProfile {
     pub miner_key: String,
