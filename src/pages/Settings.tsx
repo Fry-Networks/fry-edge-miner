@@ -32,7 +32,7 @@ export default function Settings() {
   const [prefs, setPrefs] = useState<Record<PrefKey, boolean>>(loadPrefs)
 
   useEffect(() => {
-    getVersion().then((v) => setVersion(`v${v}`)).catch(() => setVersion('v0.2.3'))
+    getVersion().then((v) => setVersion(`v${v}`)).catch(() => setVersion('v0.2.5'))
   }, [])
 
   const setPref = (key: PrefKey, value: boolean) => {
