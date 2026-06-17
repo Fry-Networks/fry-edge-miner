@@ -1,6 +1,6 @@
 {
   "name": "fry-edge-miner",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Fry Edge Miner - Multi-integration decentralized platform client",
   "type": "module",
   "scripts": {
