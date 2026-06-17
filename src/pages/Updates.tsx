@@ -8,6 +8,7 @@ export default function Updates() {
   const { integrations, loading, refetch } = useIntegrations()
   const [checking, setChecking] = useState(false)
   const [installingId, setInstallingId] = useState<string | null>(null)
+  const [installError, setInstallError] = useState<string | null>(null)
 
   const handleCheckUpdates = () => {
     setChecking(true)
@@ -48,6 +49,12 @@ export default function Updates() {
       {/* Partner list */}
       <div className="space-y-2">
         <p className="text-xs font-medium uppercase tracking-widest text-fry-text-muted">Partner Software</p>
+
+        {installError && (
+          <div className="bg-fry-surface-2 border border-fry-warning text-fry-warning rounded-lg px-4 py-2 text-xs">
+            {installError}
+          </div>
+        )}
 
         {loading ? (
           <div className="space-y-2">
@@ -95,10 +102,13 @@ export default function Updates() {
                         disabled={installingId === integration.id}
                         onClick={async () => {
                           setInstallingId(integration.id)
+                          setInstallError(null)
                           try {
                             await invoke('install_integration', { id: integration.id })
                             await refetch()
                           } catch (e) {
+                            const msg = e instanceof Error ? e.message : String(e)
+                            setInstallError(`${integration.display_name} install failed: ${msg}`)
                             console.error('Install failed:', e)
                           } finally {
                             setInstallingId(null)

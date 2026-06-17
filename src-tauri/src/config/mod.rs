@@ -20,7 +20,11 @@ pub struct FemConfig {
 }
 
 fn default_api_token() -> String {
-    option_env!("FEM_API_TOKEN").unwrap_or("").to_string()
+    // Prefer runtime environment variable so the token is not baked into the binary.
+    std::env::var("FEM_API_TOKEN")
+        .ok()
+        .or_else(|| option_env!("FEM_API_TOKEN").map(|s| s.to_string()))
+        .unwrap_or_default()
 }
 
 impl Default for FemConfig {
@@ -32,7 +36,7 @@ impl Default for FemConfig {
             initial_setup_done: false,
             integrations_enabled: HashMap::new(),
             api_base_url: "https://hardwareapi.frynetworks.com".to_string(),
-            api_token: option_env!("FEM_API_TOKEN").unwrap_or("").to_string(),
+            api_token: default_api_token(),
         }
     }
 }
