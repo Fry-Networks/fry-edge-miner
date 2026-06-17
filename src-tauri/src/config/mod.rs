@@ -11,6 +11,8 @@ pub struct FemConfig {
     pub wallet_address: Option<String>,
     #[serde(default)]
     pub install_id: Option<String>,
+    #[serde(default)]
+    pub initial_setup_done: bool,
     pub integrations_enabled: HashMap<String, bool>,
     pub api_base_url: String,
     #[serde(skip_serializing, default = "default_api_token")]
@@ -27,6 +29,7 @@ impl Default for FemConfig {
             miner_key: None,
             wallet_address: None,
             install_id: None,
+            initial_setup_done: false,
             integrations_enabled: HashMap::new(),
             api_base_url: "https://hardwareapi.frynetworks.com".to_string(),
             api_token: option_env!("FEM_API_TOKEN").unwrap_or("").to_string(),

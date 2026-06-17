@@ -1,3 +1,4 @@
+pub mod aem;
 pub mod diiisco;
 pub mod download;
 pub mod mysterium;
@@ -90,6 +91,9 @@ pub trait Integration: Send + Sync {
     fn collect_poc_data(&self) -> PocGateData {
         PocGateData::default()
     }
+    fn installed_version(&self) -> Option<String> {
+        None
+    }
 }
 
 // --- Registry ---
@@ -149,7 +153,7 @@ impl IntegrationRegistry {
                     } else {
                         LifecycleState::Disabled
                     },
-                    version: None,
+                    version: i.installed_version(),
                     poc_contribution: if enabled {
                         1.0 / self.total_count() as f64
                     } else {

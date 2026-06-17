@@ -171,6 +171,14 @@ impl Integration for AemIntegration {
         Ok(()) // Squirrel handles auto-updates
     }
 
+    fn installed_version(&self) -> Option<String> {
+        if Self::olostep_binary().is_some() {
+            Some("installed".into())
+        } else {
+            None
+        }
+    }
+
     fn collect_poc_data(&self) -> PocGateData {
         let running = Self::is_running();
         let config_ok = Self::olostep_config_path()

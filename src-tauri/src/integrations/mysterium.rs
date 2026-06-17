@@ -184,6 +184,14 @@ impl Integration for MysteriumIntegration {
         Ok(None)
     }
 
+    fn installed_version(&self) -> Option<String> {
+        if Self::binary_path().exists() {
+            Some("installed".into())
+        } else {
+            None
+        }
+    }
+
     fn collect_poc_data(&self) -> PocGateData {
         // Sync — supervisor status only (process-alive, sibling convention)
         let status = {

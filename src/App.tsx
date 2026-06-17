@@ -35,7 +35,7 @@ export default function App() {
   const { device } = useDevice()
 
   useEffect(() => {
-    getVersion().then((v) => setVersion(`v${v}`)).catch(() => setVersion('v0.2.3'))
+    getVersion().then((v) => setVersion(`v${v}`)).catch(() => setVersion('v0.2.4'))
   }, [])
 
   const keyPreview = device?.miner_key

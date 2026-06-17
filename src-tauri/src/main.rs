@@ -74,6 +74,7 @@ fn main() {
                 config: config_store.clone(),
             }));
             registry.register(Box::new(integrations::space_acres::SpaceAcresIntegration));
+            registry.register(Box::new(integrations::aem::AemIntegration));
 
             // Restore enabled states from config
             for (id, enabled) in &cfg.integrations_enabled {
@@ -255,6 +256,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::integration::get_integrations,
+            commands::integration::install_integration,
             commands::integration::toggle_integration,
             commands::device::get_device_info,
             commands::device::register_device,

@@ -203,6 +203,14 @@ impl Integration for SpaceAcresIntegration {
         Ok(())
     }
 
+    fn installed_version(&self) -> Option<String> {
+        if Self::binary_path().exists() {
+            Some("installed".into())
+        } else {
+            None
+        }
+    }
+
     fn collect_poc_data(&self) -> PocGateData {
         PocGateData {
             poa: Self::is_running(),

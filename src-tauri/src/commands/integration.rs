@@ -9,6 +9,25 @@ pub async fn get_integrations(
 }
 
 #[tauri::command]
+pub async fn install_integration(
+    id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    // TODO: Registry should store Arc<dyn Integration> to avoid holding lock during install
+    tokio::task::block_in_place(|| {
+        let reg = state.registry.lock().map_err(|e| e.to_string())?;
+        match reg.get(&id) {
+            Some(integration) => tokio::runtime::Handle::current()
+                .block_on(integration.install())
+                .map_err(|e| e.to_string()),
+            None => Err(format!("Integration '{}' not found", id)),
+        }
+    })?;
+    tracing::info!(integration = id, "Integration installed");
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn toggle_integration(
     id: String,
     enabled: bool,

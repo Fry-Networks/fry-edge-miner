@@ -174,6 +174,14 @@ impl Integration for DiiiscoIntegration {
         self.install().await // re-pull latest images
     }
 
+    fn installed_version(&self) -> Option<String> {
+        if compose_file().exists() && docker_available() {
+            Some("installed".into())
+        } else {
+            None
+        }
+    }
+
     fn collect_poc_data(&self) -> PocGateData {
         // Synchronous check — can't do async health here, check compose file existence
         let compose_exists = compose_file().exists();

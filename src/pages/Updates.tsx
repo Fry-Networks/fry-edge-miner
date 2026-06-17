@@ -1,11 +1,13 @@
 import { useState } from 'react'
-import { RefreshCw, Download } from 'lucide-react'
+import { invoke } from '@tauri-apps/api/core'
+import { RefreshCw, Download, Loader2 } from 'lucide-react'
 import { useIntegrations } from '../hooks/useIntegrations'
 import { PageHeader } from '../components/PageHeader'
 
 export default function Updates() {
-  const { integrations, loading } = useIntegrations()
+  const { integrations, loading, refetch } = useIntegrations()
   const [checking, setChecking] = useState(false)
+  const [installingId, setInstallingId] = useState<string | null>(null)
 
   const handleCheckUpdates = () => {
     setChecking(true)
@@ -85,19 +87,30 @@ export default function Updates() {
                   <div className="flex items-center gap-3 shrink-0">
                     {!notInstalled && integration.version && (
                       <span className="font-mono text-xs bg-fry-surface-2 text-fry-text-muted px-2 py-0.5 rounded">
-                        v{integration.version}
+                        {/^\d/.test(integration.version ?? '') ? `v${integration.version}` : integration.version}
                       </span>
                     )}
                     {notInstalled && (
                       <button
-                        onClick={() => {
-                          // TODO: wire to partner install command
-                          console.log('install', integration.id)
+                        disabled={installingId === integration.id}
+                        onClick={async () => {
+                          setInstallingId(integration.id)
+                          try {
+                            await invoke('install_integration', { id: integration.id })
+                            await refetch()
+                          } catch (e) {
+                            console.error('Install failed:', e)
+                          } finally {
+                            setInstallingId(null)
+                          }
                         }}
-                        className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-fry-neon text-white rounded-lg text-xs font-semibold hover:bg-fry-neon-dim transition-colors"
+                        className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-fry-neon text-white rounded-lg text-xs font-semibold hover:bg-fry-neon-dim transition-colors disabled:opacity-60"
                       >
-                        <Download className="w-3 h-3" />
-                        Install
+                        {installingId === integration.id ? (
+                          <><Loader2 className="w-3 h-3 animate-spin" />Installing…</>
+                        ) : (
+                          <><Download className="w-3 h-3" />Install</>
+                        )}
                       </button>
                     )}
                   </div>

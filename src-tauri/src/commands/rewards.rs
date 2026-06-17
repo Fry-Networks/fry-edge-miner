@@ -34,7 +34,7 @@ pub async fn get_reward_summary(
 
 #[tauri::command]
 pub async fn get_poc_slots(
-    _date: String,
+    _date: Option<String>,
     _state: tauri::State<'_, crate::AppState>,
 ) -> Result<Vec<crate::poc::PocSlot>, String> {
     // Phase 4: fetch historical slot data from local cache or API

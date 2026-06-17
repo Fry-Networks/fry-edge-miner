@@ -27,6 +27,14 @@ fn container_exists() -> bool {
         .unwrap_or(false)
 }
 
+fn image_pulled() -> bool {
+    std::process::Command::new("docker")
+        .args(["images", "-q", DOCKER_IMAGE])
+        .output()
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false)
+}
+
 fn container_running() -> bool {
     std::process::Command::new("docker")
         .args(["inspect", CONTAINER_NAME, "--format", "{{.State.Running}}"])
@@ -125,6 +133,14 @@ impl Integration for PresearchIntegration {
 
     async fn apply_update(&self, _version: &str) -> Result<()> {
         self.install().await // re-pull latest image
+    }
+
+    fn installed_version(&self) -> Option<String> {
+        if docker_available() && (container_exists() || image_pulled()) {
+            Some("installed".into())
+        } else {
+            None
+        }
     }
 
     fn collect_poc_data(&self) -> PocGateData {

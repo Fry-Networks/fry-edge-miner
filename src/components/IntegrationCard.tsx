@@ -77,7 +77,7 @@ export function IntegrationCard({ integration, onToggle }: IntegrationCardProps)
         )}
         <div className="flex items-center justify-between">
           <span className="text-xs text-fry-text-muted">PoC</span>
-          <span className="text-fry-neon font-medium text-sm">{integration.poc_contribution.toFixed(1)}%</span>
+          <span className="text-fry-neon font-medium text-sm">{(integration.poc_contribution * 100).toFixed(1)}%</span>
         </div>
         {notInstalled && (
           <div className="pt-2">
