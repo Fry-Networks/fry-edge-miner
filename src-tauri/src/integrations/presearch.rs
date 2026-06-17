@@ -10,7 +10,7 @@ const PRESEARCH_REG_CODE: Option<&str> = option_env!("PRESEARCH_REG_CODE");
 pub struct PresearchIntegration;
 
 fn docker_available() -> bool {
-    std::process::Command::new("docker")
+    crate::supervisor::platform::command("docker")
         .arg("info")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -20,7 +20,7 @@ fn docker_available() -> bool {
 }
 
 fn container_exists() -> bool {
-    std::process::Command::new("docker")
+    crate::supervisor::platform::command("docker")
         .args(["ps", "-a", "--filter", &format!("name={}", CONTAINER_NAME), "--format", "{{.Names}}"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).contains(CONTAINER_NAME))
@@ -28,7 +28,7 @@ fn container_exists() -> bool {
 }
 
 fn image_pulled() -> bool {
-    std::process::Command::new("docker")
+    crate::supervisor::platform::command("docker")
         .args(["images", "-q", DOCKER_IMAGE])
         .output()
         .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
@@ -36,7 +36,7 @@ fn image_pulled() -> bool {
 }
 
 fn container_running() -> bool {
-    std::process::Command::new("docker")
+    crate::supervisor::platform::command("docker")
         .args(["inspect", CONTAINER_NAME, "--format", "{{.State.Running}}"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
@@ -59,7 +59,7 @@ impl Integration for PresearchIntegration {
             return Ok(());
         }
         info!("Pulling Presearch node image");
-        let output = std::process::Command::new("docker")
+        let output = crate::supervisor::platform::command("docker")
             .args(["pull", DOCKER_IMAGE])
             .output()?;
         if !output.status.success() {
@@ -81,7 +81,7 @@ impl Integration for PresearchIntegration {
         }
         if container_exists() {
             info!("Starting existing Presearch container");
-            std::process::Command::new("docker")
+            crate::supervisor::platform::command("docker")
                 .args(["start", CONTAINER_NAME])
                 .output()?;
         } else {
@@ -98,7 +98,7 @@ impl Integration for PresearchIntegration {
                 warn!("No PRESEARCH_REG_CODE set — starting Presearch in unclaimed mode");
             }
             args.push(DOCKER_IMAGE.into());
-            std::process::Command::new("docker")
+            crate::supervisor::platform::command("docker")
                 .args(&args)
                 .output()?;
         }
@@ -108,7 +108,7 @@ impl Integration for PresearchIntegration {
 
     async fn stop(&self) -> Result<()> {
         if container_running() {
-            std::process::Command::new("docker")
+            crate::supervisor::platform::command("docker")
                 .args(["stop", CONTAINER_NAME])
                 .output()?;
             info!("Stopped Presearch container");

@@ -35,7 +35,7 @@ impl AemIntegration {
     fn is_running() -> bool {
         #[cfg(target_os = "windows")]
         {
-            std::process::Command::new("tasklist")
+            crate::supervisor::platform::command("tasklist")
                 .output()
                 .map(|o| {
                     String::from_utf8_lossy(&o.stdout)
@@ -107,7 +107,7 @@ impl Integration for AemIntegration {
         download_file(OLOSTEP_DOWNLOAD_URL, &installer_path).await?;
 
         info!("Running OlostepBrowser installer (Squirrel silent install)");
-        let output = std::process::Command::new(&installer_path)
+        let output = crate::supervisor::platform::command(&installer_path)
             .args(["--silent"])
             .output()?;
         if !output.status.success() {
@@ -137,7 +137,7 @@ impl Integration for AemIntegration {
         let binary = Self::olostep_binary()
             .ok_or_else(|| anyhow::anyhow!("OlostepBrowser not installed"))?;
         info!(binary = ?binary, "Starting OlostepBrowser");
-        std::process::Command::new(&binary).spawn()?;
+        crate::supervisor::platform::command(&binary).spawn()?;
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
         Ok(())
     }
@@ -145,7 +145,7 @@ impl Integration for AemIntegration {
     async fn stop(&self) -> Result<()> {
         #[cfg(target_os = "windows")]
         {
-            let _ = std::process::Command::new("taskkill")
+            let _ = crate::supervisor::platform::command("taskkill")
                 .args(["/IM", "OlostepBrowser.exe", "/F"])
                 .output();
         }

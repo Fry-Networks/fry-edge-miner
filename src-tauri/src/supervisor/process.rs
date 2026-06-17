@@ -1,6 +1,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -36,7 +36,7 @@ impl ManagedProcess {
             "Spawning process"
         );
 
-        let child = Command::new(command)
+        let child = super::platform::command(command)
             .args(args)
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file))

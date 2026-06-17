@@ -55,7 +55,7 @@ impl SpaceAcresIntegration {
     fn is_running() -> bool {
         #[cfg(target_os = "windows")]
         {
-            std::process::Command::new("tasklist")
+            crate::supervisor::platform::command("tasklist")
                 .output()
                 .map(|o| {
                     String::from_utf8_lossy(&o.stdout)
@@ -124,7 +124,7 @@ impl Integration for SpaceAcresIntegration {
         let base_dir = Self::partner_dir().join("data");
         std::fs::create_dir_all(&base_dir)?;
 
-        let _ = std::process::Command::new(&binary)
+        let _ = crate::supervisor::platform::command(&binary)
             .arg("--base-directory")
             .arg(&base_dir)
             .spawn()
@@ -142,13 +142,13 @@ impl Integration for SpaceAcresIntegration {
         // Kill any running space-acres process
         #[cfg(target_os = "windows")]
         {
-            let _ = std::process::Command::new("taskkill")
+            let _ = crate::supervisor::platform::command("taskkill")
                 .args(["/IM", "space-acres.exe", "/F"])
                 .output();
         }
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = std::process::Command::new("killall")
+            let _ = crate::supervisor::platform::command("killall")
                 .arg("space-acres")
                 .output();
         }
@@ -222,8 +222,7 @@ impl Integration for SpaceAcresIntegration {
 /// Detect if system has an SSD
 #[cfg(target_os = "windows")]
 fn has_ssd() -> bool {
-    use std::process::Command;
-    Command::new("powershell")
+    crate::supervisor::platform::command("powershell")
         .args([
             "-NoProfile",
             "-Command",

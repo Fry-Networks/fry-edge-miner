@@ -23,7 +23,7 @@ fn deploy_dir() -> PathBuf {
 }
 
 fn docker_available() -> bool {
-    std::process::Command::new("docker")
+    crate::supervisor::platform::command("docker")
         .arg("info")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -88,7 +88,7 @@ impl Integration for DiiiscoIntegration {
         // Docker compose build with credentials as env vars (NOT command-line args)
         let bearer = DIIISCO_BEARER_TOKEN.unwrap_or("sk-diiisco-prod-key");
         info!("Building Diiisco Docker image");
-        let output = std::process::Command::new("docker")
+        let output = crate::supervisor::platform::command("docker")
             .args(["compose", "build"])
             .env("ALGO_ADDRESS", &algo_address)
             .env("ALGO_MNEMONIC", &algo_mnemonic)
@@ -115,7 +115,7 @@ impl Integration for DiiiscoIntegration {
             anyhow::bail!("Diiisco deploy directory not found at {}", deploy_dir().display());
         }
         info!("Starting Diiisco containers");
-        let output = std::process::Command::new("docker")
+        let output = crate::supervisor::platform::command("docker")
             .args(["compose", "-f", &compose.to_string_lossy(), "up", "-d"])
             .output()?;
         if !output.status.success() {
@@ -131,7 +131,7 @@ impl Integration for DiiiscoIntegration {
     async fn stop(&self) -> Result<()> {
         let compose = compose_file();
         if compose.exists() {
-            std::process::Command::new("docker")
+            crate::supervisor::platform::command("docker")
                 .args(["compose", "-f", &compose.to_string_lossy(), "stop"])
                 .output()?;
             info!("Stopped Diiisco containers");

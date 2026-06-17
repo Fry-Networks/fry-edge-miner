@@ -5,6 +5,18 @@
 use std::process::Child;
 use std::io;
 
+/// Create a Command with CREATE_NO_WINDOW on Windows to suppress console popups.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Attempt to gracefully stop a child process.
 /// Falls back to kill() for v1.
 #[allow(dead_code)] // Phase 3: graceful process management
