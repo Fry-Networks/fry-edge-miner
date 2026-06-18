@@ -1,0 +1,153 @@
+@import url('https://fonts.googleapis.com/css2?family=Syncopate:wght@700&family=Rajdhani:wght@500;600;700&family=DM+Sans:opsz,wght@9..40,400;9..40,500&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg: #09090b;
+  --s0: #0e0e11;
+  --s1: #141418;
+  --s2: #1b1b20;
+  --s3: #232328;
+  --b0: #202025;
+  --b1: #2c2c33;
+  --b2: #3c3c45;
+  --txt: #efecea;
+  --t1: #9b9793;
+  --t2: #5c5955;
+  --red: #e5271c;
+  --redg: rgba(229, 39, 28, 0.13);
+  --redd: #701410;
+  --teal: #00c49a;
+  --tealg: rgba(0, 196, 154, 0.11);
+  --teald: #006b54;
+  --amb: #f0a500;
+  --blu: #4a9eff;
+  --rad: 6px;
+  --radsm: 4px;
+  --fl: 'Syncopate', sans-serif;
+  --fh: 'Rajdhani', sans-serif;
+  --fb: 'DM Sans', sans-serif;
+  --fm: 'IBM Plex Mono', monospace;
+}
+
+@keyframes breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pop {
+  0% { transform: scale(0); opacity: 0; }
+  70% { transform: scale(1.1); }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes ep {
+  0%, 100% { opacity: 0.1; }
+  50% { opacity: 0.45; }
+}
+
+@keyframes np {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.9; }
+}
+
+@keyframes pr {
+  0% { box-shadow: 0 0 0 0 rgba(0, 196, 154, 0.4); }
+  70% { box-shadow: 0 0 0 7px rgba(0, 196, 154, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 196, 154, 0); }
+}
+
+.fu {
+  animation: fadeUp 0.36s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+.sc::-webkit-scrollbar {
+  width: 3px;
+}
+
+.sc::-webkit-scrollbar-thumb {
+  background: var(--b1);
+  border-radius: 2px;
+}
+
+.sc::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.nb:hover {
+  background: var(--s1) !important;
+}
+
+.nb:hover .nico {
+  color: var(--txt) !important;
+}
+
+.ic:hover {
+  border-color: var(--b2) !important;
+}
+
+.wt:hover:not(.sel) {
+  border-color: var(--b2) !important;
+  background: var(--s2) !important;
+}
+
+.wt.sel {
+  border-color: var(--teal) !important;
+  background: var(--tealg) !important;
+}
+
+.rr:hover {
+  background: var(--s2) !important;
+}
+
+.bp:hover {
+  filter: brightness(1.1);
+}
+
+.bg:hover {
+  background: var(--s3) !important;
+}
+
+.bt:hover {
+  filter: brightness(1.08);
+}
+
+.inp:focus {
+  border-color: var(--teal) !important;
+  outline: none !important;
+  box-shadow: 0 0 0 3px var(--tealg);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+}
+
+body {
+  font-family: var(--fb);
+  background: var(--bg);
+  color: var(--txt);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button {
+  font-family: inherit;
+}

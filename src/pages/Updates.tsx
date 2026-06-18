@@ -1,134 +1,179 @@
 import { useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
-import { RefreshCw, Download, Loader2 } from 'lucide-react'
-import { useIntegrations } from '../hooks/useIntegrations'
-import { PageHeader } from '../components/PageHeader'
+import {
+  ArrowUpCircle,
+  Clock,
+  Cpu,
+  Eye,
+  Globe,
+  HardDrive,
+  Info,
+  RefreshCw,
+  Search,
+  type LucideIcon
+} from 'lucide-react'
+import Btn from '../components/primitives/Btn'
+import Lbl from '../components/primitives/Lbl'
+import UpdCard, { type UpdateStatus } from '../components/UpdCard'
+
+const PARTNERS: {
+  key: string
+  name: string
+  Icon: LucideIcon
+  col: string
+  current: string
+  available: string
+  initial: UpdateStatus
+}[] = [
+  {
+    key: 'myst',
+    name: 'Mysterium (MystNodes SDK)',
+    Icon: Globe,
+    col: '#4a9eff',
+    current: '1.2.3',
+    available: '1.3.0',
+    initial: 'update'
+  },
+  {
+    key: 'pre',
+    name: 'Presearch Node',
+    Icon: Search,
+    col: '#a855f7',
+    current: '0.9.1',
+    available: '0.9.1',
+    initial: 'ok'
+  },
+  {
+    key: 'dii',
+    name: 'Diiisco',
+    Icon: Cpu,
+    col: '#f0a500',
+    current: '2.0.1',
+    available: '2.0.1',
+    initial: 'ok'
+  },
+  {
+    key: 'space',
+    name: 'SpaceAcres',
+    Icon: HardDrive,
+    col: '#22c55e',
+    current: '2.1.0',
+    available: '2.1.0',
+    initial: 'ok'
+  },
+  {
+    key: 'olo',
+    name: 'Olostep',
+    Icon: Eye,
+    col: '#00c49a',
+    current: '1.0.0',
+    available: '1.0.0',
+    initial: 'ok'
+  }
+]
 
 export default function Updates() {
-  const { integrations, loading, refetch } = useIntegrations()
   const [checking, setChecking] = useState(false)
-  const [installingId, setInstallingId] = useState<string | null>(null)
-  const [installError, setInstallError] = useState<string | null>(null)
+  const [updStatus, setUpdStatus] = useState<Record<string, UpdateStatus>>({})
 
-  const handleCheckUpdates = () => {
-    setChecking(true)
-    setTimeout(() => setChecking(false), 1500)
+  const doUpdate = (key: string) => {
+    setUpdStatus((p) => ({ ...p, [key]: 'updating' }))
+    setTimeout(() => setUpdStatus((p) => ({ ...p, [key]: 'ok' })), 2200)
   }
 
-  return (
-    <div className="p-6 lg:p-8 space-y-6">
-      <PageHeader
-        title="Updates"
-        subtitle="Monitor FEM and integration versions"
-        action={
-          <button
-            onClick={handleCheckUpdates}
-            disabled={checking}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-fry-surface border border-fry-border hover:bg-fry-surface-hover text-fry-text text-sm font-medium rounded-lg transition-colors disabled:opacity-60"
-          >
-            <RefreshCw className={`w-4 h-4 ${checking ? 'animate-spin' : ''}`} />
-            Check for Updates
-          </button>
-        }
-      />
+  const s = (key: string): UpdateStatus => updStatus[key] || PARTNERS.find((p) => p.key === key)?.initial || 'ok'
 
-      {/* FEM status card */}
-      <div className="bg-fry-surface border-l-4 border-l-fry-neon border border-fry-border rounded-xl p-5">
-        <div className="flex items-center gap-3">
-          <span
-            className="h-2.5 w-2.5 rounded-full bg-fry-neon shrink-0"
-            style={{ boxShadow: '0 0 6px #00B69B', animation: 'status-pulse 2s ease-in-out infinite' }}
-          />
-          <div>
-            <p className="text-sm font-medium text-fry-text">Fry Edge Miner — Up to date</p>
-            <p className="text-xs text-fry-text-muted mt-0.5">Running the latest release</p>
-          </div>
+  return (
+    <div
+      className="sc"
+      style={{
+        padding: '20px 24px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 14,
+        overflowY: 'auto',
+        height: '100%'
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          padding: '11px 14px',
+          background: 'var(--s2)',
+          border: '1px solid var(--b0)',
+          borderRadius: 'var(--rad)'
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <Clock size={12} color="var(--t2)" />
+          <span style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--t1)' }}>Last checked 2 minutes ago</span>
+        </div>
+        <Btn
+          v="g"
+          onClick={() => {
+            setChecking(true)
+            setTimeout(() => setChecking(false), 1600)
+          }}
+          sx={{ padding: '5px 12px', fontSize: 11 }}
+        >
+          <RefreshCw size={11} style={{ animation: checking ? 'spin 1s linear infinite' : 'none' }} />
+          {checking ? 'Checking…' : 'Check for updates'}
+        </Btn>
+      </div>
+
+      <div>
+        <Lbl sx={{ marginBottom: 9 }}>Application</Lbl>
+        <UpdCard
+          name="Fry Edge Miner"
+          Icon={ArrowUpCircle}
+          col="var(--red)"
+          current="0.2.3"
+          available="0.2.3"
+          status={s('fem') || 'ok'}
+        />
+      </div>
+
+      <div>
+        <Lbl sx={{ marginBottom: 9 }}>Partner Software</Lbl>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+          {PARTNERS.map((p) => (
+            <UpdCard
+              key={p.key}
+              name={p.name}
+              Icon={p.Icon}
+              col={p.col}
+              current={p.current}
+              available={p.available}
+              status={s(p.key)}
+              onUpdate={() => doUpdate(p.key)}
+            />
+          ))}
         </div>
       </div>
 
-      {/* Partner list */}
-      <div className="space-y-2">
-        <p className="text-xs font-medium uppercase tracking-widest text-fry-text-muted">Partner Software</p>
-
-        {installError && (
-          <div className="bg-fry-surface-2 border border-fry-warning text-fry-warning rounded-lg px-4 py-2 text-xs">
-            {installError}
-          </div>
-        )}
-
-        {loading ? (
-          <div className="space-y-2">
-            {Array.from({ length: 5 }).map((_, idx) => (
-              <div key={idx} className="bg-fry-surface border border-fry-border rounded-xl p-4 animate-pulse h-14" />
-            ))}
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {integrations.map((integration) => {
-              const notInstalled = integration.version === null
-              const running = !notInstalled && integration.lifecycle === 'Running'
-
-              return (
-                <div
-                  key={integration.id}
-                  className={`bg-fry-surface border border-fry-border rounded-xl px-4 py-3 flex items-center justify-between gap-4 ${
-                    notInstalled
-                      ? 'border-l-2 border-l-fry-border opacity-70'
-                      : running
-                        ? 'border-l-2 border-l-fry-neon'
-                        : 'border-l-2 border-l-fry-warning'
-                  }`}
-                >
-                  <div className="min-w-0">
-                    <span className="text-sm font-medium text-fry-text block truncate">
-                      {integration.display_name}
-                    </span>
-                    {!notInstalled && !running && (
-                      <span className="text-xs text-fry-warning">Needs restart</span>
-                    )}
-                    {notInstalled && (
-                      <span className="text-xs text-fry-text-muted">Not installed</span>
-                    )}
-                  </div>
-
-                  <div className="flex items-center gap-3 shrink-0">
-                    {!notInstalled && integration.version && (
-                      <span className="font-mono text-xs bg-fry-surface-2 text-fry-text-muted px-2 py-0.5 rounded">
-                        {/^\d/.test(integration.version ?? '') ? `v${integration.version}` : integration.version}
-                      </span>
-                    )}
-                    {notInstalled && (
-                      <button
-                        disabled={installingId === integration.id}
-                        onClick={async () => {
-                          setInstallingId(integration.id)
-                          setInstallError(null)
-                          try {
-                            await invoke('install_integration', { id: integration.id })
-                            await refetch()
-                          } catch (e) {
-                            const msg = e instanceof Error ? e.message : String(e)
-                            setInstallError(`${integration.display_name} install failed: ${msg}`)
-                            console.error('Install failed:', e)
-                          } finally {
-                            setInstallingId(null)
-                          }
-                        }}
-                        className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-fry-neon text-white rounded-lg text-xs font-semibold hover:bg-fry-neon-dim transition-colors disabled:opacity-60"
-                      >
-                        {installingId === integration.id ? (
-                          <><Loader2 className="w-3 h-3 animate-spin" />Installing…</>
-                        ) : (
-                          <><Download className="w-3 h-3" />Install</>
-                        )}
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        )}
+      <div
+        style={{
+          background: 'var(--s2)',
+          border: '1px solid var(--b0)',
+          borderRadius: 'var(--rad)',
+          padding: '12px 14px',
+          display: 'flex',
+          gap: 9
+        }}
+      >
+        <Info size={13} color="var(--t2)" style={{ marginTop: 1, flexShrink: 0 }} />
+        <div
+          style={{
+            fontFamily: 'var(--fb)',
+            fontSize: 12,
+            color: 'var(--t1)',
+            lineHeight: 1.6
+          }}
+        >
+          FEM checks partner software versions via hardwareapi on startup and every 6 hours.
+          Application updates use Tauri&apos;s built-in updater with ed25519 signature verification.
+        </div>
       </div>
     </div>
   )

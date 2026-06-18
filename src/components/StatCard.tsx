@@ -1,21 +1,43 @@
-import type { ReactNode } from 'react'
+import type { LucideIcon } from 'lucide-react'
+import Lbl from './primitives/Lbl'
 
 interface StatCardProps {
+  Icon: LucideIcon
   label: string
-  value: string | number
-  subtitle?: string
-  icon: ReactNode
+  value: string
+  sub?: string
   accent?: string
 }
 
-export function StatCard({ label, value, subtitle, icon, accent = '#00B69B' }: StatCardProps) {
+export default function StatCard({ Icon, label, value, sub, accent = 'var(--teal)' }: StatCardProps) {
   return (
-    <div className="relative bg-fry-surface border border-fry-border rounded-xl p-6 overflow-hidden">
-      <div className="absolute top-0 left-0 right-0 h-[3px] rounded-t-xl" style={{ background: accent }} />
-      <div className="absolute top-4 right-4 text-fry-text-muted opacity-25">{icon}</div>
-      <p className="text-xs font-medium uppercase tracking-widest text-fry-text-muted mt-4">{label}</p>
-      <p className="text-3xl font-bold tabular-nums text-fry-text mt-1">{value}</p>
-      {subtitle && <p className="text-xs text-fry-text-muted mt-1">{subtitle}</p>}
+    <div
+      style={{
+        background: 'var(--s1)',
+        border: '1px solid var(--b0)',
+        borderRadius: 'var(--rad)',
+        padding: '16px 18px',
+        flex: 1,
+        minWidth: 155,
+        borderTop: `3px solid ${accent}`
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 9 }}>
+        <Icon size={13} color={accent} />
+        <Lbl>{label}</Lbl>
+      </div>
+      <div
+        style={{
+          fontFamily: 'var(--fm)',
+          fontSize: 26,
+          fontWeight: 500,
+          color: 'var(--txt)',
+          lineHeight: 1
+        }}
+      >
+        {value}
+      </div>
+      {sub && <div style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t2)', marginTop: 5 }}>{sub}</div>}
     </div>
   )
 }

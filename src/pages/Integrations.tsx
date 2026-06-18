@@ -1,50 +1,61 @@
-import { useIntegrations } from '../hooks/useIntegrations'
-import { IntegrationCard } from '../components/IntegrationCard'
-import { PageHeader } from '../components/PageHeader'
+import IntCard from '../components/IntCard'
+import Lbl from '../components/primitives/Lbl'
+import type { MockIntegration } from '../lib/data'
 
-export default function Integrations() {
-  const { integrations, loading, toggle } = useIntegrations()
-  const enabledCount = integrations.filter((i) => i.enabled).length
+interface IntegrationsProps {
+  intgs: MockIntegration[]
+  onToggle: (id: string) => void
+}
 
+export default function Integrations({ intgs, onToggle }: IntegrationsProps) {
+  const active = intgs.filter((i) => i.enabled && i.healthy).length
   return (
-    <div className="p-6 lg:p-8 space-y-6">
-      <PageHeader
-        title="Integrations"
-        subtitle="Enable or disable earning integrations"
-        action={
-          <span className="bg-fry-surface border border-fry-border text-fry-text-muted text-xs px-3 py-1 rounded-full">
-            <span className="text-fry-neon font-medium">{enabledCount}</span>/{integrations.length} active
-          </span>
-        }
-      />
-
-      {loading ? (
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-          {Array.from({ length: 5 }).map((_, idx) => (
-            <div key={idx} className="bg-fry-surface border border-fry-border rounded-xl p-5 animate-pulse">
-              <div className="flex items-center justify-between mb-3">
-                <div className="h-4 w-20 bg-fry-border-subtle rounded" />
-                <div className="h-6 w-11 bg-fry-border-subtle rounded-full" />
-              </div>
-              <div className="space-y-2 border-t border-fry-border-subtle pt-3">
-                <div className="h-3 bg-fry-border-subtle rounded" />
-                <div className="h-3 bg-fry-border-subtle rounded" />
-                <div className="h-3 bg-fry-border-subtle rounded" />
-              </div>
-            </div>
-          ))}
+    <div
+      className="sc"
+      style={{
+        padding: '20px 24px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 12,
+        overflowY: 'auto',
+        height: '100%'
+      }}
+    >
+      <div
+        style={{
+          background: 'var(--s2)',
+          border: '1px solid var(--b0)',
+          borderRadius: 'var(--rad)',
+          padding: '11px 16px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center'
+        }}
+      >
+        <span style={{ fontFamily: 'var(--fb)', fontSize: 13, color: 'var(--t1)' }}>
+          Each <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>enabled</span> +{' '}
+          <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>healthy</span> integration contributes 20% to your daily
+          reward.
+        </span>
+        <div
+          style={{
+            fontFamily: 'var(--fm)',
+            fontSize: 12,
+            padding: '5px 11px',
+            borderRadius: 'var(--radsm)',
+            background: 'var(--tealg)',
+            color: 'var(--teal)',
+            flexShrink: 0,
+            marginLeft: 12
+          }}
+        >
+          {active}/5 · {active * 20}%
         </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-          {integrations.map((integration) => (
-            <IntegrationCard
-              key={integration.id}
-              integration={integration}
-              onToggle={toggle}
-            />
-          ))}
-        </div>
-      )}
+      </div>
+      <Lbl sx={{ marginBottom: 0 }}>Integrations</Lbl>
+      {intgs.map((intg) => (
+        <IntCard key={intg.id} intg={intg} onToggle={onToggle} />
+      ))}
     </div>
   )
 }
