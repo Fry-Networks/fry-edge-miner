@@ -63,6 +63,18 @@ export interface FemConfig {
   api_base_url: string
 }
 
+export interface UpdateInfo {
+  id: string
+  name: string
+  current_version: string | null
+  latest_version: string | null
+  available: boolean
+  error?: string
+  kind: 'app' | 'integration'
+  download_url: string | null
+  body: string | null
+}
+
 // Helper to extract health status display string
 export function getHealthLabel(health: HealthStatus): string {
   if (typeof health === 'string') return health

@@ -37,6 +37,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             use tauri::Manager;
 
@@ -270,6 +271,8 @@ fn main() {
             commands::settings::save_settings,
             commands::migration::check_migration,
             commands::migration::run_migration,
+            commands::updates::check_updates,
+            commands::updates::install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FEM")

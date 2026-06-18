@@ -1,6 +1,6 @@
 {
   "name": "fry-edge-miner",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "Fry Edge Miner - Multi-integration decentralized platform client",
   "type": "module",
   "scripts": {
@@ -22,6 +22,7 @@
   "devDependencies": {
     "@playwright/test": "^1.60.0",
     "@tailwindcss/vite": "^4",
+    "@tauri-apps/cli": "^2.11.2",
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",

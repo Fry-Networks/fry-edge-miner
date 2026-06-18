@@ -1,6 +1,6 @@
 {
   "productName": "Fry Edge Miner",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "build": {
     "beforeBuildCommand": "npm run build",
     "beforeDevCommand": "npm run dev",
@@ -29,12 +29,11 @@
       "endpoints": [
         "https://github.com/Fry-Foundation/fry-edge-miner/releases/latest/download/latest.json"
       ],
-      "dialog": true,
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRGMkQyMzc2MjUwOUNERkIKUldUN3pRa2xkaU10VDNyTHNwVVN0NUxNUjlndGNzbHI4UUtJRG5OcWlNOWtKQm9KbVZmd0drT0oK"
     }
   },
   "bundle": {
-    "createUpdaterArtifacts": "v1Compatible",
+    "createUpdaterArtifacts": false,
     "active": true,
     "targets": "all",
     "icon": [

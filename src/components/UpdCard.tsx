@@ -3,7 +3,7 @@ import type { LucideIcon } from 'lucide-react'
 import Btn from './primitives/Btn'
 import Tag from './primitives/Tag'
 
-export type UpdateStatus = 'ok' | 'updating' | 'update' | 'missing'
+export type UpdateStatus = 'ok' | 'updating' | 'update' | 'error'
 
 interface UpdCardProps {
   name: string
@@ -28,7 +28,7 @@ export default function UpdCard({ name, Icon, col, current, available, status, o
         border: '1px solid var(--b0)',
         borderRadius: 'var(--rad)',
         borderLeft: `3px solid ${
-          hasUpd ? 'var(--amb)' : status === 'missing' ? 'var(--t2)' : status === 'updating' ? 'var(--blu)' : 'var(--teal)'
+          hasUpd ? 'var(--amb)' : status === 'updating' ? 'var(--blu)' : status === 'error' ? 'var(--amb)' : 'var(--teal)'
         }`
       }}
     >
@@ -60,15 +60,11 @@ export default function UpdCard({ name, Icon, col, current, available, status, o
         </div>
       </div>
       {status === 'ok' && <Tag v="run">Up to date</Tag>}
+      {status === 'error' && <Tag v="warn">Check failed</Tag>}
       {status === 'updating' && <Tag v="info">Updating…</Tag>}
       {status === 'update' && (
         <Btn v="p" sx={{ padding: '4px 12px', fontSize: 11 }} onClick={onUpdate}>
           <Download size={11} /> Update
-        </Btn>
-      )}
-      {status === 'missing' && (
-        <Btn v="g" sx={{ padding: '4px 12px', fontSize: 11 }}>
-          <Download size={11} /> Install
         </Btn>
       )}
     </div>
