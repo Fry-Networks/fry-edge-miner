@@ -17,6 +17,17 @@ pub struct FemConfig {
     pub api_base_url: String,
     #[serde(skip_serializing, default = "default_api_token")]
     pub api_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_token: Option<String>,
+}
+
+impl FemConfig {
+    pub fn effective_api_token(&self) -> String {
+        self.device_token
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.api_token.clone())
+    }
 }
 
 fn default_api_token() -> String {
@@ -37,6 +48,7 @@ impl Default for FemConfig {
             integrations_enabled: HashMap::new(),
             api_base_url: "https://hardwareapi.frynetworks.com".to_string(),
             api_token: default_api_token(),
+            device_token: None,
         }
     }
 }

@@ -34,8 +34,10 @@ pub struct InstallationHeartbeat {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GenericOk {
-    pub ok: bool,
+pub struct RegistrationResponse {
+    pub status: String,
+    #[serde(default)]
+    pub device_token: Option<String>,
 }
 
 // --- Lease (matches server LeaseAction + LeaseResponse, models.py) ---

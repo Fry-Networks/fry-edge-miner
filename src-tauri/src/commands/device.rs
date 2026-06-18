@@ -89,14 +89,25 @@ pub async fn register_device(
     };
 
     match crate::api::installations::register(&state.api_client, &heartbeat).await {
-        Ok(_) => {
-            // Persist install_id on successful registration
-            state
-                .config
-                .update(|cfg| {
-                    cfg.install_id = Some(install_id);
-                })
-                .map_err(|e| e.to_string())?;
+        Ok(response) => {
+            // Persist install_id and any per-device token returned by the server
+            if let Some(token) = response.device_token {
+                state
+                    .config
+                    .update(|cfg| {
+                        cfg.install_id = Some(install_id.clone());
+                        cfg.device_token = Some(token.clone());
+                    })
+                    .map_err(|e| e.to_string())?;
+                state.api_client.set_bearer_token(token);
+            } else {
+                state
+                    .config
+                    .update(|cfg| {
+                        cfg.install_id = Some(install_id);
+                    })
+                    .map_err(|e| e.to_string())?;
+            }
 
             tracing::info!(
                 miner_key = miner_key,
@@ -202,8 +213,12 @@ pub async fn deregister_device(
             cfg.miner_key = None;
             cfg.wallet_address = None;
             cfg.install_id = None;
+            cfg.device_token = None;
         })
         .map_err(|e| e.to_string())?;
+
+    let cfg = state.config.get();
+    state.api_client.set_bearer_token(cfg.effective_api_token());
 
     tracing::info!("Device deregistered");
     Ok(())
