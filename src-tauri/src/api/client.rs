@@ -1,3 +1,4 @@
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use reqwest::Client;
@@ -23,7 +24,7 @@ impl serde::Serialize for ApiError {
 
 pub struct ApiClient {
     pub(crate) base_url: String,
-    pub(crate) bearer_token: String,
+    pub(crate) bearer_token: Arc<RwLock<String>>,
     pub(crate) http: Client,
 }
 
@@ -35,9 +36,13 @@ impl ApiClient {
             .expect("failed to build HTTP client");
         Self {
             base_url,
-            bearer_token,
+            bearer_token: Arc::new(RwLock::new(bearer_token)),
             http,
         }
+    }
+
+    pub fn set_bearer_token(&self, token: String) {
+        *self.bearer_token.write().unwrap() = token;
     }
 
     pub fn url(&self, path: &str) -> String {
@@ -45,10 +50,11 @@ impl ApiClient {
     }
 
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
+        let token = self.bearer_token.read().unwrap().clone();
         let resp = self
             .http
             .get(self.url(path))
-            .bearer_auth(&self.bearer_token)
+            .bearer_auth(&token)
             .send()
             .await?;
         if !resp.status().is_success() {
@@ -64,10 +70,11 @@ impl ApiClient {
         path: &str,
         body: &B,
     ) -> Result<T, ApiError> {
+        let token = self.bearer_token.read().unwrap().clone();
         let resp = self
             .http
             .post(self.url(path))
-            .bearer_auth(&self.bearer_token)
+            .bearer_auth(&token)
             .json(body)
             .send()
             .await?;
@@ -84,10 +91,11 @@ impl ApiClient {
         path: &str,
         body: &B,
     ) -> Result<(), ApiError> {
+        let token = self.bearer_token.read().unwrap().clone();
         let resp = self
             .http
             .put(self.url(path))
-            .bearer_auth(&self.bearer_token)
+            .bearer_auth(&token)
             .json(body)
             .send()
             .await?;
@@ -104,10 +112,11 @@ impl ApiClient {
         path: &str,
         body: &B,
     ) -> Result<T, ApiError> {
+        let token = self.bearer_token.read().unwrap().clone();
         let resp = self
             .http
             .patch(self.url(path))
-            .bearer_auth(&self.bearer_token)
+            .bearer_auth(&token)
             .json(body)
             .send()
             .await?;
@@ -120,10 +129,11 @@ impl ApiClient {
     }
 
     pub async fn delete(&self, path: &str) -> Result<(), ApiError> {
+        let token = self.bearer_token.read().unwrap().clone();
         let resp = self
             .http
             .delete(self.url(path))
-            .bearer_auth(&self.bearer_token)
+            .bearer_auth(&token)
             .send()
             .await?;
         if !resp.status().is_success() {

@@ -49,9 +49,12 @@ fn main() {
                 ConfigStore::new(config_dir).expect("failed to initialize config store");
             let config_store = Arc::new(config_store);
 
-            // API client (bearer token baked at compile time via FEM_API_TOKEN env var)
+            // API client (initial bearer token is the configured token; per-device token applied after registration)
             let cfg = config_store.get();
-            let api_client = Arc::new(ApiClient::new(cfg.api_base_url.clone(), cfg.api_token.clone()));
+            let api_client = Arc::new(ApiClient::new(
+                cfg.api_base_url.clone(),
+                cfg.effective_api_token(),
+            ));
 
             // Process supervisor (created before registry — MysteriumIntegration needs Arc<Mutex<Supervisor>>)
             let log_dir = app

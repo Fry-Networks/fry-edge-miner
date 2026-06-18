@@ -1,11 +1,11 @@
 use crate::api::client::{ApiClient, ApiError};
-use crate::api::types::{GenericOk, InstallationHeartbeat};
+use crate::api::types::{InstallationHeartbeat, RegistrationResponse};
 
 /// POST /installations/{miner_key}/installations/{install_id} — upsert installation heartbeat
 pub async fn register(
     client: &ApiClient,
     request: &InstallationHeartbeat,
-) -> Result<GenericOk, ApiError> {
+) -> Result<RegistrationResponse, ApiError> {
     client
         .post(
             &format!(
