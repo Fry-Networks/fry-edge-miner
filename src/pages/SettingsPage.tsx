@@ -9,6 +9,7 @@ import SettingRow from '../components/SettingRow'
 import Tog from '../components/primitives/Tog'
 import type { FemConfig } from '../lib/types'
 import { invokeWithFallback } from '../lib/tauri'
+import { APP_VERSION } from '../lib/version'
 
 interface SettingSectionProps {
   Icon: LucideIcon
@@ -163,7 +164,7 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf' }: Setti
       <SettingSection Icon={Info} ico="var(--t2)" label="About">
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 14, marginBottom: 12 }}>
           {[
-            ['Version', '0.2.3'],
+            ['Version', APP_VERSION],
             ['Platform', 'Windows x64'],
             ['Tauri', '2.1.0']
           ].map(([l, v]) => (

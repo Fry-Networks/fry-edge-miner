@@ -1,5 +1,6 @@
 import Dot from './primitives/Dot'
 import type { NavPage } from './Sidebar'
+import { APP_VERSION } from '../lib/version'
 
 interface TopBarProps {
   page: NavPage
@@ -51,7 +52,7 @@ export default function TopBar({ page }: TopBarProps) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
         <Dot status="run" size={5} />
         <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--teal)' }}>Connected</span>
-        <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--t2)', marginLeft: 3 }}>v0.2.3</span>
+        <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--t2)', marginLeft: 3 }}>v{APP_VERSION}</span>
       </div>
     </div>
   )

@@ -1,5 +1,6 @@
 import { Check } from 'lucide-react'
 import NetSVG from '../components/NetSVG'
+import { APP_VERSION } from '../lib/version'
 
 const WLABELS = ['Welcome', 'Wallet', 'Integrations', 'Installing']
 
@@ -50,7 +51,7 @@ export default function WizPanel({ step }: WizPanelProps) {
         <div
           style={{ fontFamily: 'var(--fm)', fontSize: 9, color: 'var(--t2)', marginTop: 5, opacity: 0.6 }}
         >
-          v0.2.3
+          v{APP_VERSION}
         </div>
       </div>
       <div style={{ position: 'relative', zIndex: 1, display: 'flex', flexDirection: 'column' }}>

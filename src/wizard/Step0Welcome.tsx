@@ -1,6 +1,7 @@
 import { ArrowRight, Check, X } from 'lucide-react'
 import Btn from '../components/primitives/Btn'
 import Lbl from '../components/primitives/Lbl'
+import { APP_VERSION } from '../lib/version'
 
 interface Step0Props {
   onNext: () => void
@@ -92,7 +93,7 @@ export default function Step0Welcome({ onNext }: Step0Props) {
           marginBottom: 28
         }}
       >
-        <Lbl sx={{ marginBottom: 9 }}>What&apos;s new in v0.2.3</Lbl>
+        <Lbl sx={{ marginBottom: 9 }}>What&apos;s new in v{APP_VERSION}</Lbl>
         {whatsNew.map((t, i) => (
           <div key={i} style={{ display: 'flex', gap: 7, marginBottom: 5 }}>
             <span style={{ color: 'var(--teal)', flexShrink: 0 }}>–</span>

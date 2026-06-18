@@ -17,6 +17,7 @@ import Btn from '../components/primitives/Btn'
 import Lbl from '../components/primitives/Lbl'
 import UpdCard, { type UpdateStatus } from '../components/UpdCard'
 import type { UpdateInfo } from '../lib/types'
+import { APP_VERSION } from '../lib/version'
 
 const ICONS: Record<string, LucideIcon> = {
   fem: ArrowUpCircle,
@@ -53,8 +54,8 @@ function mockUpdates(): UpdateInfo[] {
     {
       id: 'fem',
       name: 'Fry Edge Miner',
-      current_version: '0.2.3',
-      latest_version: '0.2.3',
+      current_version: APP_VERSION,
+      latest_version: APP_VERSION,
       available: false,
       kind: 'app',
       download_url: null,
