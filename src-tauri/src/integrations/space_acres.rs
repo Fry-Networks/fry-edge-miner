@@ -1,11 +1,15 @@
-use super::download::{download_file, partners_base_dir};
+use super::download::{download_file_with_options, partners_base_dir};
 use super::{HealthStatus, Integration, PocGateData};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
+use std::time::Duration;
 use tracing::{info, warn};
 
 pub struct SpaceAcresIntegration;
+
+const GITHUB_API_URL: &str = "https://api.github.com/repos/autonomys/space-acres/releases/latest";
+const USER_AGENT: &str = concat!("FryEdgeMiner/", env!("CARGO_PKG_VERSION"));
 
 impl SpaceAcresIntegration {
     fn partner_dir() -> PathBuf {
@@ -19,37 +23,115 @@ impl SpaceAcresIntegration {
         return Self::partner_dir().join("space-acres");
     }
 
-    async fn fetch_latest_release() -> Result<(String, String)> {
-        // Fetch latest release from GitHub API
-        let url = "https://api.github.com/repos/autonomys/space-acres/releases/latest";
-        let response = reqwest::get(url).await?;
-        if !response.status().is_success() {
-            anyhow::bail!("Failed to fetch latest release: HTTP {}", response.status());
+    fn github_token() -> Option<String> {
+        std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty())
+    }
+
+    fn build_client() -> reqwest::Client {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(token) = Self::github_token() {
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token))
+                    .expect("invalid GITHUB_TOKEN header value"),
+            );
         }
 
-        let json: serde_json::Value = response.json().await?;
-        let tag_name = json["tag_name"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("No tag_name in release"))?
-            .to_string();
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .user_agent(USER_AGENT)
+            .default_headers(headers)
+            .build()
+            .expect("failed to build GitHub HTTP client")
+    }
 
-        // Find Windows .exe asset
-        let assets = json["assets"]
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("No assets in release"))?;
+    async fn fetch_latest_release() -> Result<(String, String)> {
+        let client = Self::build_client();
+        let max_attempts = 3u32;
+        let base_delay = Duration::from_secs(2);
+        let mut last_error = None;
 
-        let download_url = assets
-            .iter()
-            .find_map(|asset| {
-                if asset["name"].as_str().map(|n| n.ends_with(".exe")).unwrap_or(false) {
-                    asset["browser_download_url"].as_str().map(|s| s.to_string())
-                } else {
-                    None
+        for attempt in 1..=max_attempts {
+            info!(url = GITHUB_API_URL, attempt = attempt, "Fetching latest SpaceAcres release");
+
+            match client.get(GITHUB_API_URL).send().await {
+                Ok(response) => {
+                    let status = response.status();
+
+                    if status.is_success() {
+                        let json: serde_json::Value = response.json().await?;
+                        let tag_name = json["tag_name"]
+                            .as_str()
+                            .ok_or_else(|| anyhow::anyhow!("No tag_name in release"))?
+                            .to_string();
+
+                        let assets = json["assets"]
+                            .as_array()
+                            .ok_or_else(|| anyhow::anyhow!("No assets in release"))?;
+
+                        let download_url = assets
+                            .iter()
+                            .find_map(|asset| {
+                                if asset["name"].as_str().map(|n| n.ends_with(".exe")).unwrap_or(false) {
+                                    asset["browser_download_url"].as_str().map(|s| s.to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .ok_or_else(|| anyhow::anyhow!("No .exe asset found in release"))?;
+
+                        return Ok((tag_name, download_url));
+                    }
+
+                    let headers = response.headers();
+                    let ratelimit_remaining = headers
+                        .get("x-ratelimit-remaining")
+                        .and_then(|v| v.to_str().ok());
+                    let retry_after = headers
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok());
+
+                    warn!(
+                        url = GITHUB_API_URL,
+                        status = status.as_u16(),
+                        ratelimit_remaining = ?ratelimit_remaining,
+                        retry_after = ?retry_after,
+                        attempt = attempt,
+                        "Failed to fetch latest SpaceAcres release"
+                    );
+
+                    if status == reqwest::StatusCode::FORBIDDEN
+                        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    {
+                        last_error = Some(anyhow::anyhow!(
+                            "GitHub API returned HTTP {} (x-ratelimit-remaining={:?}, retry-after={:?})",
+                            status.as_u16(),
+                            ratelimit_remaining,
+                            retry_after
+                        ));
+
+                        if attempt < max_attempts {
+                            let delay = base_delay * 2u32.pow(attempt - 1);
+                            warn!(delay = ?delay, "Retrying GitHub API call after rate-limit backoff");
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                    } else {
+                        return Err(anyhow::anyhow!("Failed to fetch latest release: HTTP {}", status.as_u16()));
+                    }
                 }
-            })
-            .ok_or_else(|| anyhow::anyhow!("No .exe asset found in release"))?;
+                Err(e) => {
+                    warn!(error = %e, attempt = attempt, "GitHub API request error");
+                    last_error = Some(anyhow::anyhow!("GitHub API request error: {}", e));
+                    if attempt < max_attempts {
+                        let delay = base_delay * 2u32.pow(attempt - 1);
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
+        }
 
-        Ok((tag_name, download_url))
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Failed to fetch latest release after all retries")))
     }
 
     fn is_running() -> bool {
@@ -96,8 +178,9 @@ impl Integration for SpaceAcresIntegration {
         let (version, download_url) = Self::fetch_latest_release().await?;
         info!(version = %version, download_url = %download_url, "Found latest release");
 
-        // Download the binary
-        download_file(&download_url, &binary).await?;
+        // Download the binary with retry/backoff and optional auth
+        let token = Self::github_token();
+        download_file_with_options(&download_url, &binary, USER_AGENT, token.as_deref()).await?;
 
         // Make it executable on Unix-like systems
         #[cfg(not(target_os = "windows"))]
