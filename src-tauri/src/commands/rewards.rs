@@ -8,7 +8,7 @@ const DEFAULT_REWARD_TOKEN_ASA_ID: &str = "";
 const DEFAULT_REWARD_TOKEN_NAME: &str = "\u{2014}";
 const DEFAULT_STAKE_TOKEN_ASA_ID: &str = "";
 const DEFAULT_STAKE_TOKEN_NAME: &str = "\u{2014}";
-const DEFAULT_STAKE_MULTIPLIER: f64 = 0.5;
+const DEFAULT_STAKE_MULTIPLIER: f64 = 0.0;
 const SLOTS_PER_DAY: u32 = 144;
 
 #[derive(Debug, Serialize)]
@@ -71,15 +71,18 @@ pub async fn get_reward_summary(
         DEFAULT_BASE_REWARD
     };
 
-    // TODO: read user's actual stake tier from config/registration
-    // FRY 2.0 → 3.0×, FRY 1.0 → 1.0×, No stake → 0.5×
+    // TODO: stake multiplier tiers should come from admin panel config, not hardcoded constants.
+    // Admin panel at admin.frynetworks.com is the source of truth for these values.
+    // Tiers: Not registered=0×, No verification stake=1×, FRY 2.0 24h lock=1.5×, FRY 2.0 6mo lock=3×
     let stake_multiplier = DEFAULT_STAKE_MULTIPLIER;
     let stake_label = if stake_multiplier >= 3.0 {
-        "FRY 2.0".to_string()
+        "FRY 2.0 (6mo)".to_string()
+    } else if stake_multiplier >= 1.5 {
+        "FRY 2.0 (24h)".to_string()
     } else if stake_multiplier >= 1.0 {
-        "FRY 1.0".to_string()
-    } else {
         "No stake".to_string()
+    } else {
+        "Not registered".to_string()
     };
 
     Ok(RewardSummary {
