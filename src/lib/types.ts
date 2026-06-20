@@ -43,6 +43,7 @@ export interface RewardSummary {
   stake_token_name: string
   stake_multiplier: number
   stake_label: string
+  stake_tiers?: Record<string, { multiplier: number; label: string }>
 }
 
 export interface PocSlot {

@@ -4,11 +4,11 @@
   "pub_date": "2026-06-20T09:37:00.000Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUldUN3pRa2xkaU10VDBEUzhpQ0hNZTE2SXZ2SCthWis3bkI4Y1VxT3Y1Y1JBRGF2QzNiQ1R3Zkdxa091WHhxVFFYUVRNaUYzZlcwbkRKWjRkUGljRHNJakpoTDZIaCtRbEFzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgxOTg2OTA1CWZpbGU6RnJ5IEVkZ2UgTWluZXJfMC4yLjlfeDY0LXNldHVwLm5zaXMuemlwCmdGU21naldmT0JhMis4MXI4K3NLSDRlQ0RLc1luVG9NOTlkMjl6aWlidStkeHIyMGtEVExtR2ZMbnhqTnVDNzh5OUFCanRqeENoOEZjbEl2Wm11RUJRPT0K",
       "url": "https://github.com/Fry-Foundation/fry-edge-miner/releases/download/v0.2.9/Fry.Edge.Miner_0.2.9_x64-setup.nsis.zip"
     },
     "windows-msi": {
-      "signature": "",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUldUN3pRa2xkaU10VHdSMklQdlNpVUxDSloxdkFzMlFDbmYwTzA1SlBnTUdWR0EvRy94bld6UWsremh5OG5BS212TDluandZUTZ1bmNxcUdRcDFkbTh2NWVEKzIyeXJIc2dVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgxOTg2OTA4CWZpbGU6RnJ5IEVkZ2UgTWluZXJfMC4yLjlfeDY0X2VuLVVTLm1zaS56aXAKREI0ZlNibmsxdTBsRUd6eTlWWjlCQy9IeXdKcnpXbEcwZ3lHeXB5eW8xTHBzQzFKbzE1Y3IyYVJxZytlbXlYNGt5WkdpT2I1VXhXUjVqSWRjSEFFQ1E9PQo=",
       "url": "https://github.com/Fry-Foundation/fry-edge-miner/releases/download/v0.2.9/Fry.Edge.Miner_0.2.9_x64_en-US.msi.zip"
     }
   }

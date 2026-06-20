@@ -18,6 +18,31 @@ pub struct VersionInfo {
     pub reward_token_asa_id: Option<String>,
     #[serde(default)]
     pub reward_token_name: Option<String>,
+    #[serde(default)]
+    pub stake_tiers: Option<HashMap<String, StakeTier>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StakeTier {
+    pub multiplier: f64,
+    pub label: String,
+}
+
+// --- Verified status (matches hardwareapi GET /credentials/{key}/verified) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifiedStatus {
+    pub miner_key: String,
+    pub verified: bool,
+    #[serde(default)]
+    pub staked: Option<StakedInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StakedInfo {
+    #[serde(rename = "type")]
+    pub stake_type: Option<String>,
+    pub amount: Option<f64>,
 }
 
 // --- Installation (matches server InstallationHeartbeat, models.py) ---

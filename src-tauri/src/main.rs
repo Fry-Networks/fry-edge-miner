@@ -29,6 +29,8 @@ pub struct AppState {
     pub last_health: Arc<RwLock<HashMap<String, HealthStatus>>>,
     pub poc_cache: Arc<PocCache>,
     pub cached_reward_config: Arc<RwLock<Option<crate::api::types::RewardConfig>>>,
+    pub cached_stake_tiers: Arc<RwLock<Option<HashMap<String, crate::api::types::StakeTier>>>>,
+    pub cached_verified_status: Arc<RwLock<Option<crate::api::types::VerifiedStatus>>>,
 }
 
 fn main() {
@@ -97,6 +99,8 @@ fn main() {
             let last_health = Arc::new(RwLock::new(HashMap::<String, HealthStatus>::new()));
             let cached_base_reward = Arc::new(AtomicU64::new(0));
             let cached_reward_config = Arc::new(RwLock::new(None::<crate::api::types::RewardConfig>));
+            let cached_stake_tiers: Arc<RwLock<Option<HashMap<String, crate::api::types::StakeTier>>>> = Arc::new(RwLock::new(None));
+            let cached_verified_status: Arc<RwLock<Option<crate::api::types::VerifiedStatus>>> = Arc::new(RwLock::new(None));
             let poc_cache = Arc::new(PocCache::new(&config_dir));
 
             // --- Health monitoring: auto-restart with exponential backoff ---
@@ -188,6 +192,8 @@ fn main() {
             let poc_client = api_client.clone();
             let poc_base_reward = cached_base_reward.clone();
             let poc_reward_config = cached_reward_config.clone();
+            let poc_stake_tiers = cached_stake_tiers.clone();
+            let poc_verified_status = cached_verified_status.clone();
             let poc_cache_loop = poc_cache.clone();
             tauri::async_runtime::spawn(async move {
                 // Verify runtime supports block_in_place — panics at first poll if
@@ -284,6 +290,33 @@ fn main() {
                                 tracing::debug!(error = %e, "version fetch failed, using cached/default");
                             }
                         }
+
+                        // Cache stake_tiers from the version response (already fetched above)
+                        if let Ok(info) = api::versions::check_version(&poc_client, "FEM", "windows").await {
+                            if let Some(tiers) = info.stake_tiers {
+                                if let Ok(mut cache) = poc_stake_tiers.write() {
+                                    *cache = Some(tiers);
+                                }
+                            }
+                        }
+
+                        // Every 5th tick (~5 min): refresh verification + staking status
+                        static VERIFIED_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                        let count = VERIFIED_COUNTER.fetch_add(1, Ordering::Relaxed);
+                        if count % 5 == 0 {
+                            if let Some(ref key) = cfg.miner_key {
+                                match api::credentials::get_verified_status(&poc_client, key).await {
+                                    Ok(status) => {
+                                        if let Ok(mut cache) = poc_verified_status.write() {
+                                            *cache = Some(status);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(error = %e, "verified status fetch failed");
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             });
@@ -298,6 +331,8 @@ fn main() {
                 last_health,
                 poc_cache,
                 cached_reward_config,
+                cached_stake_tiers,
+                cached_verified_status,
             });
 
             tracing::info!("FEM initialized — {integration_count} integrations registered");

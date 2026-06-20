@@ -8,7 +8,6 @@ const DEFAULT_REWARD_TOKEN_ASA_ID: &str = "";
 const DEFAULT_REWARD_TOKEN_NAME: &str = "\u{2014}";
 const DEFAULT_STAKE_TOKEN_ASA_ID: &str = "";
 const DEFAULT_STAKE_TOKEN_NAME: &str = "\u{2014}";
-const DEFAULT_STAKE_MULTIPLIER: f64 = 0.0;
 const SLOTS_PER_DAY: u32 = 144;
 
 #[derive(Debug, Serialize)]
@@ -71,18 +70,49 @@ pub async fn get_reward_summary(
         DEFAULT_BASE_REWARD
     };
 
-    // TODO: stake multiplier tiers should come from admin panel config, not hardcoded constants.
-    // Admin panel at admin.frynetworks.com is the source of truth for these values.
-    // Tiers: Not registered=0×, No verification stake=1×, FRY 2.0 24h lock=1.5×, FRY 2.0 6mo lock=3×
-    let stake_multiplier = DEFAULT_STAKE_MULTIPLIER;
-    let stake_label = if stake_multiplier >= 3.0 {
-        "FRY 2.0 (6mo)".to_string()
-    } else if stake_multiplier >= 1.5 {
-        "FRY 2.0 (24h)".to_string()
-    } else if stake_multiplier >= 1.0 {
-        "No stake".to_string()
-    } else {
-        "Not registered".to_string()
+    // Stake multiplier: look up from cached stake_tiers (from /versions/FEM)
+    // and cached verified status (from /credentials/{key}/verified)
+    let tiers = state.cached_stake_tiers.read().map_err(|e| e.to_string())?;
+    let verified = state.cached_verified_status.read().map_err(|e| e.to_string())?;
+
+    let (stake_multiplier, stake_label) = match (&*tiers, &*verified) {
+        (Some(tiers), Some(vs)) => {
+            let tier_key = if !vs.verified {
+                "unregistered"
+            } else if let Some(ref staked) = vs.staked {
+                staked.stake_type.as_deref().unwrap_or("none")
+            } else {
+                "none"
+            };
+            tiers.get(tier_key).map_or(
+                (0.0, "Not registered".to_string()),
+                |t| (t.multiplier, t.label.clone()),
+            )
+        }
+        (Some(tiers), None) => {
+            // Verified status not yet fetched — check if device is registered
+            let has_key = state.config.get().miner_key.is_some();
+            if has_key {
+                tiers.get("none").map_or(
+                    (1.0, "No stake".to_string()),
+                    |t| (t.multiplier, t.label.clone()),
+                )
+            } else {
+                tiers.get("unregistered").map_or(
+                    (0.0, "Not registered".to_string()),
+                    |t| (t.multiplier, t.label.clone()),
+                )
+            }
+        }
+        _ => {
+            // No cached data yet — use registration state as best guess
+            let has_key = state.config.get().miner_key.is_some();
+            if has_key {
+                (1.0, "No stake".to_string())
+            } else {
+                (0.0, "Not registered".to_string())
+            }
+        }
     };
 
     Ok(RewardSummary {
