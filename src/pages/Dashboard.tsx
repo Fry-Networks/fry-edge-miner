@@ -1,19 +1,34 @@
-import { Activity, Coins, Puzzle } from 'lucide-react'
+import { Activity, Coins, Puzzle, type LucideIcon } from 'lucide-react'
 import Dot from '../components/primitives/Dot'
 import Lbl from '../components/primitives/Lbl'
 import PoCGrid from '../components/PoCGrid'
 import StatCard from '../components/StatCard'
 import Divider from '../components/primitives/Divider'
-import type { MockIntegration } from '../lib/data'
-import { POC } from '../lib/data'
+import { useRewards } from '../hooks/useRewards'
+
+interface DashboardIntegration {
+  id: string
+  name: string
+  Icon: LucideIcon
+  col: string
+  enabled: boolean
+  healthy: boolean
+}
 
 interface DashboardProps {
-  intgs: MockIntegration[]
+  intgs: DashboardIntegration[]
 }
 
 export default function Dashboard({ intgs }: DashboardProps) {
+  const { rewards } = useRewards()
+  const summary = rewards.summary
   const active = intgs.filter((i) => i.enabled && i.healthy)
   const pct = ((active.length / intgs.length) * 100).toFixed(0)
+  const slotHits = rewards.slots.filter((s) => s.done).length
+  const estimated = summary ? summary.estimated_daily.toFixed(2) : '0.00'
+  const rewardToken = summary ? summary.reward_token_name : '—'
+  const rewardAsa = summary ? summary.reward_token_asa_id : '—'
+  const baseReward = summary ? summary.base_reward.toFixed(2) : '0.00'
   return (
     <div
       className="sc"
@@ -34,8 +49,8 @@ export default function Dashboard({ intgs }: DashboardProps) {
           sub={`${pct}% reward proportion`}
           accent="var(--teal)"
         />
-        <StatCard Icon={Coins} label="Daily Estimate" value="14.88" sub="fNODE (ASA 2485202024)" accent="var(--amb)" />
-        <StatCard Icon={Activity} label="PoC Score" value="0.108" sub="62 / 144 slot hits today" accent="var(--red)" />
+        <StatCard Icon={Coins} label="Daily Estimate" value={estimated} sub={`${rewardToken} (ASA ${rewardAsa})`} accent="var(--amb)" />
+        <StatCard Icon={Activity} label="PoC Score" value={(slotHits / 144).toFixed(3)} sub={`${slotHits} / 144 slot hits today`} accent="var(--red)" />
       </div>
 
       <div>
@@ -104,9 +119,9 @@ export default function Dashboard({ intgs }: DashboardProps) {
               <div style={{ fontFamily: 'var(--fh)', fontWeight: 600, fontSize: 12, color: 'var(--txt)' }}>PoC Slots</div>
               <div style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t2)' }}>Today · 144 slots</div>
             </div>
-            <span style={{ fontFamily: 'var(--fm)', fontSize: 11, color: 'var(--teal)' }}>62/144</span>
+            <span style={{ fontFamily: 'var(--fm)', fontSize: 11, color: 'var(--teal)' }}>{slotHits}/144</span>
           </div>
-          <PoCGrid slots={POC} />
+          <PoCGrid slots={rewards.slots} />
           <div style={{ display: 'flex', justifyContent: 'space-between' }}>
             {['00:00', '06:00', '12:00', '18:00', '23:50'].map((t) => (
               <span key={t} style={{ fontFamily: 'var(--fm)', fontSize: 8, color: 'var(--t2)' }}>{t}</span>
@@ -152,8 +167,8 @@ export default function Dashboard({ intgs }: DashboardProps) {
           </div>
           <Divider sx={{ marginBottom: 10 }} />
           {[
-            ['Base reward', '59.52 fNODE', 'var(--txt)'],
-            ['Staking mult', '3.0×', 'var(--teal)'],
+            ['Base reward', summary ? `${baseReward} ${rewardToken}` : '—', 'var(--txt)'],
+            ['Staking mult', summary ? `${summary.proportion.toFixed(2)}×` : '—', 'var(--teal)'],
             ['Proportion', `${pct}%`, 'var(--txt)'],
             ['BYOD factor', '1.0×', 'var(--t1)']
           ].map(([l, v, c]) => (
@@ -165,7 +180,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
           <Divider sx={{ margin: '8px 0' }} />
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ fontFamily: 'var(--fh)', fontWeight: 700, fontSize: 12, color: 'var(--txt)' }}>Yesterday</span>
-            <span style={{ fontFamily: 'var(--fm)', fontSize: 14, color: 'var(--teal)' }}>6.41 fNODE</span>
+            <span style={{ fontFamily: 'var(--fm)', fontSize: 14, color: 'var(--teal)' }}>—</span>
           </div>
         </div>
       </div>

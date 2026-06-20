@@ -1,3 +1,4 @@
+pub mod cache;
 pub mod gates;
 pub mod hardware;
 pub mod reporter;

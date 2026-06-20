@@ -6,6 +6,7 @@ pub mod presearch;
 pub mod space_acres;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -99,7 +100,7 @@ pub trait Integration: Send + Sync {
 // --- Registry ---
 
 pub struct IntegrationRegistry {
-    integrations: HashMap<String, Box<dyn Integration>>,
+    integrations: HashMap<String, Arc<dyn Integration>>,
     enabled: HashMap<String, bool>,
 }
 
@@ -111,14 +112,14 @@ impl IntegrationRegistry {
         }
     }
 
-    pub fn register(&mut self, integration: Box<dyn Integration>) {
+    pub fn register(&mut self, integration: Arc<dyn Integration>) {
         let id = integration.id().to_string();
         self.enabled.insert(id.clone(), false); // disabled by default — user enables via UI
         self.integrations.insert(id, integration);
     }
 
-    pub fn get(&self, id: &str) -> Option<&dyn Integration> {
-        self.integrations.get(id).map(|b| b.as_ref())
+    pub fn get(&self, id: &str) -> Option<Arc<dyn Integration>> {
+        self.integrations.get(id).cloned()
     }
 
     pub fn set_enabled(&mut self, id: &str, enabled: bool) {
@@ -129,10 +130,12 @@ impl IntegrationRegistry {
         self.enabled.get(id).copied().unwrap_or(false)
     }
 
-    pub fn list(&self) -> Vec<&dyn Integration> {
-        self.integrations.values().map(|b| b.as_ref()).collect()
+    pub fn list(&self) -> Vec<Arc<dyn Integration>> {
+        self.integrations.values().cloned().collect()
     }
 
+    /// Fallback status derivation from registry metadata only.
+    /// Prefer combining real health checks with registry state in commands.
     pub fn list_statuses(&self) -> Vec<IntegrationStatus> {
         self.integrations
             .values()
@@ -144,12 +147,12 @@ impl IntegrationRegistry {
                     display_name: i.display_name().to_string(),
                     enabled,
                     health: if enabled {
-                        HealthStatus::Healthy
+                        HealthStatus::Starting
                     } else {
                         HealthStatus::Stopped
                     },
                     lifecycle: if enabled {
-                        LifecycleState::Running
+                        LifecycleState::Starting
                     } else {
                         LifecycleState::Disabled
                     },

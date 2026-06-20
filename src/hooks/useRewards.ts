@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import type { RewardSummary } from '../lib/types'
-import { POC, RWDS, type PocSlot, type RewardRow } from '../lib/data'
+import type {
+  RewardSummary,
+  PocSlot as BackendPocSlot,
+  RewardRow,
+  PocSlotUi
+} from '../lib/types'
 
 function toRewardRows(summary: RewardSummary | null): RewardRow[] {
-  if (!summary) return RWDS
+  if (!summary) return []
   return [
     {
       date: 'Latest',
@@ -12,27 +16,26 @@ function toRewardRows(summary: RewardSummary | null): RewardRow[] {
       slots: Math.round(summary.proportion * 144),
       factor: summary.proportion,
       status: 'paid'
-    },
-    ...RWDS.slice(1)
+    }
   ]
 }
 
-function toPocSlots(slots: { data?: boolean; online?: boolean }[]): PocSlot[] {
-  if (!slots.length) return POC
-  return slots.map((s) => ({ done: s.online ?? s.data ?? false, pass: s.online ?? s.data ?? false }))
+function toPocSlots(slots: BackendPocSlot[]): PocSlotUi[] {
+  if (!slots.length) return []
+  return slots.map((s) => ({ done: s.online || s.data, pass: s.online || s.data }))
 }
 
 export interface RewardsData {
   summary: RewardSummary | null
   rows: RewardRow[]
-  slots: PocSlot[]
+  slots: PocSlotUi[]
 }
 
 export function useRewards() {
   const [rewards, setRewards] = useState<RewardsData>({
     summary: null,
-    rows: RWDS,
-    slots: POC
+    rows: [],
+    slots: []
   })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -40,11 +43,11 @@ export function useRewards() {
   const fetch = useCallback(async () => {
     try {
       const summary = await invoke<RewardSummary>('get_reward_summary')
-      const slots = await invoke<{ data?: boolean; online?: boolean }[]>('get_poc_slots')
+      const slots = await invoke<BackendPocSlot[]>('get_poc_slots')
       setRewards({ summary, rows: toRewardRows(summary), slots: toPocSlots(slots) })
       setError(null)
     } catch (e) {
-      console.warn('rewards fetch failed, using mock fallback:', e)
+      console.warn('rewards fetch failed:', e)
       setError(String(e))
     } finally {
       setLoading(false)

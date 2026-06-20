@@ -1,4 +1,5 @@
-import { Download } from 'lucide-react'
+import type { ReactNode } from 'react'
+import { Download, Loader2 } from 'lucide-react'
 import type { MockIntegration } from '../lib/data'
 import Tag from './primitives/Tag'
 import Tog from './primitives/Tog'
@@ -9,12 +10,60 @@ interface IntCardProps {
 }
 
 export default function IntCard({ intg, onToggle }: IntCardProps) {
-  const { id, name, tag, desc, Icon, col, enabled, healthy, version, uptime } = intg
+  const {
+    id,
+    name,
+    tag,
+    desc,
+    Icon,
+    col,
+    enabled,
+    healthy,
+    lifecycle,
+    version,
+    uptime
+  } = intg
   const inst = version !== null
-  const st = !inst ? 'stopped' : !enabled ? 'stopped' : healthy ? 'run' : 'err'
-  const stLbl = !inst ? 'Not installed' : !enabled ? 'Disabled' : healthy ? 'Running' : 'Unhealthy'
-  const tv = !inst ? 'warn' : st === 'run' ? 'run' : st === 'err' ? 'err' : 'def'
+
+  let st: 'run' | 'err' | 'stopped' | 'info' = 'stopped'
+  let stLbl = 'Not installed'
+  let stNode: ReactNode = stLbl
+
+  if (lifecycle === 'Installing') {
+    st = 'info'
+    stLbl = 'Installing'
+    stNode = (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+        {stLbl}
+      </span>
+    )
+  } else if (!inst) {
+    st = 'stopped'
+    stLbl = 'Not installed'
+  } else if (!enabled) {
+    st = 'stopped'
+    stLbl = 'Disabled'
+  } else if (healthy) {
+    st = 'run'
+    stLbl = 'Running'
+  } else {
+    st = 'err'
+    stLbl = 'Unhealthy'
+  }
+
+  const tv =
+    lifecycle === 'Installing'
+      ? 'info'
+      : !inst
+        ? 'warn'
+        : st === 'run'
+          ? 'run'
+          : st === 'err'
+            ? 'err'
+            : 'def'
   const pct = enabled && healthy ? 20 : 0
+
   return (
     <div
       className="ic"
@@ -57,7 +106,7 @@ export default function IntCard({ intg, onToggle }: IntCardProps) {
             >
               {tag}
             </span>
-            <Tag v={tv}>{stLbl}</Tag>
+            <Tag v={tv}>{stNode}</Tag>
           </div>
           <div
             style={{
@@ -85,8 +134,10 @@ export default function IntCard({ intg, onToggle }: IntCardProps) {
                 v{version}
               </span>
             )}
-            {uptime > 0 && <span style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--t2)' }}>{uptime}% uptime</span>}
-            {!inst && (
+            {uptime > 0 && (
+              <span style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--t2)' }}>{uptime}% uptime</span>
+            )}
+            {!inst && lifecycle !== 'Installing' && (
               <span
                 style={{
                   fontFamily: 'var(--fb)',

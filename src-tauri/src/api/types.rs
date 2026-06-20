@@ -152,3 +152,15 @@ pub struct MinerProfile {
     #[serde(default)]
     pub installations: Vec<serde_json::Value>,
 }
+
+// --- Reward product config (matches hardwareapi GET /products/{key}) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RewardConfig {
+    pub key: String,
+    pub reward_amount: f64,
+    pub reward_token_asa_id: String,
+    pub reward_token_name: String,
+    pub stake_token_asa_id: String,
+    pub stake_token_name: String,
+}
