@@ -9,7 +9,7 @@ export default function Rewards() {
   const { rewards } = useRewards()
   const { rows, slots, summary } = rewards
   const rewardToken = summary ? summary.reward_token_name : '—'
-  const fullDayEst = summary ? summary.reward_amount.toFixed(2) : '0.00'
+  const fullDayEst = summary ? summary.base_reward.toFixed(2) : '—'
   const totalEarned = rows.reduce((sum, r) => sum + r.reward, 0).toFixed(2)
 
   return (
@@ -33,7 +33,7 @@ export default function Rewards() {
           sub={`${rewardToken} at full proportion`}
           accent="var(--amb)"
         />
-        <StatCard Icon={Shield} label="Staking Tier" value="—" sub="FRY 2.0 stake active" accent="var(--red)" />
+        <StatCard Icon={Shield} label="Staking Tier" value={summary ? `${summary.stake_multiplier.toFixed(1)}×` : '—'} sub={summary ? `${summary.stake_label} stake active` : '—'} accent="var(--red)" />
       </div>
 
       <div

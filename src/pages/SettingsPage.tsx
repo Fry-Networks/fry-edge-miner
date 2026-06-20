@@ -9,6 +9,7 @@ import SettingRow from '../components/SettingRow'
 import Tog from '../components/primitives/Tog'
 import type { FemConfig } from '../lib/types'
 import { invokeWithFallback } from '../lib/tauri'
+import { useRewards } from '../hooks/useRewards'
 import { APP_VERSION } from '../lib/version'
 
 interface SettingSectionProps {
@@ -58,6 +59,8 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf' }: Setti
   const [auto, setAuto] = useState(true)
   const [notif, setNotif] = useState(true)
   const [config, setConfig] = useState<FemConfig | null>(null)
+  const { rewards } = useRewards()
+  const summary = rewards.summary
 
   useEffect(() => {
     invokeWithFallback<FemConfig>('get_settings', undefined, {
@@ -99,7 +102,7 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf' }: Setti
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <Shield size={13} color="var(--teal)" strokeWidth={2.5} />
               <span style={{ fontFamily: 'var(--fb)', fontSize: 13, color: 'var(--teal)' }}>Registered</span>
-              <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--t2)' }}>50 fNODE staked</span>
+              <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--t2)' }}>{summary ? `${summary.stake_label} stake` : 'Loading\u2026'}</span>
             </div>
           </div>
         </div>
@@ -117,8 +120,8 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf' }: Setti
         />
         <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 10 }}>
           <Shield size={12} color="var(--teal)" />
-          <span style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--t1)' }}>6-month verification stake active —</span>
-          <span style={{ fontFamily: 'var(--fm)', fontSize: 12, color: 'var(--teal)' }}>3.0×</span>
+          <span style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--t1)' }}>{summary ? `${summary.stake_label} stake active —` : 'Loading\u2026'}</span>
+          <span style={{ fontFamily: 'var(--fm)', fontSize: 12, color: 'var(--teal)' }}>{summary ? `${summary.stake_multiplier.toFixed(1)}×` : '—'}</span>
         </div>
       </SettingSection>
 

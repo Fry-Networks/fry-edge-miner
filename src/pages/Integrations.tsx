@@ -1,9 +1,9 @@
 import IntCard from '../components/IntCard'
 import Lbl from '../components/primitives/Lbl'
-import type { MockIntegration } from '../lib/data'
+import type { FrontendIntegration } from '../hooks/useIntegrations'
 
 interface IntegrationsProps {
-  intgs: MockIntegration[]
+  intgs: FrontendIntegration[]
   onToggle: (id: string) => void
 }
 
@@ -34,7 +34,7 @@ export default function Integrations({ intgs, onToggle }: IntegrationsProps) {
       >
         <span style={{ fontFamily: 'var(--fb)', fontSize: 13, color: 'var(--t1)' }}>
           Each <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>enabled</span> +{' '}
-          <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>healthy</span> integration contributes 20% to your daily
+          <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>healthy</span> integration contributes {Math.round(100 / intgs.length)}% to your daily
           reward.
         </span>
         <div
@@ -49,7 +49,7 @@ export default function Integrations({ intgs, onToggle }: IntegrationsProps) {
             marginLeft: 12
           }}
         >
-          {active}/5 · {active * 20}%
+          {active}/{intgs.length} · {Math.round((active / intgs.length) * 100)}%
         </div>
       </div>
       <Lbl sx={{ marginBottom: 0 }}>Integrations</Lbl>

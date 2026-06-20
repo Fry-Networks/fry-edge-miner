@@ -41,6 +41,8 @@ export interface RewardSummary {
   reward_token_name: string
   stake_token_asa_id: string
   stake_token_name: string
+  stake_multiplier: number
+  stake_label: string
 }
 
 export interface PocSlot {

@@ -195,7 +195,7 @@ fn main() {
                 // context as compute_health_map.
                 tokio::task::block_in_place(|| {});
 
-                let mut interval = tokio::time::interval(Duration::from_secs(600));
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
                 loop {
                     interval.tick().await;
                     let cfg = poc_config.get();
@@ -255,27 +255,33 @@ fn main() {
                             }
                         }
 
-                        // Refresh cached base_reward from /versions/FEM
+                        // Refresh base_reward AND reward config from /versions/FEM
+                        // (PoC.versions is the single source of truth for reward config)
                         match api::versions::check_version(&poc_client, "FEM", "windows").await {
                             Ok(info) => {
                                 if let Some(br) = info.base_reward {
                                     poc_base_reward.store(br.to_bits(), Ordering::Relaxed);
                                 }
-                            }
-                            Err(e) => {
-                                tracing::debug!(error = %e, "base_reward fetch failed, using cached/default");
-                            }
-                        }
-
-                        // Refresh reward token config from /products/FEM
-                        match api::products::get_product(&poc_client, "FEM").await {
-                            Ok(cfg) => {
-                                if let Ok(mut cache) = poc_reward_config.write() {
-                                    *cache = Some(cfg);
+                                // Build RewardConfig from version response
+                                if let (Some(amount), Some(asa_id), Some(name)) = (
+                                    info.reward_amount,
+                                    info.reward_token_asa_id.as_deref(),
+                                    info.reward_token_name.as_deref(),
+                                ) {
+                                    if let Ok(mut cache) = poc_reward_config.write() {
+                                        *cache = Some(crate::api::types::RewardConfig {
+                                            key: "FEM".to_string(),
+                                            reward_amount: amount,
+                                            reward_token_asa_id: asa_id.to_string(),
+                                            reward_token_name: name.to_string(),
+                                            stake_token_asa_id: String::new(),
+                                            stake_token_name: String::new(),
+                                        });
+                                    }
                                 }
                             }
                             Err(e) => {
-                                tracing::debug!(error = %e, "reward config fetch failed, using cached/default");
+                                tracing::debug!(error = %e, "version fetch failed, using cached/default");
                             }
                         }
                     }

@@ -5,4 +5,3 @@ pub mod leases;
 pub mod types;
 pub mod migration;
 pub mod versions;
-pub mod products;

@@ -1,0 +1,15 @@
+{
+  "version": "0.2.9",
+  "notes": "FEM v0.2.9 — Dynamic Reward Config",
+  "pub_date": "2026-06-20T09:37:00.000Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "",
+      "url": "https://github.com/Fry-Foundation/fry-edge-miner/releases/download/v0.2.9/Fry.Edge.Miner_0.2.9_x64-setup.nsis.zip"
+    },
+    "windows-msi": {
+      "signature": "",
+      "url": "https://github.com/Fry-Foundation/fry-edge-miner/releases/download/v0.2.9/Fry.Edge.Miner_0.2.9_x64_en-US.msi.zip"
+    }
+  }
+}

@@ -3,7 +3,14 @@ import { ArrowRight, Check } from 'lucide-react'
 import Btn from '../components/primitives/Btn'
 import Divider from '../components/primitives/Divider'
 import Lbl from '../components/primitives/Lbl'
-import { STAGES } from '../lib/data'
+interface InstallStage { label: string; ms: number }
+const STAGES: InstallStage[] = [
+  { label: 'Validating miner key', ms: 900 },
+  { label: 'Registering with Fry Networks', ms: 1100 },
+  { label: 'Downloading partner software', ms: 2000 },
+  { label: 'Verifying SHA256 signatures', ms: 700 },
+  { label: 'Starting integration services', ms: 900 },
+]
 import { makeName } from '../lib/names'
 
 interface Step3Props {

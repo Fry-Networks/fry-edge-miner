@@ -3,11 +3,12 @@ use serde::Serialize;
 use std::sync::atomic::Ordering;
 
 const DEFAULT_BASE_REWARD: f64 = 59.52;
-const DEFAULT_REWARD_AMOUNT: f64 = 14.88;
-const DEFAULT_REWARD_TOKEN_ASA_ID: &str = "2485202024";
-const DEFAULT_REWARD_TOKEN_NAME: &str = "fNODE";
-const DEFAULT_STAKE_TOKEN_ASA_ID: &str = "2485314946";
-const DEFAULT_STAKE_TOKEN_NAME: &str = "FRY 2.0";
+const DEFAULT_REWARD_AMOUNT: f64 = 0.0;
+const DEFAULT_REWARD_TOKEN_ASA_ID: &str = "";
+const DEFAULT_REWARD_TOKEN_NAME: &str = "\u{2014}";
+const DEFAULT_STAKE_TOKEN_ASA_ID: &str = "";
+const DEFAULT_STAKE_TOKEN_NAME: &str = "\u{2014}";
+const DEFAULT_STAKE_MULTIPLIER: f64 = 0.5;
 const SLOTS_PER_DAY: u32 = 144;
 
 #[derive(Debug, Serialize)]
@@ -22,6 +23,8 @@ pub struct RewardSummary {
     pub reward_token_name: String,
     pub stake_token_asa_id: String,
     pub stake_token_name: String,
+    pub stake_multiplier: f64,
+    pub stake_label: String,
 }
 
 #[tauri::command]
@@ -68,17 +71,30 @@ pub async fn get_reward_summary(
         DEFAULT_BASE_REWARD
     };
 
+    // TODO: read user's actual stake tier from config/registration
+    // FRY 2.0 → 3.0×, FRY 1.0 → 1.0×, No stake → 0.5×
+    let stake_multiplier = DEFAULT_STAKE_MULTIPLIER;
+    let stake_label = if stake_multiplier >= 3.0 {
+        "FRY 2.0".to_string()
+    } else if stake_multiplier >= 1.0 {
+        "FRY 1.0".to_string()
+    } else {
+        "No stake".to_string()
+    };
+
     Ok(RewardSummary {
         active_count: registry.enabled_count(),
         total_count: registry.total_count(),
         proportion,
-        estimated_daily: base_reward * proportion,
+        estimated_daily: base_reward * proportion * stake_multiplier,
         base_reward,
         reward_amount,
         reward_token_asa_id,
         reward_token_name,
         stake_token_asa_id,
         stake_token_name,
+        stake_multiplier,
+        stake_label,
     })
 }
 

@@ -1,11 +1,11 @@
 import type { ReactNode } from 'react'
 import { Download, Loader2 } from 'lucide-react'
-import type { MockIntegration } from '../lib/data'
+import type { FrontendIntegration } from '../hooks/useIntegrations'
 import Tag from './primitives/Tag'
 import Tog from './primitives/Tog'
 
 interface IntCardProps {
-  intg: MockIntegration
+  intg: FrontendIntegration
   onToggle: (id: string) => void
 }
 
@@ -62,7 +62,7 @@ export default function IntCard({ intg, onToggle }: IntCardProps) {
           : st === 'err'
             ? 'err'
             : 'def'
-  const pct = enabled && healthy ? 20 : 0
+  const pct = enabled && healthy ? Math.round(intg.poc_contribution * 100) : 0
 
   return (
     <div
@@ -170,7 +170,7 @@ export default function IntCard({ intg, onToggle }: IntCardProps) {
           <div
             style={{
               height: '100%',
-              width: `${pct * 5}%`,
+              width: `${pct}%`,
               background: `${col}bb`,
               borderRadius: 2,
               transition: 'width .4s ease'

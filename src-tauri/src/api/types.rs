@@ -11,6 +11,13 @@ pub struct VersionInfo {
     pub multiplier_base: Option<f64>,
     pub multiplier_per_tool: Option<f64>,
     pub base_reward: Option<f64>,
+    // Reward config from PoC.versions (single source of truth)
+    #[serde(default)]
+    pub reward_amount: Option<f64>,
+    #[serde(default)]
+    pub reward_token_asa_id: Option<String>,
+    #[serde(default)]
+    pub reward_token_name: Option<String>,
 }
 
 // --- Installation (matches server InstallationHeartbeat, models.py) ---
@@ -158,9 +165,14 @@ pub struct MinerProfile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RewardConfig {
     pub key: String,
+    #[serde(default)]
     pub reward_amount: f64,
+    #[serde(default)]
     pub reward_token_asa_id: String,
+    #[serde(default)]
     pub reward_token_name: String,
+    #[serde(default)]
     pub stake_token_asa_id: String,
+    #[serde(default)]
     pub stake_token_name: String,
 }

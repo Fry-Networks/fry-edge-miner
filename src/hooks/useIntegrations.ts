@@ -16,12 +16,13 @@ function deriveLifecycle(enabled: boolean, health: HealthStatus): LifecycleState
   return 'Starting'
 }
 
-interface FrontendIntegration extends IntegrationMeta {
+export interface FrontendIntegration extends IntegrationMeta {
   enabled: boolean
   health: HealthStatus
   healthy: boolean
   lifecycle: LifecycleState
   version: string | null
+  poc_contribution: number
 }
 
 function toMock(integrations: IntegrationStatus[]): FrontendIntegration[] {
@@ -43,7 +44,8 @@ function toMock(integrations: IntegrationStatus[]): FrontendIntegration[] {
       health,
       healthy: health === 'Healthy',
       lifecycle,
-      version: i.version
+      version: i.version,
+      poc_contribution: 1 / integrations.length
     }
   })
 }

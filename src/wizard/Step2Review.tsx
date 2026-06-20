@@ -1,7 +1,8 @@
 import { ArrowRight, Check } from 'lucide-react'
 import Btn from '../components/primitives/Btn'
 import Lbl from '../components/primitives/Lbl'
-import { INTGS } from '../lib/data'
+import { INTEGRATION_META } from '../lib/integrationMeta'
+import { useRewards } from '../hooks/useRewards'
 
 interface Step2Props {
   onNext: () => void
@@ -9,7 +10,13 @@ interface Step2Props {
 }
 
 export default function Step2Review({ onNext, onBack }: Step2Props) {
-  const est = (59.52 * 3).toFixed(2)
+  const { rewards } = useRewards()
+  const summary = rewards.summary
+  const baseReward = summary ? summary.base_reward : 0
+  const stakeMult = summary ? summary.stake_multiplier : 0.5
+  const est = summary ? (baseReward * stakeMult).toFixed(2) : '—'
+  const tokenName = summary ? summary.reward_token_name : '—'
+  const total = INTEGRATION_META.length
   return (
     <div
       className="fu sc"
@@ -40,7 +47,7 @@ export default function Step2Review({ onNext, onBack }: Step2Props) {
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 7, marginBottom: 18 }}>
-        {INTGS.map(({ id, name, tag, desc, Icon, col }) => (
+        {INTEGRATION_META.map(({ id, name, tag, desc, Icon, col }) => (
           <div
             key={id}
             style={{
@@ -98,7 +105,7 @@ export default function Step2Review({ onNext, onBack }: Step2Props) {
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexShrink: 0 }}>
-              <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--teal)' }}>20%</span>
+              <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--teal)' }}>{Math.round(100 / total)}%</span>
               <div
                 style={{
                   width: 18,
@@ -130,12 +137,12 @@ export default function Step2Review({ onNext, onBack }: Step2Props) {
         }}
       >
         <div>
-          <Lbl sx={{ marginBottom: 3 }}>Est. daily reward at 5/5</Lbl>
-          <span style={{ fontFamily: 'var(--fm)', fontSize: 20, color: 'var(--teal)' }}>~{est} fNODE</span>
+          <Lbl sx={{ marginBottom: 3 }}>Est. daily reward at {total}/{total}</Lbl>
+          <span style={{ fontFamily: 'var(--fm)', fontSize: 20, color: 'var(--teal)' }}>~{est} {tokenName}</span>
         </div>
         <div style={{ textAlign: 'right' }}>
           <Lbl sx={{ marginBottom: 3 }}>Proportion</Lbl>
-          <span style={{ fontFamily: 'var(--fm)', fontSize: 20, color: 'var(--teal)' }}>5/5 · 100%</span>
+          <span style={{ fontFamily: 'var(--fm)', fontSize: 20, color: 'var(--teal)' }}>{total}/{total} · 100%</span>
         </div>
       </div>
 

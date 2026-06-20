@@ -168,7 +168,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
           <Divider sx={{ marginBottom: 10 }} />
           {[
             ['Base reward', summary ? `${baseReward} ${rewardToken}` : '—', 'var(--txt)'],
-            ['Staking mult', summary ? `${summary.proportion.toFixed(2)}×` : '—', 'var(--teal)'],
+            ['Staking mult', summary ? `${summary.stake_multiplier.toFixed(1)}×` : '—', 'var(--teal)'],
             ['Proportion', `${pct}%`, 'var(--txt)'],
             ['BYOD factor', '1.0×', 'var(--t1)']
           ].map(([l, v, c]) => (

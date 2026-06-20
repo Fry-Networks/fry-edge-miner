@@ -1,7 +1,7 @@
-import type { PocSlot } from '../lib/data'
+import type { PocSlotUi } from '../lib/types'
 
 interface PoCGridProps {
-  slots: PocSlot[]
+  slots: PocSlotUi[]
 }
 
 export default function PoCGrid({ slots }: PoCGridProps) {
