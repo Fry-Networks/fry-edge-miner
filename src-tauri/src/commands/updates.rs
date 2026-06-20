@@ -15,7 +15,7 @@ pub struct UpdateInfo {
     pub body: Option<String>,
 }
 
-/// Check for available updates for FEM itself and every installed integration.
+/// Check for available updates for FEM itself and every registered integration.
 /// Errors are isolated per source so a single failure never crashes the whole check.
 #[tauri::command]
 pub async fn check_updates(
@@ -86,68 +86,78 @@ pub async fn check_updates(
         }
     }
 
-    // Integration updates. Use block_in_place so the std::sync::MutexGuard does not
-    // cross an await point (matches the pattern in commands/integration.rs).
-    tokio::task::block_in_place(|| -> Result<(), String> {
+    // Integration updates. Clone the integration list and release the registry lock
+    // before calling out to partner-specific update logic.
+    let integrations = {
         let reg = state.registry.lock().map_err(|e| e.to_string())?;
-        let rt = tokio::runtime::Handle::current();
+        reg.list()
+    };
 
-        for integration in reg.list() {
-            let id = integration.id().to_string();
-            let name = integration.display_name().to_string();
-            let current = integration.installed_version();
+    for integration in integrations {
+        let id = integration.id().to_string();
+        let name = integration.display_name().to_string();
+        let current_version = integration.installed_version();
 
-            let Some(current_version) = current else {
-                continue;
-            };
+        // Always list the integration, even when it has not been installed yet.
+        let Some(current_version) = current_version else {
+            updates.push(UpdateInfo {
+                id,
+                name,
+                current_version: None,
+                latest_version: None,
+                available: false,
+                error: None,
+                kind: "integration".to_string(),
+                download_url: None,
+                body: None,
+            });
+            continue;
+        };
 
-            match rt.block_on(integration.check_update()) {
-                Ok(Some(latest)) => {
-                    let available = current_version != latest;
-                    updates.push(UpdateInfo {
-                        id,
-                        name,
-                        current_version: Some(current_version),
-                        latest_version: Some(latest),
-                        available,
-                        error: None,
-                        kind: "integration".to_string(),
-                        download_url: None,
-                        body: None,
-                    });
-                }
-                Ok(None) => {
-                    updates.push(UpdateInfo {
-                        id,
-                        name,
-                        current_version: Some(current_version),
-                        latest_version: None,
-                        available: false,
-                        error: None,
-                        kind: "integration".to_string(),
-                        download_url: None,
-                        body: None,
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(integration = %id, error = %e, "Integration update check failed");
-                    updates.push(UpdateInfo {
-                        id,
-                        name,
-                        current_version: Some(current_version),
-                        latest_version: None,
-                        available: false,
-                        error: Some(e.to_string()),
-                        kind: "integration".to_string(),
-                        download_url: None,
-                        body: None,
-                    });
-                }
+        match integration.check_update().await {
+            Ok(Some(latest)) => {
+                let available = current_version != latest;
+                updates.push(UpdateInfo {
+                    id,
+                    name,
+                    current_version: Some(current_version),
+                    latest_version: Some(latest),
+                    available,
+                    error: None,
+                    kind: "integration".to_string(),
+                    download_url: None,
+                    body: None,
+                });
+            }
+            Ok(None) => {
+                updates.push(UpdateInfo {
+                    id,
+                    name,
+                    current_version: Some(current_version),
+                    latest_version: None,
+                    available: false,
+                    error: None,
+                    kind: "integration".to_string(),
+                    download_url: None,
+                    body: None,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(integration = %id, error = %e, "Integration update check failed");
+                updates.push(UpdateInfo {
+                    id,
+                    name,
+                    current_version: Some(current_version),
+                    latest_version: None,
+                    available: false,
+                    error: Some(e.to_string()),
+                    kind: "integration".to_string(),
+                    download_url: None,
+                    body: None,
+                });
             }
         }
-
-        Ok(())
-    })?;
+    }
 
     Ok(updates)
 }

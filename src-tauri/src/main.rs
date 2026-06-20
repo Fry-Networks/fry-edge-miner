@@ -8,13 +8,15 @@ mod migration;
 mod poc;
 mod supervisor;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use api::client::ApiClient;
 use config::store::ConfigStore;
-use integrations::IntegrationRegistry;
+use integrations::{HealthStatus, IntegrationRegistry};
+use poc::cache::PocCache;
 use supervisor::Supervisor;
 
 /// Shared application state, managed by Tauri
@@ -24,6 +26,9 @@ pub struct AppState {
     pub supervisor: Arc<Mutex<Supervisor>>,
     pub api_client: Arc<ApiClient>,
     pub cached_base_reward: Arc<AtomicU64>,
+    pub last_health: Arc<RwLock<HashMap<String, HealthStatus>>>,
+    pub poc_cache: Arc<PocCache>,
+    pub cached_reward_config: Arc<RwLock<Option<crate::api::types::RewardConfig>>>,
 }
 
 fn main() {
@@ -47,7 +52,7 @@ fn main() {
                 .app_data_dir()
                 .expect("failed to resolve app data dir");
             let config_store =
-                ConfigStore::new(config_dir).expect("failed to initialize config store");
+                ConfigStore::new(config_dir.clone()).expect("failed to initialize config store");
             let config_store = Arc::new(config_store);
 
             // API client (initial bearer token is the configured token; per-device token applied after registration)
@@ -66,19 +71,21 @@ fn main() {
 
             // Integration registry
             let mut registry = IntegrationRegistry::new();
-            registry.register(Box::new(integrations::mysterium::MysteriumIntegration {
+            registry.register(Arc::new(integrations::mysterium::MysteriumIntegration {
                 api_client: api_client.clone(),
                 config: config_store.clone(),
                 supervisor: supervisor.clone(),
                 log_dir: log_dir.clone(),
             }));
-            registry.register(Box::new(integrations::presearch::PresearchIntegration));
-            registry.register(Box::new(integrations::diiisco::DiiiscoIntegration {
+            registry.register(Arc::new(integrations::presearch::PresearchIntegration {
+                config: config_store.clone(),
+            }));
+            registry.register(Arc::new(integrations::diiisco::DiiiscoIntegration {
                 api_client: api_client.clone(),
                 config: config_store.clone(),
             }));
-            registry.register(Box::new(integrations::space_acres::SpaceAcresIntegration));
-            registry.register(Box::new(integrations::aem::AemIntegration));
+            registry.register(Arc::new(integrations::space_acres::SpaceAcresIntegration));
+            registry.register(Arc::new(integrations::aem::AemIntegration));
 
             // Restore enabled states from config
             for (id, enabled) in &cfg.integrations_enabled {
@@ -87,7 +94,10 @@ fn main() {
             let integration_count = registry.total_count();
             let registry = Arc::new(Mutex::new(registry));
 
+            let last_health = Arc::new(RwLock::new(HashMap::<String, HealthStatus>::new()));
             let cached_base_reward = Arc::new(AtomicU64::new(0));
+            let cached_reward_config = Arc::new(RwLock::new(None::<crate::api::types::RewardConfig>));
+            let poc_cache = Arc::new(PocCache::new(&config_dir));
 
             // --- Health monitoring: auto-restart with exponential backoff ---
             {
@@ -109,18 +119,25 @@ fn main() {
                     let id_restart = id.clone();
                     let tx = health_tx.clone();
 
+                    let last_health_check = last_health.clone();
+
                     let check_fn = move || {
                         let reg = check_registry.lock().unwrap();
-                        if !reg.is_enabled(&id_check) {
-                            return HealthStatus::Stopped;
+                        let health = if !reg.is_enabled(&id_check) {
+                            HealthStatus::Stopped
+                        } else {
+                            match reg.get(&id_check) {
+                                Some(integration) => tokio::task::block_in_place(|| {
+                                    tokio::runtime::Handle::current()
+                                        .block_on(integration.health_check())
+                                }),
+                                None => HealthStatus::Unknown,
+                            }
+                        };
+                        if let Ok(mut map) = last_health_check.write() {
+                            map.insert(id_check.clone(), health.clone());
                         }
-                        match reg.get(&id_check) {
-                            Some(integration) => tokio::task::block_in_place(|| {
-                                tokio::runtime::Handle::current()
-                                    .block_on(integration.health_check())
-                            }),
-                            None => HealthStatus::Unknown,
-                        }
+                        health
                     };
 
                     let restart_fn = move || {
@@ -170,6 +187,8 @@ fn main() {
             let poc_registry = registry.clone();
             let poc_client = api_client.clone();
             let poc_base_reward = cached_base_reward.clone();
+            let poc_reward_config = cached_reward_config.clone();
+            let poc_cache_loop = poc_cache.clone();
             tauri::async_runtime::spawn(async move {
                 // Verify runtime supports block_in_place — panics at first poll if
                 // current_thread, not 10 min later in the reward path. Same worker
@@ -193,6 +212,11 @@ fn main() {
                             .await
                         {
                             tracing::warn!(error = %e, "PoC submission failed");
+                        }
+                        if let Some(slot) = wrapped.document.slots.first() {
+                            if let Err(e) = poc_cache_loop.append(slot) {
+                                tracing::warn!(error = %e, "PoC slot cache append failed");
+                            }
                         }
 
                         // --- Lease renewal (acquire or renew each tick) ---
@@ -242,6 +266,18 @@ fn main() {
                                 tracing::debug!(error = %e, "base_reward fetch failed, using cached/default");
                             }
                         }
+
+                        // Refresh reward token config from /products/FEM
+                        match api::products::get_product(&poc_client, "FEM").await {
+                            Ok(cfg) => {
+                                if let Ok(mut cache) = poc_reward_config.write() {
+                                    *cache = Some(cfg);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::debug!(error = %e, "reward config fetch failed, using cached/default");
+                            }
+                        }
                     }
                 }
             });
@@ -253,6 +289,9 @@ fn main() {
                 supervisor,
                 api_client,
                 cached_base_reward,
+                last_health,
+                poc_cache,
+                cached_reward_config,
             });
 
             tracing::info!("FEM initialized — {integration_count} integrations registered");

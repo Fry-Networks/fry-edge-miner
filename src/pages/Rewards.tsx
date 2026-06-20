@@ -2,22 +2,15 @@ import { Coins, Shield, TrendingUp } from 'lucide-react'
 import Lbl from '../components/primitives/Lbl'
 import StatCard from '../components/StatCard'
 import Tag from '../components/primitives/Tag'
-import type { PocSlot, RewardRow } from '../lib/data'
-import { GATES } from '../lib/data'
+import { GATES } from '../lib/integrationMeta'
+import { useRewards } from '../hooks/useRewards'
 
 export default function Rewards() {
-  const RWDS: RewardRow[] = [
-    { date: 'Jun 13', reward: 6.41, slots: 62, factor: 0.108, status: 'paid' },
-    { date: 'Jun 12', reward: 0, slots: 0, factor: 0, status: 'none' },
-    { date: 'Jun 11', reward: 0, slots: 0, factor: 0, status: 'none' },
-    { date: 'Jun 10', reward: 5.88, slots: 58, factor: 0.099, status: 'paid' },
-    { date: 'Jun 9', reward: 6.12, slots: 61, factor: 0.104, status: 'paid' }
-  ]
-
-  const POC: PocSlot[] = Array.from({ length: 144 }, (_, i) => ({
-    done: i < 62,
-    pass: i < 62 ? Math.random() > 0.1 : null
-  }))
+  const { rewards } = useRewards()
+  const { rows, slots, summary } = rewards
+  const rewardToken = summary ? summary.reward_token_name : '—'
+  const fullDayEst = summary ? summary.reward_amount.toFixed(2) : '0.00'
+  const totalEarned = rows.reduce((sum, r) => sum + r.reward, 0).toFixed(2)
 
   return (
     <div
@@ -32,15 +25,15 @@ export default function Rewards() {
       }}
     >
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-        <StatCard Icon={Coins} label="Total Earned" value="24.41" sub="fNODE lifetime" accent="var(--teal)" />
+        <StatCard Icon={Coins} label="Total Earned" value={totalEarned} sub={`${rewardToken} lifetime`} accent="var(--teal)" />
         <StatCard
           Icon={TrendingUp}
           label="Full Day Est."
-          value="14.88"
-          sub="fNODE at 4/5 integrations"
+          value={fullDayEst}
+          sub={`${rewardToken} at full proportion`}
           accent="var(--amb)"
         />
-        <StatCard Icon={Shield} label="Staking Tier" value="3.0×" sub="FRY 2.0 stake active" accent="var(--red)" />
+        <StatCard Icon={Shield} label="Staking Tier" value="—" sub="FRY 2.0 stake active" accent="var(--red)" />
       </div>
 
       <div
@@ -74,7 +67,7 @@ export default function Rewards() {
             </tr>
           </thead>
           <tbody>
-            {RWDS.map((r, i) => (
+            {rows.map((r, i) => (
               <tr
                 key={i}
                 className="rr"
@@ -94,7 +87,7 @@ export default function Rewards() {
                     fontWeight: r.reward > 0 ? 500 : 400
                   }}
                 >
-                  {r.reward > 0 ? `${r.reward} fNODE` : '—'}
+                  {r.reward > 0 ? `${r.reward} ${rewardToken}` : '—'}
                 </td>
                 <td
                   style={{
@@ -161,7 +154,7 @@ export default function Rewards() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(24,1fr)', gap: 2 }}>
           {Array.from({ length: 24 }, (_, h) =>
             GATES.map((g, gi) => {
-              const s = POC[h * 6 + gi] || { done: false, pass: null }
+              const s = slots[h * 6 + gi] || { done: false, pass: null }
               return (
                 <div
                   key={`${h}-${g}`}

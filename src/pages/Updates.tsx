@@ -3,130 +3,32 @@ import {
   ArrowUpCircle,
   CheckCircle2,
   Clock,
-  Cpu,
-  Eye,
-  Globe,
-  HardDrive,
   Info,
   RefreshCw,
-  Search,
   type LucideIcon
 } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import Btn from '../components/primitives/Btn'
 import Lbl from '../components/primitives/Lbl'
 import UpdCard, { type UpdateStatus } from '../components/UpdCard'
+import { useIntegrations } from '../hooks/useIntegrations'
 import type { UpdateInfo } from '../lib/types'
 import { APP_VERSION } from '../lib/version'
-
-const ICONS: Record<string, LucideIcon> = {
-  fem: ArrowUpCircle,
-  mysterium: Globe,
-  presearch: Search,
-  diiisco: Cpu,
-  space_acres: HardDrive,
-  aem: Eye
-}
-
-const COLORS: Record<string, string> = {
-  fem: 'var(--red)',
-  mysterium: '#4a9eff',
-  presearch: '#a855f7',
-  diiisco: '#f0a500',
-  space_acres: '#22c55e',
-  aem: '#00c49a'
-}
-
-const NAMES: Record<string, string> = {
-  mysterium: 'Mysterium (MystNodes SDK)',
-  presearch: 'Presearch Node',
-  diiisco: 'Diiisco',
-  space_acres: 'SpaceAcres',
-  aem: 'Olostep'
-}
 
 function isTauri(): boolean {
   return typeof window !== 'undefined' && !!(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
 }
 
-function mockUpdates(): UpdateInfo[] {
-  return [
-    {
-      id: 'fem',
-      name: 'Fry Edge Miner',
-      current_version: APP_VERSION,
-      latest_version: APP_VERSION,
-      available: false,
-      kind: 'app',
-      download_url: null,
-      body: null
-    },
-    {
-      id: 'mysterium',
-      name: 'Mysterium (MystNodes SDK)',
-      current_version: '1.2.3',
-      latest_version: '1.3.0',
-      available: true,
-      kind: 'integration',
-      download_url: null,
-      body: null
-    },
-    {
-      id: 'presearch',
-      name: 'Presearch Node',
-      current_version: '0.9.1',
-      latest_version: '0.9.1',
-      available: false,
-      kind: 'integration',
-      download_url: null,
-      body: null
-    },
-    {
-      id: 'diiisco',
-      name: 'Diiisco',
-      current_version: '2.0.1',
-      latest_version: '2.0.1',
-      available: false,
-      kind: 'integration',
-      download_url: null,
-      body: null
-    },
-    {
-      id: 'space_acres',
-      name: 'SpaceAcres',
-      current_version: '2.1.0',
-      latest_version: '2.1.0',
-      available: false,
-      kind: 'integration',
-      download_url: null,
-      body: null
-    },
-    {
-      id: 'aem',
-      name: 'Olostep',
-      current_version: '1.0.0',
-      latest_version: '1.0.0',
-      available: false,
-      kind: 'integration',
-      download_url: null,
-      body: null
-    }
-  ]
-}
-
-interface DisplayUpdate extends UpdateInfo {
-  key: string
+interface DisplayUpdate {
+  id: string
+  name: string
   Icon: LucideIcon
   col: string
-}
-
-function toDisplay(updates: UpdateInfo[]): DisplayUpdate[] {
-  return updates.map((u) => ({
-    ...u,
-    key: u.id,
-    Icon: ICONS[u.id] || Eye,
-    col: COLORS[u.id] || '#00c49a'
-  }))
+  current_version?: string
+  latest_version?: string
+  available: boolean
+  error?: string
+  kind: 'app' | 'integration'
 }
 
 function formatLastChecked(d: Date): string {
@@ -137,30 +39,34 @@ function formatLastChecked(d: Date): string {
   return d.toLocaleDateString()
 }
 
+function statusFor(u: DisplayUpdate): UpdateStatus {
+  if (u.error) return 'error'
+  if (u.available) return 'update'
+  return 'ok'
+}
+
 export default function Updates() {
-  const [updates, setUpdates] = useState<DisplayUpdate[]>([])
+  const { integrations: partnerIntegrations, loading: intLoading } = useIntegrations()
+  const [updates, setUpdates] = useState<UpdateInfo[]>([])
   const [checking, setChecking] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
   const [lastChecked, setLastChecked] = useState<Date | null>(null)
-  const [isFetching, setIsFetching] = useState(false)
   const [isUpdating, setIsUpdating] = useState(false)
 
   const fetchUpdates = useCallback(async () => {
-    setIsFetching(true)
     setChecking(true)
     setError(null)
     setSuccess(null)
     try {
-      const data = isTauri() ? await invoke<UpdateInfo[]>('check_updates') : mockUpdates()
-      setUpdates(toDisplay(data))
+      const data = isTauri() ? await invoke<UpdateInfo[]>('check_updates') : []
+      setUpdates(data)
       setLastChecked(new Date())
     } catch (e) {
       console.warn('check_updates failed:', e)
       setError(String(e))
     } finally {
-      setIsFetching(false)
       setChecking(false)
       setLoading(false)
     }
@@ -172,7 +78,7 @@ export default function Updates() {
 
   const doUpdate = useCallback(
     async (kind: string, id: string) => {
-      if (isUpdating || isFetching) return
+      if (isUpdating) return
       setIsUpdating(true)
       setError(null)
       setSuccess(null)
@@ -189,19 +95,61 @@ export default function Updates() {
         setIsUpdating(false)
       }
     },
-    [fetchUpdates, isFetching, isUpdating]
+    [fetchUpdates, isUpdating]
   )
 
-  const statusFor = (u: DisplayUpdate): UpdateStatus => {
-    if (u.error) return 'error'
-    if (u.available) return 'update'
-    return 'ok'
-  }
+  // Merge backend update info with the integration list from useIntegrations so that
+  // not-installed partners still appear and names/icons/colors stay consistent.
+  const updateById = new Map<string, UpdateInfo>(
+    updates.filter((u) => u.kind === 'integration').map((u) => [u.id, u])
+  )
 
-  const appUpdate = updates.find((u) => u.kind === 'app')
-  const partnerUpdates = updates.filter((u) => u.kind === 'integration')
+  const appUpdate: DisplayUpdate | undefined = (() => {
+    const u = updates.find((x) => x.kind === 'app')
+    if (u) {
+      return {
+        id: u.id,
+        name: u.name,
+        Icon: ArrowUpCircle,
+        col: 'var(--red)',
+        current_version: u.current_version ?? APP_VERSION,
+        latest_version: u.latest_version ?? undefined,
+        available: u.available,
+        error: u.error,
+        kind: 'app' as const
+      }
+    }
+    if (!isTauri()) {
+      return {
+        id: 'fem',
+        name: 'Fry Edge Miner',
+        Icon: ArrowUpCircle,
+        col: 'var(--red)',
+        current_version: APP_VERSION,
+        latest_version: undefined,
+        available: false,
+        kind: 'app' as const
+      }
+    }
+    return undefined
+  })()
 
-  if (loading) {
+  const partnerUpdates: DisplayUpdate[] = partnerIntegrations.map((p) => {
+    const u = updateById.get(p.id)
+    return {
+      id: p.id,
+      name: p.name,
+      Icon: p.Icon,
+      col: p.col,
+      current_version: u?.current_version ?? p.version ?? undefined,
+      latest_version: u?.latest_version ?? undefined,
+      available: u?.available ?? false,
+      error: u?.error,
+      kind: 'integration' as const
+    }
+  })
+
+  if (loading || intLoading) {
     return (
       <div
         className="sc"
@@ -299,8 +247,8 @@ export default function Updates() {
             name={appUpdate.name}
             Icon={appUpdate.Icon}
             col={appUpdate.col}
-            current={appUpdate.current_version || undefined}
-            available={appUpdate.latest_version || undefined}
+            current={appUpdate.current_version}
+            available={appUpdate.latest_version}
             status={statusFor(appUpdate)}
             onUpdate={appUpdate.available ? () => doUpdate('app', appUpdate.id) : undefined}
           />
@@ -322,11 +270,11 @@ export default function Updates() {
           {partnerUpdates.map((p) => (
             <UpdCard
               key={p.id}
-              name={NAMES[p.id] || p.name}
+              name={p.name}
               Icon={p.Icon}
               col={p.col}
-              current={p.current_version || undefined}
-              available={p.latest_version || undefined}
+              current={p.current_version}
+              available={p.latest_version}
               status={statusFor(p)}
               onUpdate={p.available ? () => doUpdate('integration', p.id) : undefined}
             />

@@ -35,6 +35,12 @@ export interface RewardSummary {
   total_count: number
   proportion: number
   estimated_daily: number
+  base_reward: number
+  reward_amount: number
+  reward_token_asa_id: string
+  reward_token_name: string
+  stake_token_asa_id: string
+  stake_token_name: string
 }
 
 export interface PocSlot {
@@ -73,6 +79,19 @@ export interface UpdateInfo {
   kind: 'app' | 'integration'
   download_url: string | null
   body: string | null
+}
+
+export interface RewardRow {
+  date: string
+  reward: number
+  slots: number
+  factor: number
+  status: 'paid' | 'none'
+}
+
+export interface PocSlotUi {
+  done: boolean
+  pass: boolean | null
 }
 
 // Helper to extract health status display string

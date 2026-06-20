@@ -6,6 +6,7 @@ import {
   Eye,
   type LucideIcon
 } from 'lucide-react'
+import type { HealthStatus, LifecycleState } from './types'
 
 export interface MockIntegration {
   id: string
@@ -15,7 +16,9 @@ export interface MockIntegration {
   Icon: LucideIcon
   col: string
   enabled: boolean
+  health: HealthStatus
   healthy: boolean
+  lifecycle: LifecycleState
   version: string | null
   uptime: number
 }
@@ -29,7 +32,9 @@ export const INTGS: MockIntegration[] = [
     Icon: Globe,
     col: '#4a9eff',
     enabled: true,
+    health: 'Healthy',
     healthy: true,
+    lifecycle: 'Running',
     version: '1.2.3',
     uptime: 99.2
   },
@@ -41,7 +46,9 @@ export const INTGS: MockIntegration[] = [
     Icon: Search,
     col: '#a855f7',
     enabled: true,
+    health: 'Healthy',
     healthy: true,
+    lifecycle: 'Running',
     version: '0.9.1',
     uptime: 97.8
   },
@@ -53,31 +60,37 @@ export const INTGS: MockIntegration[] = [
     Icon: Cpu,
     col: '#f0a500',
     enabled: false,
+    health: 'Stopped',
     healthy: false,
+    lifecycle: 'Disabled',
     version: '2.0.1',
     uptime: 0
   },
   {
-    id: 'spacetwo',
+    id: 'space_acres',
     name: 'SpaceAcres',
     tag: 'STORAGE NODE',
     desc: 'Contribute disk space for Chia / SpaceAcres farming',
     Icon: HardDrive,
     col: '#22c55e',
     enabled: true,
+    health: 'Healthy',
     healthy: true,
+    lifecycle: 'Running',
     version: '2.1.0',
     uptime: 98.4
   },
   {
-    id: 'olostep',
-    name: 'Olostep',
+    id: 'aem',
+    name: 'AEM',
     tag: 'SCRAPE NODE',
     desc: 'Browser-based web scraping and data collection',
     Icon: Eye,
     col: '#00c49a',
     enabled: true,
+    health: 'Healthy',
     healthy: true,
+    lifecycle: 'Running',
     version: '1.0.0',
     uptime: 96.1
   }
