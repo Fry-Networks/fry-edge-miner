@@ -2,7 +2,7 @@ use chrono::Local;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 
-const DEFAULT_BASE_REWARD: f64 = 59.52;
+const DEFAULT_BASE_REWARD: f64 = 0.0;
 const DEFAULT_REWARD_AMOUNT: f64 = 0.0;
 const DEFAULT_REWARD_TOKEN_ASA_ID: &str = "";
 const DEFAULT_REWARD_TOKEN_NAME: &str = "\u{2014}";
@@ -77,15 +77,14 @@ pub async fn get_reward_summary(
 
     let (stake_multiplier, stake_label) = match (&*tiers, &*verified) {
         (Some(tiers), Some(vs)) => {
-            let tier_key = if !vs.verified {
-                "unregistered"
-            } else if let Some(ref staked) = vs.staked {
-                staked.stake_type.as_deref().unwrap_or("none")
-            } else {
-                "none"
-            };
+            // /credentials call succeeded → device IS registered.
+            // verified = "has verification stake", NOT "is registered".
+            // Look up tier from staked.type; default to "none" (registered, no stake = 1×)
+            let tier_key = vs.staked.as_ref()
+                .and_then(|s| s.stake_type.as_deref())
+                .unwrap_or("none");
             tiers.get(tier_key).map_or(
-                (0.0, "Not registered".to_string()),
+                (1.0, "No stake".to_string()),
                 |t| (t.multiplier, t.label.clone()),
             )
         }
