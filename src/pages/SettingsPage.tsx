@@ -51,9 +51,10 @@ function SettingSection({ Icon, ico, label, children }: SettingSectionProps) {
 
 interface SettingsPageProps {
   deviceName?: string
+  deregister: () => Promise<void>
 }
 
-export default function SettingsPage({ deviceName = 'nimble-swift-wolf' }: SettingsPageProps) {
+export default function SettingsPage({ deviceName = 'nimble-swift-wolf', deregister }: SettingsPageProps) {
   const [boot, setBoot] = useState(true)
   const [tray, setTray] = useState(true)
   const [auto, setAuto] = useState(true)
@@ -68,12 +69,27 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf' }: Setti
       wallet_address: 'OGHVJYWQXOOPZG2OLBIRFNTBF3H3276DDTKYYZUA6G4NUMF2RGYXNTMIRE',
       integrations_enabled: {},
       api_base_url: 'https://hardwareapi.frynetworks.com'
-    }).then(setConfig)
+    }).then((cfg) => {
+      setConfig(cfg)
+      if (cfg) {
+        if (cfg.start_on_boot !== undefined) setBoot(cfg.start_on_boot)
+        if (cfg.minimize_to_tray !== undefined) setTray(cfg.minimize_to_tray)
+        if (cfg.auto_update !== undefined) setAuto(cfg.auto_update)
+        if (cfg.notifications !== undefined) setNotif(cfg.notifications)
+      }
+    })
   }, [])
 
-  const savePrefs = async () => {
+  const savePrefs = async (next?: { boot?: boolean; tray?: boolean; auto?: boolean; notif?: boolean }) => {
     try {
-      await invokeWithFallback('save_settings', { settings: {} }, undefined)
+      await invokeWithFallback('save_settings', {
+        settings: {
+          start_on_boot: next?.boot ?? boot,
+          minimize_to_tray: next?.tray ?? tray,
+          auto_update: next?.auto ?? auto,
+          notifications: next?.notif ?? notif
+        }
+      }, undefined)
     } catch (e) {
       console.warn('save_settings failed:', e)
     }
@@ -102,7 +118,7 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf' }: Setti
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <Shield size={13} color="var(--teal)" strokeWidth={2.5} />
               <span style={{ fontFamily: 'var(--fb)', fontSize: 13, color: 'var(--teal)' }}>Registered</span>
-              <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--t2)' }}>{summary ? `${summary.stake_label} stake` : 'Loading\u2026'}</span>
+              <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--t2)' }}>{summary ? `${summary.stake_label}${summary.stake_label.toLowerCase().includes('stake') ? '' : ' stake'}` : '—'}</span>
             </div>
           </div>
         </div>
@@ -120,7 +136,7 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf' }: Setti
         />
         <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 10 }}>
           <Shield size={12} color="var(--teal)" />
-          <span style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--t1)' }}>{summary ? `${summary.stake_label} stake active —` : 'Loading\u2026'}</span>
+          <span style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--t1)' }}>{summary ? `${summary.stake_label}${summary.stake_label.toLowerCase().includes('stake') ? '' : ' stake'} active` : 'Stake info unavailable'}</span>
           <span style={{ fontFamily: 'var(--fm)', fontSize: 12, color: 'var(--teal)' }}>{summary ? `${summary.stake_multiplier.toFixed(1)}×` : '—'}</span>
         </div>
       </SettingSection>
@@ -131,7 +147,7 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf' }: Setti
             checked={boot}
             onChange={(v) => {
               setBoot(v)
-              savePrefs()
+              savePrefs({ boot: v })
             }}
           />
         </SettingRow>
@@ -140,7 +156,7 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf' }: Setti
             checked={tray}
             onChange={(v) => {
               setTray(v)
-              savePrefs()
+              savePrefs({ tray: v })
             }}
           />
         </SettingRow>
@@ -149,7 +165,7 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf' }: Setti
             checked={auto}
             onChange={(v) => {
               setAuto(v)
-              savePrefs()
+              savePrefs({ auto: v })
             }}
           />
         </SettingRow>
@@ -158,7 +174,7 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf' }: Setti
             checked={notif}
             onChange={(v) => {
               setNotif(v)
-              savePrefs()
+              savePrefs({ notif: v })
             }}
           />
         </SettingRow>
@@ -206,7 +222,7 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf' }: Setti
       </SettingSection>
 
       <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-        <Btn v="g" onClick={() => window.confirm('Deregister this device?') && console.log('deregister')} >
+        <Btn v="g" onClick={() => { if (window.confirm('Deregister this device? This cannot be undone.')) deregister() }} >
           Deregister
         </Btn>
       </div>

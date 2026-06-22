@@ -10,7 +10,7 @@ import Wizard from './wizard/Wizard'
 import { useIntegrations } from './hooks/useIntegrations'
 import { useDevice } from './hooks/useDevice'
 
-function AppShell({ deviceName }: { deviceName: string }) {
+function AppShell({ deviceName, deregister }: { deviceName: string; deregister: () => Promise<void> }) {
   const [page, setPage] = useState<NavPage>('dashboard')
   const { integrations, toggle } = useIntegrations()
   const activeCount = integrations.filter((i) => i.enabled && i.healthy).length
@@ -32,7 +32,7 @@ function AppShell({ deviceName }: { deviceName: string }) {
           {page === 'dashboard' && <Dashboard intgs={integrations} />}
           {page === 'integrations' && <Integrations intgs={integrations} onToggle={toggle} />}
           {page === 'rewards' && <Rewards />}
-          {page === 'settings' && <SettingsPage deviceName={deviceName} />}
+          {page === 'settings' && <SettingsPage deviceName={deviceName} deregister={deregister} />}
           {page === 'updates' && <Updates />}
         </div>
       </div>
@@ -43,7 +43,7 @@ function AppShell({ deviceName }: { deviceName: string }) {
 export default function FEMApp() {
   const [phase, setPhase] = useState<'wizard' | 'app'>('wizard')
   const [deviceName, setDeviceName] = useState('nimble-swift-wolf')
-  const { device } = useDevice()
+  const { device, deregister } = useDevice()
 
   // If already registered, skip wizard
   const initialRegistered = device?.registered ?? false
@@ -53,5 +53,5 @@ export default function FEMApp() {
     return <Wizard onDone={(name) => { setDeviceName(name); setPhase('app') }} />
   }
 
-  return <AppShell deviceName={deviceName} />
+  return <AppShell deviceName={deviceName} deregister={deregister} />
 }

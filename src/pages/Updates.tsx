@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import Btn from '../components/primitives/Btn'
+import EmptyState from '../components/primitives/EmptyState'
 import Lbl from '../components/primitives/Lbl'
 import UpdCard, { type UpdateStatus } from '../components/UpdCard'
 import { useIntegrations } from '../hooks/useIntegrations'
@@ -266,20 +267,24 @@ export default function Updates() {
 
       <div>
         <Lbl sx={{ marginBottom: 9 }}>Partner Software</Lbl>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-          {partnerUpdates.map((p) => (
-            <UpdCard
-              key={p.id}
-              name={p.name}
-              Icon={p.Icon}
-              col={p.col}
-              current={p.current_version}
-              available={p.latest_version}
-              status={statusFor(p)}
-              onUpdate={p.available ? () => doUpdate('integration', p.id) : undefined}
-            />
-          ))}
-        </div>
+        {partnerUpdates.length === 0 ? (
+          <EmptyState message="No partner software detected" />
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+            {partnerUpdates.map((p) => (
+              <UpdCard
+                key={p.id}
+                name={p.name}
+                Icon={p.Icon}
+                col={p.col}
+                current={p.current_version}
+                available={p.latest_version}
+                status={statusFor(p)}
+                onUpdate={p.available ? () => doUpdate('integration', p.id) : undefined}
+              />
+            ))}
+          </div>
+        )}
       </div>
 
       <div

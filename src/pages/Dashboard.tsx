@@ -1,5 +1,6 @@
 import { Activity, Coins, Puzzle, type LucideIcon } from 'lucide-react'
 import Dot from '../components/primitives/Dot'
+import EmptyState from '../components/primitives/EmptyState'
 import Lbl from '../components/primitives/Lbl'
 import PoCGrid from '../components/PoCGrid'
 import StatCard from '../components/StatCard'
@@ -23,7 +24,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
   const { rewards } = useRewards()
   const summary = rewards.summary
   const active = intgs.filter((i) => i.enabled && i.healthy)
-  const pct = ((active.length / intgs.length) * 100).toFixed(0)
+  const pct = intgs.length > 0 ? ((active.length / intgs.length) * 100).toFixed(0) : '0'
   const slotHits = rewards.slots.filter((s) => s.done).length
   const estimated = summary ? summary.estimated_daily.toFixed(2) : '0.00'
   const rewardToken = summary ? summary.reward_token_name : '—'
@@ -55,47 +56,51 @@ export default function Dashboard({ intgs }: DashboardProps) {
 
       <div>
         <Lbl sx={{ marginBottom: 9 }}>Integration Status</Lbl>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(185px,1fr))', gap: 8 }}>
-          {intgs.map(({ id, name, Icon, col, enabled, healthy }) => {
-            const st = !enabled ? 'stopped' : healthy ? 'run' : 'err'
-            return (
-              <div
-                key={id}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 9,
-                  padding: '10px 12px',
-                  background: 'var(--s1)',
-                  border: '1px solid var(--b0)',
-                  borderRadius: 'var(--rad)',
-                  opacity: enabled ? 1 : 0.5
-                }}
-              >
+        {intgs.length === 0 ? (
+          <EmptyState message="No integration data" />
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(185px,1fr))', gap: 8 }}>
+            {intgs.map(({ id, name, Icon, col, enabled, healthy }) => {
+              const st = !enabled ? 'stopped' : healthy ? 'run' : 'err'
+              return (
                 <div
+                  key={id}
                   style={{
-                    width: 30,
-                    height: 30,
-                    borderRadius: 'var(--radsm)',
-                    background: `${col}12`,
-                    border: `1px solid ${col}22`,
                     display: 'flex',
                     alignItems: 'center',
-                    justifyContent: 'center',
-                    flexShrink: 0
+                    gap: 9,
+                    padding: '10px 12px',
+                    background: 'var(--s1)',
+                    border: '1px solid var(--b0)',
+                    borderRadius: 'var(--rad)',
+                    opacity: enabled ? 1 : 0.5
                   }}
                 >
-                  <Icon size={14} color={col} />
+                  <div
+                    style={{
+                      width: 30,
+                      height: 30,
+                      borderRadius: 'var(--radsm)',
+                      background: `${col}12`,
+                      border: `1px solid ${col}22`,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexShrink: 0
+                    }}
+                  >
+                    <Icon size={14} color={col} />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontFamily: 'var(--fh)', fontWeight: 600, fontSize: 12, color: 'var(--txt)' }}>{name}</div>
+                    <div style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t2)' }}>{!enabled ? 'Disabled' : healthy ? 'Running' : 'Unhealthy'}</div>
+                  </div>
+                  <Dot status={st} />
                 </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontFamily: 'var(--fh)', fontWeight: 600, fontSize: 12, color: 'var(--txt)' }}>{name}</div>
-                  <div style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t2)' }}>{!enabled ? 'Disabled' : healthy ? 'Running' : 'Unhealthy'}</div>
-                </div>
-                <Dot status={st} />
-              </div>
-            )
-          })}
-        </div>
+              )
+            })}
+          </div>
+        )}
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>

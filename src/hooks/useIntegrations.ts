@@ -116,7 +116,7 @@ export function useIntegrations() {
                 ...i,
                 enabled: next,
                 lifecycle: next ? 'Installing' : 'Disabled',
-                healthy: next ? true : i.healthy
+                healthy: next ? i.healthy : i.healthy
               }
             : i
         )

@@ -7,3 +7,5 @@ src-tauri/target/
 .env
 .env.local
 *.bak*
+
+testsprite_tests\tmp\config.json

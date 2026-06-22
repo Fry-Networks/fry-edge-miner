@@ -70,6 +70,10 @@ export interface FemConfig {
   wallet_address: string | null
   integrations_enabled: Record<string, boolean>
   api_base_url: string
+  start_on_boot?: boolean
+  minimize_to_tray?: boolean
+  auto_update?: boolean
+  notifications?: boolean
 }
 
 export interface UpdateInfo {

@@ -12,6 +12,10 @@ pub struct FemConfigView {
     pub initial_setup_done: bool,
     pub integrations_enabled: HashMap<String, bool>,
     pub api_base_url: String,
+    pub start_on_boot: bool,
+    pub minimize_to_tray: bool,
+    pub auto_update: bool,
+    pub notifications: bool,
 }
 
 impl From<FemConfig> for FemConfigView {
@@ -23,6 +27,10 @@ impl From<FemConfig> for FemConfigView {
             initial_setup_done: cfg.initial_setup_done,
             integrations_enabled: cfg.integrations_enabled,
             api_base_url: cfg.api_base_url,
+            start_on_boot: cfg.start_on_boot,
+            minimize_to_tray: cfg.minimize_to_tray,
+            auto_update: cfg.auto_update,
+            notifications: cfg.notifications,
         }
     }
 }
@@ -31,6 +39,10 @@ impl From<FemConfig> for FemConfigView {
 pub struct FemConfigUpdate {
     pub api_base_url: Option<String>,
     pub integrations_enabled: Option<HashMap<String, bool>>,
+    pub start_on_boot: Option<bool>,
+    pub minimize_to_tray: Option<bool>,
+    pub auto_update: Option<bool>,
+    pub notifications: Option<bool>,
 }
 
 #[tauri::command]
@@ -54,6 +66,10 @@ pub async fn save_settings(
             if let Some(integrations) = settings.integrations_enabled {
                 cfg.integrations_enabled = integrations;
             }
+            if let Some(v) = settings.start_on_boot { cfg.start_on_boot = v; }
+            if let Some(v) = settings.minimize_to_tray { cfg.minimize_to_tray = v; }
+            if let Some(v) = settings.auto_update { cfg.auto_update = v; }
+            if let Some(v) = settings.notifications { cfg.notifications = v; }
         })
         .map_err(|e| e.to_string())?;
     tracing::info!("Settings saved");
