@@ -5,6 +5,7 @@ use tracing::info;
 
 use crate::config::miner_key;
 
+#[cfg(windows)]
 const FRYHUB_DATA_DIR: &str = "C:/ProgramData/FryNetworks";
 
 const MINER_PREFIXES: &[(&str, &str)] = &[
@@ -99,8 +100,14 @@ pub fn detect_fryhub_at(data_dir_path: &str) -> Option<FryHubInstallation> {
 }
 
 /// Detect FryHub installation at the default data directory
+#[cfg(windows)]
 pub fn detect_fryhub() -> Option<FryHubInstallation> {
     detect_fryhub_at(FRYHUB_DATA_DIR)
+}
+
+#[cfg(not(windows))]
+pub fn detect_fryhub() -> Option<FryHubInstallation> {
+    None // FryHub legacy data only existed on Windows
 }
 
 /// Search a miner directory for key files

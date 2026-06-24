@@ -263,7 +263,8 @@ fn main() {
 
                         // Refresh base_reward AND reward config from /versions/FEM
                         // (PoC.versions is the single source of truth for reward config)
-                        match api::versions::check_version(&poc_client, "FEM", "windows").await {
+                        // NOTE: ZEUS00 hardwareapi /versions must handle "linux" platform — verify when Linux E2E phase starts
+                        match api::versions::check_version(&poc_client, "FEM", std::env::consts::OS).await {
                             Ok(info) => {
                                 if let Some(br) = info.base_reward {
                                     poc_base_reward.store(br.to_bits(), Ordering::Relaxed);
@@ -292,7 +293,7 @@ fn main() {
                         }
 
                         // Cache stake_tiers from the version response (already fetched above)
-                        if let Ok(info) = api::versions::check_version(&poc_client, "FEM", "windows").await {
+                        if let Ok(info) = api::versions::check_version(&poc_client, "FEM", std::env::consts::OS).await {
                             if let Some(tiers) = info.stake_tiers {
                                 if let Ok(mut cache) = poc_stake_tiers.write() {
                                     *cache = Some(tiers);

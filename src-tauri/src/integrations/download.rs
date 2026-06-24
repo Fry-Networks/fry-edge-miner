@@ -5,7 +5,14 @@ use tracing::{info, warn};
 /// Get the base directory for FEM partner binaries
 pub fn partners_base_dir() -> PathBuf {
     dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("C:/ProgramData"))
+        .unwrap_or_else(|| {
+            #[cfg(windows)]
+            { PathBuf::from("C:/ProgramData") }
+            #[cfg(not(windows))]
+            { dirs::home_dir()
+                .map(|h| h.join(".local").join("share"))
+                .unwrap_or_else(|| PathBuf::from("/tmp")) }
+        })
         .join("FryEdgeMiner")
         .join("partners")
 }

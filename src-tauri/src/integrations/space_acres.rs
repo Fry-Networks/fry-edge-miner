@@ -69,16 +69,32 @@ impl SpaceAcresIntegration {
                             .as_array()
                             .ok_or_else(|| anyhow::anyhow!("No assets in release"))?;
 
+                        let platform_suffix: &str = if cfg!(target_os = "windows") {
+                            ".exe"
+                        } else if cfg!(target_os = "macos") {
+                            ".dmg"
+                        } else {
+                            ".AppImage"
+                        };
+
                         let download_url = assets
                             .iter()
                             .find_map(|asset| {
-                                if asset["name"].as_str().map(|n| n.ends_with(".exe")).unwrap_or(false) {
-                                    asset["browser_download_url"].as_str().map(|s| s.to_string())
+                                if asset["name"]
+                                    .as_str()
+                                    .map(|n| n.ends_with(platform_suffix))
+                                    .unwrap_or(false)
+                                {
+                                    asset["browser_download_url"]
+                                        .as_str()
+                                        .map(|s| s.to_string())
                                 } else {
                                     None
                                 }
                             })
-                            .ok_or_else(|| anyhow::anyhow!("No .exe asset found in release"))?;
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("No native asset found in release for this platform")
+                            })?;
 
                         return Ok((tag_name, download_url));
                     }
