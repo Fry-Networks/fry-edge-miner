@@ -77,23 +77,25 @@ impl SpaceAcresIntegration {
                             ".AppImage"
                         };
 
+                        let host_arch = std::env::consts::ARCH; // "x86_64", "aarch64", etc.
+
                         let download_url = assets
                             .iter()
                             .find_map(|asset| {
-                                if asset["name"]
-                                    .as_str()
-                                    .map(|n| n.ends_with(platform_suffix))
-                                    .unwrap_or(false)
-                                {
-                                    asset["browser_download_url"]
-                                        .as_str()
-                                        .map(|s| s.to_string())
-                                } else {
-                                    None
+                                if let Some(name) = asset["name"].as_str() {
+                                    if name.ends_with(platform_suffix) && name.contains(host_arch) {
+                                        return asset["browser_download_url"]
+                                            .as_str()
+                                            .map(|s| s.to_string());
+                                    }
                                 }
+                                None
                             })
                             .ok_or_else(|| {
-                                anyhow::anyhow!("No native asset found in release for this platform")
+                                anyhow::anyhow!(
+                                    "No {} asset found for arch {} in release",
+                                    platform_suffix, host_arch
+                                )
                             })?;
 
                         return Ok((tag_name, download_url));

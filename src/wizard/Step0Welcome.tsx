@@ -9,7 +9,7 @@ interface Step0Props {
 
 export default function Step0Welcome({ onNext }: Step0Props) {
   const checks: [string, boolean][] = [
-    ['Windows 10 / 11 (64-bit)', true],
+    [navigator.platform.startsWith('Linux') ? 'Linux (64-bit)' : navigator.platform.startsWith('Win') ? 'Windows 10 / 11 (64-bit)' : navigator.platform.includes('Mac') ? 'macOS (64-bit)' : navigator.platform + ' (64-bit)', true],
     ['4 GB free disk space', true],
     ['Active internet connection', true],
     ['Algorand-compatible wallet', true]
