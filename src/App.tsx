@@ -43,7 +43,9 @@ function AppShell({ deviceName, deregister }: { deviceName: string; deregister: 
 export default function FEMApp() {
   const [phase, setPhase] = useState<'wizard' | 'app'>('wizard')
   const [deviceName, setDeviceName] = useState('nimble-swift-wolf')
-  const { device, deregister } = useDevice()
+  const { device, loading, deregister } = useDevice()
+
+  if (loading) return null // wait for get_device_info before deciding Wizard vs AppShell
 
   // If already registered, skip wizard
   const initialRegistered = device?.registered ?? false

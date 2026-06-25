@@ -2,14 +2,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import type { DeviceInfo } from '../lib/types'
 
-const FALLBACK: DeviceInfo = {
-  miner_key: 'FEM-b9e489c8a32d5547bbb7c363baaf733e',
-  wallet_address: 'OGHVJYWQXOOPZG2OLBIRFNTBF3H3276DDTKYYZUA6G4NUMF2RGYXNTMIRE',
-  registered: true
-}
-
 export function useDevice() {
-  const [device, setDevice] = useState<DeviceInfo | null>(FALLBACK)
+  const [device, setDevice] = useState<DeviceInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -19,7 +13,7 @@ export function useDevice() {
       setDevice(data)
       setError(null)
     } catch (e) {
-      console.warn('get_device_info failed, using mock fallback:', e)
+      console.warn('get_device_info failed:', e)
       setError(String(e))
     } finally {
       setLoading(false)
