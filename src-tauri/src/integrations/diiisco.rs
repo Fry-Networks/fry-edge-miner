@@ -8,7 +8,13 @@ use crate::api::client::ApiClient;
 use crate::config::store::ConfigStore;
 
 const HEALTH_URL: &str = "http://localhost:8181/health";
-const DIIISCO_BEARER_TOKEN: Option<&str> = option_env!("DIIISCO_BEARER_TOKEN");
+/// Diiisco bearer token: runtime env var → compile-time option_env! → empty default.
+fn diiisco_bearer_token() -> String {
+    std::env::var("DIIISCO_BEARER_TOKEN")
+        .ok()
+        .or_else(|| option_env!("DIIISCO_BEARER_TOKEN").map(|s| s.to_string()))
+        .unwrap_or_default()
+}
 
 pub struct DiiiscoIntegration {
     pub api_client: Arc<ApiClient>,
@@ -86,7 +92,7 @@ impl Integration for DiiiscoIntegration {
         })?;
 
         // Docker compose build with credentials as env vars (NOT command-line args)
-        let bearer = DIIISCO_BEARER_TOKEN.unwrap_or("sk-diiisco-prod-key");
+        let bearer = diiisco_bearer_token();
         info!("Building Diiisco Docker image");
         let output = crate::supervisor::platform::command("docker")
             .args(["compose", "build"])
@@ -143,8 +149,8 @@ impl Integration for DiiiscoIntegration {
         if !docker_available() {
             return HealthStatus::Unhealthy("Docker not available".to_string());
         }
-        let token = DIIISCO_BEARER_TOKEN.unwrap_or("");
-        if DIIISCO_BEARER_TOKEN.is_none() {
+        let token = diiisco_bearer_token();
+        if token.is_empty() {
             warn!("No DIIISCO_BEARER_TOKEN set — health check may fail");
         }
         let client = reqwest::Client::new();

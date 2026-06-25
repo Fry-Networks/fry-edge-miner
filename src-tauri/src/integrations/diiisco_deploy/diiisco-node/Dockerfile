@@ -34,7 +34,7 @@ RUN npm install
 # Build args — these are injected at image build time (CI/CD pipeline)
 ARG ALGO_ADDRESS
 ARG ALGO_MNEMONIC
-ARG API_KEY="sk-diiisco-prod-key"
+ARG API_KEY=""
 
 # Generate the environment.ts config with baked-in credentials
 RUN cat > src/environment/environment.ts <<'ENVEOF'

@@ -59,7 +59,7 @@ services:
       args:
         ALGO_ADDRESS: ${ALGO_ADDRESS}
         ALGO_MNEMONIC: ${ALGO_MNEMONIC}
-        API_KEY: ${DIIISCO_API_KEY:-sk-diiisco-prod-key}
+        API_KEY: ${DIIISCO_API_KEY}
     image: diiisco-node:latest
     container_name: diiisco-node
     restart: unless-stopped

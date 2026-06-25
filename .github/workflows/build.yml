@@ -53,6 +53,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           FEM_API_TOKEN: ${{ secrets.FEM_API_TOKEN }}
           PRESEARCH_REG_CODE: ${{ secrets.PRESEARCH_REG_CODE }}
+          DIIISCO_BEARER_TOKEN: ${{ secrets.DIIISCO_BEARER_TOKEN }}
 
       - name: Upload NSIS installer
         uses: actions/upload-artifact@v4
