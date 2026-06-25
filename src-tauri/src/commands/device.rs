@@ -223,3 +223,61 @@ pub async fn deregister_device(
     tracing::info!("Device deregistered");
     Ok(())
 }
+
+/// Attempt to obtain per-device token at startup if missing.
+/// Fail-safe: any error logs and leaves device on shared token.
+pub async fn attempt_device_token_migration(
+    config: &std::sync::Arc<crate::config::store::ConfigStore>,
+    api_client: &std::sync::Arc<crate::api::client::ApiClient>,
+) {
+    let cfg = config.get();
+
+    // Only migrate if registered (miner_key + install_id) but no device_token
+    let (miner_key, install_id) = match (&cfg.miner_key, &cfg.install_id) {
+        (Some(k), Some(id)) if cfg.device_token.is_none() => (k.clone(), id.clone()),
+        _ => return, // nothing to do
+    };
+
+    tracing::info!(miner_key = %miner_key, "Attempting device token migration");
+
+    // Field sourcing: identical to register_device (device.rs:78-89)
+    let heartbeat = crate::api::types::InstallationHeartbeat {
+        miner_key: miner_key.clone(),
+        install_id: install_id.clone(),
+        miner_code: Some("FEM".to_string()),
+        software_version_installed: Some(env!("CARGO_PKG_VERSION").to_string()),
+        poc_version_installed: Some("1.0.0".to_string()),
+        hostname: std::env::var("COMPUTERNAME")
+            .ok()
+            .or_else(|| std::env::var("HOSTNAME").ok()),
+        os: Some(std::env::consts::OS.to_string()),
+        is_installed: Some(true),
+    };
+
+    match crate::api::installations::register(api_client, &heartbeat).await {
+        Ok(resp) => {
+            if let Some(token) = resp.device_token {
+                match config.update(|c| {
+                    c.device_token = Some(token.clone());
+                }) {
+                    Ok(()) => {
+                        api_client.set_bearer_token(token);
+                        tracing::info!(miner_key = %miner_key, "Device auto-migrated to per-device token");
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to persist device_token: {} — continuing on shared token", e);
+                    }
+                }
+            } else {
+                tracing::debug!(miner_key = %miner_key, "Server returned no device_token");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                miner_key = %miner_key,
+                error = %e,
+                "Device token migration failed — continuing on shared token"
+            );
+        }
+    }
+}

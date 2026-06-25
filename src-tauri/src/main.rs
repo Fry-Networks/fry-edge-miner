@@ -64,6 +64,15 @@ fn main() {
                 cfg.effective_api_token(),
             ));
 
+            // Device token auto-migration (fire-and-forget, fail-safe)
+            {
+                let mig_config = config_store.clone();
+                let mig_client = api_client.clone();
+                tauri::async_runtime::spawn(async move {
+                    commands::device::attempt_device_token_migration(&mig_config, &mig_client).await;
+                });
+            }
+
             // Process supervisor (created before registry — MysteriumIntegration needs Arc<Mutex<Supervisor>>)
             let log_dir = app
                 .path()
