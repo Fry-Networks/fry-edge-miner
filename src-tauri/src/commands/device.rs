@@ -22,11 +22,29 @@ pub async fn get_device_info(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<DeviceInfo, String> {
     let config = state.config.get();
+
+    // Validate config-loaded key format before using
+    let miner_key = config
+        .miner_key
+        .as_ref()
+        .and_then(|k| crate::config::miner_key::normalize_fem_key(k).ok());
+    if config.miner_key.is_some() && miner_key.is_none() {
+        tracing::warn!("Stored miner_key has invalid format; treating as unregistered");
+    }
+
+    // Debug diagnostics — no secrets logged
+    tracing::debug!(
+        key_format_valid = miner_key.is_some(),
+        device_token_present = config.device_token.is_some() && !config.device_token.as_ref().unwrap().is_empty(),
+        auth_source = if config.device_token.as_ref().filter(|s| !s.is_empty()).is_some() { "device_token" } else { "fallback" },
+        "get_device_info diagnostics"
+    );
+
     let mut wallet = config.wallet_address.clone();
 
     // Auto-populate wallet from hardwareapi if missing locally
     if wallet.is_none() {
-        if let Some(ref miner_key) = config.miner_key {
+        if let Some(ref miner_key) = miner_key {
             match crate::api::credentials::lookup(&state.api_client, miner_key).await {
                 Ok(creds) => {
                     if let Some(ref addr) = creds.algo_address {
@@ -49,8 +67,8 @@ pub async fn get_device_info(
     }
 
     Ok(DeviceInfo {
-        registered: config.miner_key.is_some(),
-        miner_key: config.miner_key,
+        registered: miner_key.is_some(),
+        miner_key,
         wallet_address: wallet,
     })
 }
@@ -58,11 +76,18 @@ pub async fn get_device_info(
 #[tauri::command]
 pub async fn register_device(
     wallet: String,
+    miner_key: Option<String>,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<String, String> {
     crate::config::wallet::validate_address(&wallet).map_err(|e| e.to_string())?;
 
-    let miner_key = crate::config::miner_key::generate();
+    let miner_key = match miner_key {
+        Some(k) => match crate::config::miner_key::normalize_fem_key(&k) {
+            Ok(normalized) => normalized,
+            Err(e) => return Err(e),
+        },
+        None => crate::config::miner_key::generate(),
+    };
     let install_id = generate_install_id();
 
     // Save miner_key + wallet to config first (install_id saved after API success)
@@ -234,7 +259,16 @@ pub async fn attempt_device_token_migration(
 
     // Only migrate if registered (miner_key + install_id) but no device_token
     let (miner_key, install_id) = match (&cfg.miner_key, &cfg.install_id) {
-        (Some(k), Some(id)) if cfg.device_token.is_none() => (k.clone(), id.clone()),
+        (Some(k), Some(id)) if cfg.device_token.is_none() => {
+            // Validate key format before using in heartbeat
+            match crate::config::miner_key::normalize_fem_key(k) {
+                Ok(normalized) => (normalized, id.clone()),
+                Err(_) => {
+                    tracing::warn!("Migration skipped: stored miner_key has invalid format");
+                    return;
+                }
+            }
+        }
         _ => return, // nothing to do
     };
 

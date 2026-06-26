@@ -4,14 +4,22 @@ import Btn from '../components/primitives/Btn'
 import Lbl from '../components/primitives/Lbl'
 
 interface Step1Props {
-  onNext: () => void
+  onNext: (key: string, wallet: string) => void
   onBack: () => void
+}
+
+function normalizeFemKey(input: string): string | null {
+  const trimmed = input.trim()
+  if (!/^FEM-[0-9a-fA-F]{32}$/.test(trimmed)) return null
+  const hex = trimmed.slice(4).toLowerCase()
+  return `FEM-${hex}`
 }
 
 export default function Step1Device({ onNext, onBack }: Step1Props) {
   const [key, setKey] = useState('')
   const [addr, setAddr] = useState('')
-  const keyValid = /^FEM-[0-9a-f]{32}$/i.test(key)
+  const normalizedKey = normalizeFemKey(key)
+  const keyValid = normalizedKey !== null
   const addrValid = addr.length === 58 && /^[A-Z2-7]+$/.test(addr)
   const canContinue = keyValid && addrValid
 
@@ -212,7 +220,7 @@ export default function Step1Device({ onNext, onBack }: Step1Props) {
 
       <div style={{ marginTop: 'auto', display: 'flex', gap: 8 }}>
         <Btn v="g" onClick={onBack}>Back</Btn>
-        <Btn v="p" onClick={onNext} disabled={!canContinue}>
+        <Btn v="p" onClick={() => { if (normalizedKey) onNext(normalizedKey, addr) }} disabled={!canContinue}>
           Continue <ArrowRight size={13} />
         </Btn>
       </div>

@@ -8,7 +8,8 @@ import Lbl from '../components/primitives/Lbl'
 import SettingRow from '../components/SettingRow'
 import Tog from '../components/primitives/Tog'
 import type { FemConfig } from '../lib/types'
-import { invokeWithFallback } from '../lib/tauri'
+import { invokeWithFallback, safeInvoke } from '../lib/tauri'
+import { useDevice } from '../hooks/useDevice'
 import { useRewards } from '../hooks/useRewards'
 import { APP_VERSION } from '../lib/version'
 
@@ -55,45 +56,64 @@ interface SettingsPageProps {
 }
 
 export default function SettingsPage({ deviceName = 'nimble-swift-wolf', deregister }: SettingsPageProps) {
+  const { device, register, refetch } = useDevice()
   const [boot, setBoot] = useState(true)
   const [tray, setTray] = useState(true)
   const [auto, setAuto] = useState(true)
   const [notif, setNotif] = useState(true)
   const [config, setConfig] = useState<FemConfig | null>(null)
+  const [regKey, setRegKey] = useState('')
+  const [regWallet, setRegWallet] = useState('')
+  const [regError, setRegError] = useState('')
+  const [regLoading, setRegLoading] = useState(false)
   const { rewards } = useRewards()
   const summary = rewards.summary
 
   useEffect(() => {
-    invokeWithFallback<FemConfig>('get_settings', undefined, {
-      miner_key: 'FEM-b9e489c8a32d5547bbb7c363baaf733e',
-      wallet_address: 'OGHVJYWQXOOPZG2OLBIRFNTBF3H3276DDTKYYZUA6G4NUMF2RGYXNTMIRE',
-      integrations_enabled: {},
-      api_base_url: 'https://hardwareapi.frynetworks.com'
-    }).then((cfg) => {
-      setConfig(cfg)
-      if (cfg) {
-        if (cfg.start_on_boot !== undefined) setBoot(cfg.start_on_boot)
-        if (cfg.minimize_to_tray !== undefined) setTray(cfg.minimize_to_tray)
-        if (cfg.auto_update !== undefined) setAuto(cfg.auto_update)
-        if (cfg.notifications !== undefined) setNotif(cfg.notifications)
-      }
-    })
+    safeInvoke<FemConfig>('get_settings')
+      .then((cfg) => {
+        setConfig(cfg)
+        if (cfg) {
+          if (cfg.start_on_boot !== undefined) setBoot(cfg.start_on_boot)
+          if (cfg.minimize_to_tray !== undefined) setTray(cfg.minimize_to_tray)
+          if (cfg.auto_update !== undefined) setAuto(cfg.auto_update)
+          if (cfg.notifications !== undefined) setNotif(cfg.notifications)
+        }
+      })
+      .catch(() => setConfig(null))
   }, [])
+
+  const handleRegister = async () => {
+    setRegError('')
+    setRegLoading(true)
+    try {
+      await register(regWallet, regKey || undefined)
+      await refetch()
+      setRegKey('')
+      setRegWallet('')
+    } catch (e) {
+      setRegError(String(e))
+    } finally {
+      setRegLoading(false)
+    }
+  }
 
   const savePrefs = async (next?: { boot?: boolean; tray?: boolean; auto?: boolean; notif?: boolean }) => {
     try {
-      await invokeWithFallback('save_settings', {
+      await safeInvoke('save_settings', {
         settings: {
           start_on_boot: next?.boot ?? boot,
           minimize_to_tray: next?.tray ?? tray,
           auto_update: next?.auto ?? auto,
           notifications: next?.notif ?? notif
         }
-      }, undefined)
+      })
     } catch (e) {
       console.warn('save_settings failed:', e)
     }
   }
+
+  const isRegistered = device?.registered ?? false
 
   return (
     <div className="sc" style={{ padding: '20px 24px', overflowY: 'auto', height: '100%' }}>
@@ -116,29 +136,87 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf', deregis
           <div>
             <Lbl sx={{ marginBottom: 6 }}>Registration</Lbl>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <Shield size={13} color="var(--teal)" strokeWidth={2.5} />
-              <span style={{ fontFamily: 'var(--fb)', fontSize: 13, color: 'var(--teal)' }}>Registered</span>
-              <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--t2)' }}>{summary ? `${summary.stake_label}${summary.stake_label.toLowerCase().includes('stake') ? '' : ' stake'}` : '—'}</span>
+              {isRegistered ? (
+                <>
+                  <Shield size={13} color="var(--teal)" strokeWidth={2.5} />
+                  <span style={{ fontFamily: 'var(--fb)', fontSize: 13, color: 'var(--teal)' }}>Registered</span>
+                  <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--t2)' }}>{summary ? `${summary.stake_label}${summary.stake_label.toLowerCase().includes('stake') ? '' : ' stake'}` : '—'}</span>
+                </>
+              ) : (
+                <>
+                  <Shield size={13} color="var(--t2)" strokeWidth={2.5} />
+                  <span style={{ fontFamily: 'var(--fb)', fontSize: 13, color: 'var(--t2)' }}>Not registered</span>
+                </>
+              )}
             </div>
           </div>
         </div>
-        <Lbl sx={{ marginBottom: 5 }}>Miner Key</Lbl>
-        <CopyField val={config?.miner_key ?? 'FEM-b9e489c8a32d5547bbb7c363baaf733e'} />
+
+        {isRegistered ? (
+          <>
+            <Lbl sx={{ marginBottom: 5 }}>Miner Key</Lbl>
+            <CopyField val={config?.miner_key ?? ''} />
+          </>
+        ) : (
+          <>
+            <Lbl sx={{ marginBottom: 5 }}>Miner Key (optional)</Lbl>
+            <input
+              className="inp"
+              value={regKey}
+              onChange={(e) => setRegKey(e.target.value)}
+              placeholder="FEM-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+              spellCheck={false}
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                background: 'var(--s2)',
+                border: '1px solid var(--b1)',
+                borderRadius: 'var(--radsm)',
+                color: 'var(--txt)',
+                fontFamily: 'var(--fm)',
+                fontSize: 12,
+                marginBottom: 10
+              }}
+            />
+            <Lbl sx={{ marginBottom: 5 }}>Wallet Address</Lbl>
+            <input
+              className="inp"
+              value={regWallet}
+              onChange={(e) => setRegWallet(e.target.value.toUpperCase())}
+              placeholder="Your 58-character Algorand address…"
+              spellCheck={false}
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                background: 'var(--s2)',
+                border: '1px solid var(--b1)',
+                borderRadius: 'var(--radsm)',
+                color: 'var(--txt)',
+                fontFamily: 'var(--fm)',
+                fontSize: 12,
+                marginBottom: 10
+              }}
+            />
+            {regError && (
+              <div style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--red)', marginBottom: 10 }}>{regError}</div>
+            )}
+            <Btn v="p" onClick={handleRegister} disabled={regLoading || regWallet.length !== 58}>
+              {regLoading ? 'Registering…' : 'Register Device'}
+            </Btn>
+          </>
+        )}
       </SettingSection>
 
       <SettingSection Icon={Wallet} ico="var(--amb)" label="Reward Wallet">
         <Lbl sx={{ marginBottom: 6 }}>Algorand Address</Lbl>
-        <CopyField
-          val={
-            config?.wallet_address ??
-            'OGHVJYWQXOOPZG2OLBIRFNTBF3H3276DDTKYYZUA6G4NUMF2RGYXNTMIRE'
-          }
-        />
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 10 }}>
-          <Shield size={12} color="var(--teal)" />
-          <span style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--t1)' }}>{summary ? `${summary.stake_label}${summary.stake_label.toLowerCase().includes('stake') ? '' : ' stake'} active` : 'Stake info unavailable'}</span>
-          <span style={{ fontFamily: 'var(--fm)', fontSize: 12, color: 'var(--teal)' }}>{summary ? `${summary.stake_multiplier.toFixed(1)}×` : '—'}</span>
-        </div>
+        <CopyField val={config?.wallet_address ?? ''} />
+        {isRegistered && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 10 }}>
+            <Shield size={12} color="var(--teal)" />
+            <span style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--t1)' }}>{summary ? `${summary.stake_label}${summary.stake_label.toLowerCase().includes('stake') ? '' : ' stake'} active` : 'Stake info unavailable'}</span>
+            <span style={{ fontFamily: 'var(--fm)', fontSize: 12, color: 'var(--teal)' }}>{summary ? `${summary.stake_multiplier.toFixed(1)}×` : '—'}</span>
+          </div>
+        )}
       </SettingSection>
 
       <SettingSection Icon={Monitor} ico="var(--blu)" label="Preferences">
@@ -221,11 +299,13 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf', deregis
         </div>
       </SettingSection>
 
-      <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-        <Btn v="g" onClick={() => { if (window.confirm('Deregister this device? This cannot be undone.')) deregister() }} >
-          Deregister
-        </Btn>
-      </div>
+      {isRegistered && (
+        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          <Btn v="g" onClick={() => { if (window.confirm('Deregister this device? This cannot be undone.')) deregister() }} >
+            Deregister
+          </Btn>
+        </div>
+      )}
     </div>
   )
 }

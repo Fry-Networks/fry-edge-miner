@@ -11,8 +11,15 @@ interface WizardProps {
 
 export default function Wizard({ onDone }: WizardProps) {
   const [step, setStep] = useState(0)
+  const [minerKey, setMinerKey] = useState<string | null>(null)
+  const [walletAddress, setWalletAddress] = useState('')
   const next = () => setStep((s) => s + 1)
   const back = () => setStep((s) => s - 1)
+  const goToStep1 = (key: string, wallet: string) => {
+    setMinerKey(key)
+    setWalletAddress(wallet)
+    next()
+  }
   return (
     <div
       style={{
@@ -25,9 +32,9 @@ export default function Wizard({ onDone }: WizardProps) {
     >
       <WizPanel step={step} />
       {step === 0 && <Step0Welcome onNext={next} />}
-      {step === 1 && <Step1Device onNext={next} onBack={back} />}
+      {step === 1 && <Step1Device onNext={goToStep1} onBack={back} />}
       {step === 2 && <Step2Review onNext={next} onBack={back} />}
-      {step === 3 && <Step3Install onDone={onDone} />}
+      {step === 3 && <Step3Install minerKey={minerKey} walletAddress={walletAddress} onDone={onDone} />}
     </div>
   )
 }

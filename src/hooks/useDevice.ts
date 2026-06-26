@@ -25,11 +25,11 @@ export function useDevice() {
   }, [fetch])
 
   const register = useCallback(
-    async (wallet: string) => {
+    async (wallet: string, minerKey?: string) => {
       try {
-        const minerKey = await invoke<string>('register_device', { wallet })
+        const result = await invoke<string>('register_device', { wallet, minerKey })
         await fetch()
-        return minerKey
+        return result
       } catch (e) {
         setError(String(e))
         throw e
