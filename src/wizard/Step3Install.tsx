@@ -5,6 +5,7 @@ import Divider from '../components/primitives/Divider'
 import Lbl from '../components/primitives/Lbl'
 import { useDevice } from '../hooks/useDevice'
 import { makeName } from '../lib/names'
+import { extractErrorMessage } from '../lib/error'
 
 interface Step3Props {
   minerKey: string | null
@@ -24,9 +25,9 @@ export default function Step3Install({ minerKey, walletAddress, onDone }: Step3P
       .then(() => {
         if (!cancelled) setStatus('done')
       })
-      .catch((e: Error) => {
+      .catch((e: unknown) => {
         if (!cancelled) {
-          setErrorMsg(e.message || 'Registration failed')
+          setErrorMsg(extractErrorMessage(e))
           setStatus('error')
         }
       })

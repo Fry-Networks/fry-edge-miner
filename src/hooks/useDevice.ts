@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import type { DeviceInfo } from '../lib/types'
+import { extractErrorMessage } from '../lib/error'
 
 export function useDevice() {
   const [device, setDevice] = useState<DeviceInfo | null>(null)
@@ -14,7 +15,7 @@ export function useDevice() {
       setError(null)
     } catch (e) {
       console.warn('get_device_info failed:', e)
-      setError(String(e))
+      setError(extractErrorMessage(e))
     } finally {
       setLoading(false)
     }
@@ -31,7 +32,7 @@ export function useDevice() {
         await fetch()
         return result
       } catch (e) {
-        setError(String(e))
+        setError(extractErrorMessage(e))
         throw e
       }
     },
@@ -43,7 +44,7 @@ export function useDevice() {
       await invoke('deregister_device')
       await fetch()
     } catch (e) {
-      setError(String(e))
+      setError(extractErrorMessage(e))
       throw e
     }
   }, [fetch])
