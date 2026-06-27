@@ -10,9 +10,9 @@ interface Step1Props {
 
 function normalizeFemKey(input: string): string | null {
   const trimmed = input.trim()
-  if (!/^FEM-[0-9a-fA-F]{32}$/.test(trimmed)) return null
-  const hex = trimmed.slice(4).toLowerCase()
-  return `FEM-${hex}`
+  if (!/^FEM-[A-Z0-9]{32}$/i.test(trimmed)) return null
+  const body = trimmed.slice(4).toUpperCase()
+  return `FEM-${body}`
 }
 
 export default function Step1Device({ onNext, onBack }: Step1Props) {
@@ -90,7 +90,7 @@ export default function Step1Device({ onNext, onBack }: Step1Props) {
             ) : (
               <>
                 <X size={11} color="var(--red)" strokeWidth={2.5} />
-                <span style={{ color: 'var(--red)' }}>Must be FEM- followed by 32 hex characters</span>
+                <span style={{ color: 'var(--red)' }}>Must be FEM- followed by 32 alphanumeric characters</span>
               </>
             )}
           </div>
