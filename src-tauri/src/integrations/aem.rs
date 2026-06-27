@@ -90,7 +90,7 @@ impl Integration for AemIntegration {
     }
 
     fn display_name(&self) -> &str {
-        "AEM"
+        "Olostep"
     }
 
     async fn install(&self) -> Result<()> {

@@ -49,14 +49,14 @@ export const INTEGRATION_META: IntegrationMeta[] = [
     id: 'space_acres',
     name: 'SpaceAcres',
     tag: 'STORAGE NODE',
-    desc: 'Contribute disk space for Chia / SpaceAcres farming',
+    desc: 'Provide decentralized storage to the Autonomys Network.',
     Icon: HardDrive,
     col: '#22c55e',
     uptime: 98.4
   },
   {
     id: 'aem',
-    name: 'AEM',
+    name: 'Olostep',
     tag: 'SCRAPE NODE',
     desc: 'Browser-based web scraping and data collection',
     Icon: Eye,
