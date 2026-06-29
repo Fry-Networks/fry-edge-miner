@@ -51,12 +51,11 @@ impl ApiClient {
 
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
         let token = self.bearer_token.read().unwrap().clone();
-        let resp = self
-            .http
-            .get(self.url(path))
-            .bearer_auth(&token)
-            .send()
-            .await?;
+        let mut req = self.http.get(self.url(path));
+        if !token.is_empty() {
+            req = req.bearer_auth(&token);
+        }
+        let resp = req.send().await?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
@@ -71,13 +70,11 @@ impl ApiClient {
         body: &B,
     ) -> Result<T, ApiError> {
         let token = self.bearer_token.read().unwrap().clone();
-        let resp = self
-            .http
-            .post(self.url(path))
-            .bearer_auth(&token)
-            .json(body)
-            .send()
-            .await?;
+        let mut req = self.http.post(self.url(path)).json(body);
+        if !token.is_empty() {
+            req = req.bearer_auth(&token);
+        }
+        let resp = req.send().await?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
@@ -92,13 +89,11 @@ impl ApiClient {
         body: &B,
     ) -> Result<(), ApiError> {
         let token = self.bearer_token.read().unwrap().clone();
-        let resp = self
-            .http
-            .put(self.url(path))
-            .bearer_auth(&token)
-            .json(body)
-            .send()
-            .await?;
+        let mut req = self.http.put(self.url(path)).json(body);
+        if !token.is_empty() {
+            req = req.bearer_auth(&token);
+        }
+        let resp = req.send().await?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
@@ -113,13 +108,11 @@ impl ApiClient {
         body: &B,
     ) -> Result<T, ApiError> {
         let token = self.bearer_token.read().unwrap().clone();
-        let resp = self
-            .http
-            .patch(self.url(path))
-            .bearer_auth(&token)
-            .json(body)
-            .send()
-            .await?;
+        let mut req = self.http.patch(self.url(path)).json(body);
+        if !token.is_empty() {
+            req = req.bearer_auth(&token);
+        }
+        let resp = req.send().await?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
@@ -130,12 +123,11 @@ impl ApiClient {
 
     pub async fn delete(&self, path: &str) -> Result<(), ApiError> {
         let token = self.bearer_token.read().unwrap().clone();
-        let resp = self
-            .http
-            .delete(self.url(path))
-            .bearer_auth(&token)
-            .send()
-            .await?;
+        let mut req = self.http.delete(self.url(path));
+        if !token.is_empty() {
+            req = req.bearer_auth(&token);
+        }
+        let resp = req.send().await?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
