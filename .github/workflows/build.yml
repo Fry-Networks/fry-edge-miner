@@ -83,33 +83,19 @@ jobs:
           path: src-tauri/target/release/bundle/msi/*.sig
           if-no-files-found: error
 
-      - name: Upload NSIS updater zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: fem-updater-nsis-zip
-          path: src-tauri/target/release/bundle/nsis/*.nsis.zip
-          if-no-files-found: error
-
-      - name: Upload MSI updater zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: fem-updater-msi-zip
-          path: src-tauri/target/release/bundle/msi/*.msi.zip
-          if-no-files-found: error
-
       - name: Compose latest.json
         shell: bash
         run: |
           VERSION=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
           PRODUCT=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['productName'])")
           PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          # Match ONLY the current version's updater zip (avoids stale cached builds)
-          NSIS_ZIP=$(ls src-tauri/target/release/bundle/nsis/*_${VERSION}_*-setup.nsis.zip 2>/dev/null | head -1 | xargs -I{} basename {})
-          NSIS_SIG_FILE=$(ls src-tauri/target/release/bundle/nsis/*_${VERSION}_*-setup.nsis.zip.sig 2>/dev/null | head -1)
+          # Match ONLY the current version's exe (avoids stale cached builds)
+          NSIS_EXE=$(ls src-tauri/target/release/bundle/nsis/*_${VERSION}_*-setup.exe 2>/dev/null | head -1 | xargs -I{} basename {})
+          NSIS_SIG_FILE=$(ls src-tauri/target/release/bundle/nsis/*_${VERSION}_*-setup.exe.sig 2>/dev/null | head -1)
           # GitHub release upload converts spaces to dots in filenames
-          NSIS_ZIP_URL=$(echo "$NSIS_ZIP" | sed 's/ /./g')
+          NSIS_EXE_URL=$(echo "$NSIS_EXE" | sed 's/ /./g')
           NSIS_SIG=$(cat "$NSIS_SIG_FILE")
-          echo "VERSION=$VERSION  ZIP=$NSIS_ZIP  URL_NAME=$NSIS_ZIP_URL  SIG_FILE=$NSIS_SIG_FILE"
+          echo "VERSION=$VERSION  EXE=$NSIS_EXE  URL_NAME=$NSIS_EXE_URL  SIG_FILE=$NSIS_SIG_FILE"
           python3 -c "
           import json
           print(json.dumps({
@@ -119,7 +105,7 @@ jobs:
             'platforms': {
               'windows-x86_64': {
                 'signature': '''${NSIS_SIG}'''.strip(),
-                'url': 'https://github.com/Fry-Foundation/fry-edge-miner/releases/download/v${VERSION}/${NSIS_ZIP_URL}'
+                'url': 'https://github.com/Fry-Foundation/fry-edge-miner/releases/download/v${VERSION}/${NSIS_EXE_URL}'
               }
             }
           }, indent=2))
@@ -150,8 +136,6 @@ jobs:
           files: |
             fem-installer-nsis/*.exe
             fem-installer-nsis-sig/*.sig
-            fem-updater-nsis-zip/*.nsis.zip
             fem-installer-msi/*.msi
             fem-installer-msi-sig/*.sig
-            fem-updater-msi-zip/*.msi.zip
             fem-latest-json/latest.json
