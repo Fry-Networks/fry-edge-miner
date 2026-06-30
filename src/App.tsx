@@ -12,7 +12,7 @@ import { useDevice } from './hooks/useDevice'
 
 function AppShell({ deviceName, deregister }: { deviceName: string; deregister: () => Promise<void> }) {
   const [page, setPage] = useState<NavPage>('dashboard')
-  const { integrations, toggle } = useIntegrations()
+  const { integrations, toggle, error } = useIntegrations()
   const activeCount = integrations.filter((i) => i.enabled).length
   const hasUnhealthy = integrations.some((i) => i.enabled && !i.healthy)
 
@@ -29,6 +29,21 @@ function AppShell({ deviceName, deregister }: { deviceName: string; deregister: 
       <Sidebar page={page} onNav={setPage} activeCount={activeCount} hasUnhealthy={hasUnhealthy} deviceName={deviceName} />
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <TopBar page={page} />
+        {error && (
+          <div style={{
+            padding: '8px 16px',
+            background: 'var(--red)18',
+            borderBottom: '1px solid var(--red)40',
+            fontFamily: 'var(--fb)',
+            fontSize: 12,
+            color: 'var(--red)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8
+          }}>
+            <span style={{ fontWeight: 600 }}>Error:</span> {error}
+          </div>
+        )}
         <div style={{ flex: 1, overflow: 'hidden' }}>
           {page === 'dashboard' && <Dashboard intgs={integrations} />}
           {page === 'integrations' && <Integrations intgs={integrations} onToggle={toggle} />}

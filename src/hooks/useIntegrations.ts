@@ -142,7 +142,7 @@ export function useIntegrations() {
               : i
           )
         )
-        setError(String(e))
+        setError(`${current.name}: ${String(e)}`)
       }
     },
     [integrations, fetch]

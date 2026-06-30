@@ -92,6 +92,9 @@ impl Integration for DiiiscoIntegration {
 
         // Docker compose build with credentials as env vars (NOT command-line args)
         let bearer = diiisco_bearer_token();
+        if bearer.is_empty() {
+            anyhow::bail!("DIIISCO_BEARER_TOKEN not configured — set the environment variable before enabling Diiisco");
+        }
         info!("Building Diiisco Docker image");
         let output = crate::supervisor::platform::command("docker")
             .args(["compose", "build"])

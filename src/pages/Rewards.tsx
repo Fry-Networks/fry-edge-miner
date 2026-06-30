@@ -3,11 +3,11 @@ import Lbl from '../components/primitives/Lbl'
 import StatCard from '../components/StatCard'
 import Tag from '../components/primitives/Tag'
 import { GATES } from '../lib/integrationMeta'
-import { useRewards } from '../hooks/useRewards'
+import { useRewards, type HourlyGates } from '../hooks/useRewards'
 
 export default function Rewards() {
   const { rewards } = useRewards()
-  const { rows, slots, summary } = rewards
+  const { rows, hourlyGates, summary } = rewards
   const rewardToken = summary ? summary.reward_token_name : '—'
   const fullDayEst = summary ? summary.base_reward.toFixed(2) : '—'
   const totalEarned = rows.reduce((sum, r) => sum + r.reward, 0).toFixed(2)
@@ -140,49 +140,69 @@ export default function Rewards() {
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
             {[
-              ['pass', 'var(--teal)'],
-              ['fail', 'var(--red)'],
-              ['pending', 'var(--b1)']
-            ].map(([l, c]) => (
-              <div key={l} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                <div style={{ width: 7, height: 7, background: c, borderRadius: 1 }} />
+              ['pass', 'var(--teal)', 1],
+              ['pending', 'var(--b0)', 0.25]
+            ].map(([l, c, o]) => (
+              <div key={l as string} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <div style={{ width: 7, height: 7, background: c as string, borderRadius: 1, opacity: o as number }} />
                 <span style={{ fontFamily: 'var(--fb)', fontSize: 10, color: 'var(--t2)' }}>{l}</span>
               </div>
             ))}
           </div>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(24,1fr)', gap: 2 }}>
-          {Array.from({ length: 24 }, (_, h) =>
-            GATES.map((g, gi) => {
-              const s = slots[h * 6 + gi] || { done: false, pass: null }
-              return (
-                <div
-                  key={`${h}-${g}`}
-                  style={{
-                    height: 10,
-                    borderRadius: 1,
-                    background: !s.done ? 'var(--b0)' : s.pass ? 'var(--teal)' : 'var(--red)',
-                    opacity: !s.done ? 0.25 : 1
-                  }}
-                />
-              )
-            })
-          )}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {GATES.map((g) => {
+            const gateKey = (g === 'mac' ? 'mac_match' : g) as keyof HourlyGates
+            return (
+              <div key={g} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <div style={{
+                  width: 32,
+                  fontFamily: 'var(--fm)',
+                  fontSize: 8,
+                  color: 'var(--t2)',
+                  textAlign: 'right',
+                  flexShrink: 0
+                }}>
+                  {g}
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(24,1fr)', gap: 2, flex: 1 }}>
+                  {Array.from({ length: 24 }, (_, h) => {
+                    const hour = hourlyGates[h]
+                    const pass = hour ? hour[gateKey] : false
+                    return (
+                      <div
+                        key={`${g}-${h}`}
+                        style={{
+                          height: 10,
+                          borderRadius: 1,
+                          background: !pass ? 'var(--b0)' : 'var(--teal)',
+                          opacity: !pass ? 0.25 : 1
+                        }}
+                      />
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })}
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(24,1fr)', gap: 2, marginTop: 4 }}>
-          {Array.from({ length: 24 }, (_, h) => (
-            <div
-              key={h}
-              style={{
-                fontFamily: 'var(--fm)',
-                fontSize: 7,
-                color: 'var(--t2)',
-                textAlign: 'center'
-              }}
-            >
-              {h % 6 === 0 ? `${String(h).padStart(2, '0')}h` : ''}
-            </div>
-          ))}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 4 }}>
+          <div style={{ width: 32, flexShrink: 0 }} />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(24,1fr)', gap: 2, flex: 1 }}>
+            {Array.from({ length: 24 }, (_, h) => (
+              <div
+                key={h}
+                style={{
+                  fontFamily: 'var(--fm)',
+                  fontSize: 7,
+                  color: 'var(--t2)',
+                  textAlign: 'center'
+                }}
+              >
+                {h % 6 === 0 ? `${String(h).padStart(2, '0')}h` : ''}
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </div>

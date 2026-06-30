@@ -136,7 +136,7 @@ export default function IntCard({ intg, onToggle }: IntCardProps) {
               </span>
             )}
             {uptime > 0 && (
-              <span style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--t2)' }}>{uptime}% uptime</span>
+              <span style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--t2)' }}>{Math.round(uptime)}% uptime</span>
             )}
             {!inst && lifecycle !== 'Installing' && (
               <span

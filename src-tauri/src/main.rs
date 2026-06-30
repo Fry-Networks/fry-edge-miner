@@ -103,6 +103,8 @@ fn main() {
                 registry.set_enabled(id, *enabled);
             }
 
+            let last_health = Arc::new(RwLock::new(HashMap::<String, HealthStatus>::new()));
+
             // Startup re-install: attempt to install enabled-but-missing integrations
             for integration in registry.list() {
                 let id = integration.id().to_string();
@@ -113,7 +115,12 @@ fn main() {
                             .block_on(integration.install())
                     }) {
                         Ok(_) => tracing::info!(id = id.as_str(), "Startup re-install succeeded"),
-                        Err(e) => tracing::warn!(id = id.as_str(), error = %e, "Startup re-install failed — will retry next launch"),
+                        Err(e) => {
+                            tracing::warn!(id = id.as_str(), error = %e, "Startup re-install failed — will retry next launch");
+                            if let Ok(mut map) = last_health.write() {
+                                map.insert(id.clone(), HealthStatus::Unhealthy(format!("Install failed: {}", e)));
+                            }
+                        },
                     }
                 }
             }
@@ -121,7 +128,6 @@ fn main() {
             let integration_count = registry.total_count();
             let registry = Arc::new(Mutex::new(registry));
 
-            let last_health = Arc::new(RwLock::new(HashMap::<String, HealthStatus>::new()));
             let cached_base_reward = Arc::new(AtomicU64::new(0));
             let cached_reward_config = Arc::new(RwLock::new(None::<crate::api::types::RewardConfig>));
             let cached_stake_tiers: Arc<RwLock<Option<HashMap<String, crate::api::types::StakeTier>>>> = Arc::new(RwLock::new(None));
