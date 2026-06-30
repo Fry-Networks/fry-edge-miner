@@ -9,7 +9,7 @@ interface IntegrationsProps {
 }
 
 export default function Integrations({ intgs, onToggle }: IntegrationsProps) {
-  const active = intgs.filter((i) => i.enabled && i.healthy).length
+  const active = intgs.filter((i) => i.enabled).length
   return (
     <div
       className="sc"
@@ -34,8 +34,7 @@ export default function Integrations({ intgs, onToggle }: IntegrationsProps) {
         }}
       >
         <span style={{ fontFamily: 'var(--fb)', fontSize: 13, color: 'var(--t1)' }}>
-          Each <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>enabled</span> +{' '}
-          <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>healthy</span> integration contributes {intgs.length > 0 ? Math.round(100 / intgs.length) : 0}% to your daily
+          Each <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>enabled</span> integration contributes {intgs.length > 0 ? Math.round(100 / intgs.length) : 0}% to your daily
           reward.
         </span>
         <div

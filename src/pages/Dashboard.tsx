@@ -23,7 +23,7 @@ interface DashboardProps {
 export default function Dashboard({ intgs }: DashboardProps) {
   const { rewards } = useRewards()
   const summary = rewards.summary
-  const active = intgs.filter((i) => i.enabled && i.healthy)
+  const active = intgs.filter((i) => i.enabled)
   const pct = intgs.length > 0 ? ((active.length / intgs.length) * 100).toFixed(0) : '0'
   const slotHits = rewards.slots.filter((s) => s.done).length
   const estimated = summary ? summary.estimated_daily.toFixed(2) : '0.00'

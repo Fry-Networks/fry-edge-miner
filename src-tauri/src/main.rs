@@ -102,6 +102,22 @@ fn main() {
             for (id, enabled) in &cfg.integrations_enabled {
                 registry.set_enabled(id, *enabled);
             }
+
+            // Startup re-install: attempt to install enabled-but-missing integrations
+            for integration in registry.list() {
+                let id = integration.id().to_string();
+                if registry.is_enabled(&id) && integration.installed_version().is_none() {
+                    tracing::info!(id = id.as_str(), "Startup: enabled but not installed — attempting install");
+                    match tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current()
+                            .block_on(integration.install())
+                    }) {
+                        Ok(_) => tracing::info!(id = id.as_str(), "Startup re-install succeeded"),
+                        Err(e) => tracing::warn!(id = id.as_str(), error = %e, "Startup re-install failed — will retry next launch"),
+                    }
+                }
+            }
+
             let integration_count = registry.total_count();
             let registry = Arc::new(Mutex::new(registry));
 

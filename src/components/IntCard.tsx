@@ -51,6 +51,7 @@ export default function IntCard({ intg, onToggle }: IntCardProps) {
     st = 'err'
     stLbl = 'Unhealthy'
   }
+  if (lifecycle !== 'Installing') stNode = stLbl
 
   const tv =
     lifecycle === 'Installing'

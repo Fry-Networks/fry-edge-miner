@@ -150,17 +150,20 @@ pub async fn register_device(
                     reg.list().iter().map(|i| i.id().to_string()).collect()
                 };
 
-                // Install each integration (non-fatal — failures don't block others)
+                // Install each integration (non-fatal — failures don't block others).
+                // Lock held only to clone the Arc, then released before the slow install() call.
                 for id in &ids {
-                    let result = tokio::task::block_in_place(|| {
-                        // TODO: Registry should store Arc<dyn Integration> to avoid holding lock during install
+                    let integration = {
                         let reg = state.registry.lock().map_err(|e| e.to_string())?;
-                        match reg.get(id) {
-                            Some(integration) => tokio::runtime::Handle::current()
-                                .block_on(integration.install())
-                                .map_err(|e| e.to_string()),
-                            None => Ok(()),
-                        }
+                        reg.get(id)
+                    };
+
+                    let Some(integration) = integration else { continue };
+
+                    let result = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current()
+                            .block_on(integration.install())
+                            .map_err(|e| e.to_string())
                     });
                     match result {
                         Ok(_) => tracing::info!(integration = id.as_str(), "Auto-install succeeded"),

@@ -23,10 +23,11 @@ interface SidebarProps {
   page: NavPage
   onNav: (id: NavPage) => void
   activeCount: number
+  hasUnhealthy?: boolean
   deviceName?: string
 }
 
-export default function Sidebar({ page, onNav, activeCount, deviceName = 'nimble-swift-wolf' }: SidebarProps) {
+export default function Sidebar({ page, onNav, activeCount, hasUnhealthy, deviceName = 'nimble-swift-wolf' }: SidebarProps) {
   return (
     <div
       style={{
@@ -84,8 +85,8 @@ export default function Sidebar({ page, onNav, activeCount, deviceName = 'nimble
               padding: '2px 7px'
             }}
           >
-            <Dot status="run" size={5} />
-            <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--teal)' }}>{activeCount}/5 active</span>
+            <Dot status={activeCount === 0 ? 'stopped' : hasUnhealthy ? 'warn' : 'run'} size={5} />
+            <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: hasUnhealthy ? 'var(--amb)' : 'var(--teal)' }}>{activeCount}/5 active</span>
           </div>
         </div>
       </div>

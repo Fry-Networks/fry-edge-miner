@@ -54,8 +54,7 @@ impl Integration for DiiiscoIntegration {
 
     async fn install(&self) -> Result<()> {
         if !docker_available() {
-            warn!("Docker not available — Diiisco requires Docker");
-            return Ok(());
+            return Err(anyhow::anyhow!("Docker not available — Diiisco requires Docker"));
         }
 
         let deploy_dir = dirs::data_local_dir()
@@ -181,7 +180,7 @@ impl Integration for DiiiscoIntegration {
     }
 
     fn installed_version(&self) -> Option<String> {
-        if compose_file().exists() && docker_available() {
+        if compose_file().exists() {
             Some("installed".into())
         } else {
             None

@@ -170,6 +170,9 @@ impl Integration for PresearchIntegration {
     }
 
     fn installed_version(&self) -> Option<String> {
+        // Presearch stores no local files — the Docker image is the sole artifact.
+        // When Docker is unavailable, we cannot detect installation state, so return None.
+        // This is architecturally correct: toggle_integration() will re-pull when Docker starts.
         if !self.docker_available() {
             return None;
         }

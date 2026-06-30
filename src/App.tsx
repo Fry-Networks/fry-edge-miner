@@ -13,7 +13,8 @@ import { useDevice } from './hooks/useDevice'
 function AppShell({ deviceName, deregister }: { deviceName: string; deregister: () => Promise<void> }) {
   const [page, setPage] = useState<NavPage>('dashboard')
   const { integrations, toggle } = useIntegrations()
-  const activeCount = integrations.filter((i) => i.enabled && i.healthy).length
+  const activeCount = integrations.filter((i) => i.enabled).length
+  const hasUnhealthy = integrations.some((i) => i.enabled && !i.healthy)
 
   return (
     <div
@@ -25,7 +26,7 @@ function AppShell({ deviceName, deregister }: { deviceName: string; deregister: 
         fontFamily: 'var(--fb)'
       }}
     >
-      <Sidebar page={page} onNav={setPage} activeCount={activeCount} deviceName={deviceName} />
+      <Sidebar page={page} onNav={setPage} activeCount={activeCount} hasUnhealthy={hasUnhealthy} deviceName={deviceName} />
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <TopBar page={page} />
         <div style={{ flex: 1, overflow: 'hidden' }}>
