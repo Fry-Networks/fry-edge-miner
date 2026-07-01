@@ -1,8 +1,22 @@
+use std::time::Duration;
+
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::Serialize;
 
 use crate::api::types::InstallationHeartbeat;
+
+/// Walk an error's source chain into a single diagnostic string.
+fn format_error_chain(err: &dyn std::error::Error) -> String {
+    let mut msg = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        msg.push_str(" → ");
+        msg.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    msg
+}
 
 #[derive(Debug, Serialize)]
 pub struct DeviceInfo {
@@ -113,7 +127,17 @@ pub async fn register_device(
         is_installed: Some(true),
     };
 
-    match crate::api::installations::register(&state.api_client, &heartbeat).await {
+    // One retry on connection-level errors (DNS/TLS/timeout); not on HTTP status errors.
+    let reg_result = match crate::api::installations::register(&state.api_client, &heartbeat).await {
+        Err(crate::api::client::ApiError::Request(ref _e)) => {
+            tracing::warn!("Registration request failed — retrying in 2s");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            crate::api::installations::register(&state.api_client, &heartbeat).await
+        }
+        other => other,
+    };
+
+    match reg_result {
         Ok(response) => {
             // Persist install_id and any per-device token returned by the server
             if let Some(token) = response.device_token {
@@ -140,72 +164,72 @@ pub async fn register_device(
                 "Device registered with hardwareapi"
             );
 
-            // Auto-install all integrations on first registration
+            // Auto-install all integrations on first registration (non-blocking).
+            // Spawn as background task so the frontend sees success immediately.
             if !state.config.get().initial_setup_done {
-                tracing::info!("First registration — auto-installing all integrations");
+                let bg_config = std::sync::Arc::clone(&state.config);
+                let bg_registry = state.registry.clone();
+                tauri::async_runtime::spawn(async move {
+                    tracing::info!("First registration — auto-installing integrations in background");
 
-                // Collect integration IDs with one lock, then drop it
-                let ids: Vec<String> = {
-                    let reg = state.registry.lock().map_err(|e| e.to_string())?;
-                    reg.list().iter().map(|i| i.id().to_string()).collect()
-                };
-
-                // Install each integration (non-fatal — failures don't block others).
-                // Lock held only to clone the Arc, then released before the slow install() call.
-                for id in &ids {
-                    let integration = {
-                        let reg = state.registry.lock().map_err(|e| e.to_string())?;
-                        reg.get(id)
+                    let ids: Vec<String> = match bg_registry.lock() {
+                        Ok(reg) => reg.list().iter().map(|i| i.id().to_string()).collect(),
+                        Err(e) => {
+                            tracing::error!(error = %e, "Failed to lock registry for auto-install");
+                            return;
+                        }
                     };
 
-                    let Some(integration) = integration else { continue };
+                    for id in &ids {
+                        let integration = match bg_registry.lock() {
+                            Ok(reg) => reg.get(id),
+                            Err(_) => continue,
+                        };
 
-                    let result = tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current()
-                            .block_on(integration.install())
-                            .map_err(|e| e.to_string())
-                    });
-                    match result {
-                        Ok(_) => tracing::info!(integration = id.as_str(), "Auto-install succeeded"),
-                        Err(e) => tracing::warn!(integration = id.as_str(), error = %e, "Auto-install failed — skipping"),
+                        let Some(integration) = integration else { continue };
+
+                        let result = tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current()
+                                .block_on(integration.install())
+                                .map_err(|e| e.to_string())
+                        });
+                        match result {
+                            Ok(_) => tracing::info!(integration = id.as_str(), "Auto-install succeeded"),
+                            Err(e) => tracing::warn!(integration = id.as_str(), error = %e, "Auto-install failed — skipping"),
+                        }
                     }
-                }
 
-                // Collect installed IDs, then drop lock
-                let installed_ids: Vec<String> = {
-                    let reg = state.registry.lock().map_err(|e| e.to_string())?;
-                    reg.list()
-                        .iter()
-                        .filter(|i| i.installed_version().is_some())
-                        .map(|i| i.id().to_string())
-                        .collect()
-                };
+                    let installed_ids: Vec<String> = match bg_registry.lock() {
+                        Ok(reg) => reg.list()
+                            .iter()
+                            .filter(|i| i.installed_version().is_some())
+                            .map(|i| i.id().to_string())
+                            .collect(),
+                        Err(_) => Vec::new(),
+                    };
 
-                // Enable installed integrations
-                {
-                    let mut reg = state.registry.lock().map_err(|e| e.to_string())?;
-                    for id in &installed_ids {
-                        reg.set_enabled(id, true);
+                    if let Ok(mut reg) = bg_registry.lock() {
+                        for id in &installed_ids {
+                            reg.set_enabled(id, true);
+                        }
                     }
-                }
 
-                // Persist to config
-                let ids_for_config = installed_ids.clone();
-                state
-                    .config
-                    .update(|cfg| {
+                    let ids_for_config = installed_ids.clone();
+                    if let Err(e) = bg_config.update(|cfg| {
                         cfg.initial_setup_done = true;
                         for id in &ids_for_config {
                             cfg.integrations_enabled.insert(id.clone(), true);
                         }
-                    })
-                    .map_err(|e| e.to_string())?;
+                    }) {
+                        tracing::error!(error = %e, "Failed to persist auto-install state");
+                    }
 
-                tracing::info!(
-                    installed = installed_ids.len(),
-                    total = ids.len(),
-                    "Auto-install complete"
-                );
+                    tracing::info!(
+                        installed = installed_ids.len(),
+                        total = ids.len(),
+                        "Background auto-install complete"
+                    );
+                });
             }
 
             Ok(miner_key)
@@ -219,7 +243,7 @@ pub async fn register_device(
                     cfg.wallet_address = None;
                 })
                 .map_err(|e| e.to_string())?;
-            Err(format!("API registration failed: {}", e))
+            Err(format!("API registration failed: {}", format_error_chain(&e)))
         }
     }
 }
