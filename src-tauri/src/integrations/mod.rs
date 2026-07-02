@@ -1,5 +1,6 @@
 pub mod aem;
 pub mod diiisco;
+pub mod docker_manager;
 pub mod download;
 pub mod mysterium;
 pub mod presearch;

@@ -80,9 +80,8 @@ impl Integration for PresearchIntegration {
     }
 
     async fn install(&self) -> Result<()> {
-        if !self.docker_available() {
-            anyhow::bail!("Docker not available — install Docker Desktop to use Presearch");
-        }
+        // Ensure Docker is available, auto-installing if needed
+        super::docker_manager::ensure_docker().await?;
         info!("Pulling Presearch node image");
         let output = crate::supervisor::platform::command("docker")
             .args(["pull", DOCKER_IMAGE])

@@ -53,9 +53,8 @@ impl Integration for DiiiscoIntegration {
     }
 
     async fn install(&self) -> Result<()> {
-        if !docker_available() {
-            return Err(anyhow::anyhow!("Docker not available — Diiisco requires Docker"));
-        }
+        // Ensure Docker is available, auto-installing if needed
+        super::docker_manager::ensure_docker().await?;
 
         let deploy_dir = dirs::data_local_dir()
             .ok_or_else(|| anyhow::anyhow!("Cannot resolve local app data dir"))?
