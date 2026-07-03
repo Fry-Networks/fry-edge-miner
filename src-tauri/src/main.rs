@@ -110,15 +110,23 @@ fn main() {
                 let id = integration.id().to_string();
                 if registry.is_enabled(&id) && integration.installed_version().is_none() {
                     tracing::info!(id = id.as_str(), "Startup: enabled but not installed — attempting install");
-                    match tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current()
-                            .block_on(integration.install())
-                    }) {
-                        Ok(_) => tracing::info!(id = id.as_str(), "Startup re-install succeeded"),
-                        Err(e) => {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current()
+                                .block_on(integration.install())
+                        })
+                    })) {
+                        Ok(Ok(_)) => tracing::info!(id = id.as_str(), "Startup re-install succeeded"),
+                        Ok(Err(e)) => {
                             tracing::warn!(id = id.as_str(), error = %e, "Startup re-install failed — will retry next launch");
                             if let Ok(mut map) = last_health.write() {
                                 map.insert(id.clone(), HealthStatus::Unhealthy(format!("Install failed: {}", e)));
+                            }
+                        },
+                        Err(_) => {
+                            tracing::warn!(id = id.as_str(), "Startup re-install panicked (no async runtime?) — will retry next launch");
+                            if let Ok(mut map) = last_health.write() {
+                                map.insert(id.clone(), HealthStatus::Unhealthy("Install panicked at startup".to_string()));
                             }
                         },
                     }

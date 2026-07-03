@@ -6,6 +6,8 @@ use tracing::{info, warn};
 
 const DOCKER_DOWNLOAD_URL: &str = "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe";
 const DOCKER_PATHS: &[&str] = &[
+    "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe",
+    "C:\\Program Files (x86)\\Docker\\Docker\\Docker Desktop.exe",
     "C:\\Program Files\\Docker\\Docker\\Docker.exe",
     "C:\\Program Files (x86)\\Docker\\Docker\\Docker.exe",
 ];
