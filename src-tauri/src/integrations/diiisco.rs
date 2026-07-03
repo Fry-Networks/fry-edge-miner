@@ -114,9 +114,7 @@ impl Integration for DiiiscoIntegration {
     }
 
     async fn start(&self) -> Result<()> {
-        if !docker_available() {
-            anyhow::bail!("Docker not available");
-        }
+        super::docker_manager::ensure_docker().await?;
         let compose = compose_file();
         if !compose.exists() {
             anyhow::bail!("Diiisco deploy directory not found at {}", deploy_dir().display());

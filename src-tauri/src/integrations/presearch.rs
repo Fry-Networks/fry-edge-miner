@@ -96,9 +96,7 @@ impl Integration for PresearchIntegration {
     }
 
     async fn start(&self) -> Result<()> {
-        if !self.docker_available() {
-            anyhow::bail!("Docker not available");
-        }
+        super::docker_manager::ensure_docker().await?;
 
         let target = self.container_name();
         let suffix = self.suffix().unwrap_or_else(|| "unknown".to_string());
