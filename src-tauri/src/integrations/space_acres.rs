@@ -219,6 +219,11 @@ impl Integration for SpaceAcresIntegration {
             anyhow::bail!("SpaceAcres binary not found at {:?}", binary);
         }
 
+        if Self::is_running() {
+            info!("SpaceAcres already running");
+            return Ok(());
+        }
+
         info!(binary = ?binary, "Starting SpaceAcres");
 
         // Spawn the process with a base directory argument
@@ -320,24 +325,30 @@ impl Integration for SpaceAcresIntegration {
     }
 }
 
-/// Detect if system has an SSD
+/// Detect if system has an SSD.
+/// Cached: the probe spawns a full PowerShell process (~1-3s) and this is
+/// called from the 30s health-check loop — uncached it burns CPU forever,
+/// and physical disks don't change while the app runs.
 #[cfg(target_os = "windows")]
 fn has_ssd() -> bool {
-    crate::supervisor::platform::command("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "Get-PhysicalDisk | Where MediaType -eq 'SSD' | Measure-Object | Select -Expand Count",
-        ])
-        .output()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .parse::<u32>()
-                .unwrap_or(0)
-                > 0
-        })
-        .unwrap_or(false)
+    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        crate::supervisor::platform::command("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Get-PhysicalDisk | Where MediaType -eq 'SSD' | Measure-Object | Select -Expand Count",
+            ])
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap_or(0)
+                    > 0
+            })
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(not(target_os = "windows"))]

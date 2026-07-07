@@ -15,6 +15,7 @@ pub fn generate() -> String {
 
 /// Parse a miner key into (prefix, body) components, validating format.
 /// Accepts exactly 32 alphanumeric characters after the FEM- prefix.
+#[allow(dead_code)] // key-format validation utility, unit-tested, kept for API parity
 pub fn parse(key: &str) -> Result<(String, String)> {
     let parts: Vec<&str> = key.splitn(2, '-').collect();
     if parts.len() != 2 {
@@ -42,6 +43,7 @@ pub fn parse(key: &str) -> Result<(String, String)> {
     Ok((prefix.to_string(), key_part.to_string()))
 }
 
+#[allow(dead_code)] // key-format validation utility, unit-tested, kept for API parity
 pub fn is_valid(key: &str) -> bool {
     parse(key).is_ok()
 }

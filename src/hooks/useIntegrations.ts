@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import type { HealthStatus, IntegrationStatus, LifecycleState } from '../lib/types'
+import type { DockerProgress, HealthStatus, IntegrationStatus, LifecycleState, SystemStatus } from '../lib/types'
+import { extractErrorMessage } from '../lib/error'
 import { INTEGRATION_META, type IntegrationMeta } from '../lib/integrationMeta'
 
 function isTauri(): boolean {
@@ -23,9 +24,10 @@ export interface FrontendIntegration extends IntegrationMeta {
   lifecycle: LifecycleState
   version: string | null
   poc_contribution: number
+  requires_docker: boolean
 }
 
-function toMock(integrations: IntegrationStatus[]): FrontendIntegration[] {
+function toFrontend(integrations: IntegrationStatus[]): FrontendIntegration[] {
   return integrations.map((i) => {
     const base = INTEGRATION_META.find((m) => m.id === i.id)
     const enabled = i.enabled
@@ -45,7 +47,11 @@ function toMock(integrations: IntegrationStatus[]): FrontendIntegration[] {
       healthy: health === 'Healthy',
       lifecycle,
       version: i.version,
-      poc_contribution: 1 / integrations.length
+      // Backend value is healthy-based (matches what the PoC reporter
+      // actually submits); the equal-split fallback only covers browser
+      // preview mode without IPC.
+      poc_contribution: i.poc_contribution ?? (integrations.length > 0 ? 1 / integrations.length : 0),
+      requires_docker: i.requires_docker ?? false
     }
   })
 }
@@ -54,11 +60,17 @@ export function useIntegrations() {
   const [integrations, setIntegrations] = useState<FrontendIntegration[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [system, setSystem] = useState<SystemStatus | null>(null)
+  const [dockerProgress, setDockerProgress] = useState<DockerProgress | null>(null)
+  // Toggles currently awaiting the backend — the docker-progress banner is
+  // only cleared when NO toggle is in flight, so one integration's failure
+  // can't hide another's still-running Docker install.
+  const inflightToggles = useRef(0)
 
   const fetch = useCallback(async () => {
     try {
       const data = await invoke<IntegrationStatus[]>('get_integrations')
-      setIntegrations(toMock(data))
+      setIntegrations(toFrontend(data))
       setError(null)
     } catch (e) {
       console.warn('get_integrations failed:', e)
@@ -68,9 +80,30 @@ export function useIntegrations() {
     }
   }, [])
 
+  const fetchSystem = useCallback(async () => {
+    if (!isTauri()) return
+    try {
+      const status = await invoke<SystemStatus>('get_system_status')
+      setSystem(status)
+    } catch (e) {
+      console.warn('get_system_status failed:', e)
+    }
+  }, [])
+
   useEffect(() => {
     fetch()
-  }, [fetch])
+    fetchSystem()
+  }, [fetch, fetchSystem])
+
+  // Poll as a fallback so the UI can never go permanently stale if the
+  // health-event stream dies (and to pick up Docker state changes).
+  useEffect(() => {
+    const timer = setInterval(() => {
+      fetch()
+      fetchSystem()
+    }, 30_000)
+    return () => clearInterval(timer)
+  }, [fetch, fetchSystem])
 
   // Listen to real-time health events emitted by the backend health loop.
   useEffect(() => {
@@ -102,6 +135,25 @@ export function useIntegrations() {
     }
   }, [])
 
+  // Docker preflight progress (download/install/engine wait) from the backend.
+  useEffect(() => {
+    if (!isTauri()) return
+    let unlisten: (() => void) | undefined
+    const setup = async () => {
+      unlisten = await listen<DockerProgress>('docker-progress', (event) => {
+        if (event.payload.stage === 'ready') {
+          setDockerProgress(null)
+        } else {
+          setDockerProgress(event.payload)
+        }
+      })
+    }
+    setup()
+    return () => {
+      unlisten?.()
+    }
+  }, [])
+
   const toggle = useCallback(
     async (id: string) => {
       const current = integrations.find((i) => i.id === id)
@@ -122,31 +174,26 @@ export function useIntegrations() {
         )
       )
 
+      inflightToggles.current += 1
       try {
         await invoke('toggle_integration', { id, enabled: next })
         setError(null)
-        await fetch()
       } catch (e) {
         console.warn(`toggle_integration(${id}, ${next}) failed:`, e)
-        // Revert to the previous known state.
-        setIntegrations((prev) =>
-          prev.map((i) =>
-            i.id === id
-              ? {
-                  ...i,
-                  enabled: current.enabled,
-                  healthy: current.healthy,
-                  health: current.health,
-                  lifecycle: current.lifecycle
-                }
-              : i
-          )
-        )
-        setError(`${current.name}: ${String(e)}`)
+        setError(`${current.name}: ${extractErrorMessage(e)}`)
+      } finally {
+        inflightToggles.current -= 1
+        if (inflightToggles.current === 0) {
+          setDockerProgress(null)
+        }
+        // Resync with backend truth (success AND failure) so the toggle can
+        // never display a state the backend doesn't hold.
+        await fetch()
+        fetchSystem()
       }
     },
-    [integrations, fetch]
+    [integrations, fetch, fetchSystem]
   )
 
-  return { integrations, loading, error, toggle, refetch: fetch }
+  return { integrations, loading, error, toggle, refetch: fetch, system, dockerProgress }
 }

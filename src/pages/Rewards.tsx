@@ -69,7 +69,7 @@ export default function Rewards() {
           <tbody>
             {rows.map((r, i) => (
               <tr
-                key={i}
+                key={r.date}
                 className="rr"
                 style={{
                   borderBottom: '1px solid var(--b0)',

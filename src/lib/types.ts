@@ -8,6 +8,22 @@ export interface IntegrationStatus {
   lifecycle: LifecycleState
   version: string | null
   poc_contribution: number
+  requires_docker?: boolean
+}
+
+export type DockerStatusKind = 'ready' | 'daemon_stopped' | 'not_installed' | 'virtualization_disabled'
+
+export interface SystemStatus {
+  docker: DockerStatusKind
+  docker_message: string
+  virtualization_supported: boolean
+}
+
+export interface DockerProgress {
+  stage: string
+  detail: string
+  attempt: number
+  total: number
 }
 
 // Rust enums with PascalCase rename serialize like this:
@@ -110,4 +126,10 @@ export function getHealthLabel(health: HealthStatus): string {
 
 export function isHealthy(health: HealthStatus): boolean {
   return health === 'Healthy'
+}
+
+// The reason string carried by an Unhealthy status, if any.
+export function unhealthyReason(health: HealthStatus): string | null {
+  if (typeof health !== 'string' && 'Unhealthy' in health) return health.Unhealthy
+  return null
 }

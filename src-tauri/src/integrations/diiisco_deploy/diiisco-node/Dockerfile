@@ -81,8 +81,9 @@ RUN echo "      \"${API_KEY}\"" >> src/environment/environment.ts && \
 export { environment };
 ENVEOF
 
-# Compile TypeScript
-RUN npm run build 2>/dev/null || npx tsc 2>/dev/null || echo "Build step complete"
+# Compile TypeScript — must fail the image build loudly if compilation fails,
+# otherwise the later COPY of dist/ dies with a cryptic error instead.
+RUN npm run build || npx tsc
 
 # ── Stage 2: Runtime ────────────────────────────────────────────────────
 FROM node:22-slim

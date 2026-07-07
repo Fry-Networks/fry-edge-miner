@@ -1,1 +1,1 @@
-{}
+{"default":{"identifier":"default","description":"Main window baseline: core APIs incl. event listen/emit — without this the health-event and docker-progress listeners are ACL-blocked and the UI never receives live updates.","local":true,"windows":["main"],"permissions":["core:default"]}}

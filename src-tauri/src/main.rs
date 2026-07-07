@@ -3,6 +3,7 @@
 mod api;
 mod commands;
 mod config;
+mod events;
 mod integrations;
 mod migration;
 mod poc;
@@ -47,6 +48,10 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             use tauri::Manager;
+
+            // Register the global app handle early so any module can emit UI
+            // events (docker-progress, health) from this point on.
+            events::set_app_handle(app.handle().clone());
 
             // Config store
             let config_dir = app
@@ -105,33 +110,10 @@ fn main() {
 
             let last_health = Arc::new(RwLock::new(HashMap::<String, HealthStatus>::new()));
 
-            // Startup re-install: attempt to install enabled-but-missing integrations
-            for integration in registry.list() {
-                let id = integration.id().to_string();
-                if registry.is_enabled(&id) && integration.installed_version().is_none() {
-                    tracing::info!(id = id.as_str(), "Startup: enabled but not installed — attempting install");
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current()
-                                .block_on(integration.install())
-                        })
-                    })) {
-                        Ok(Ok(_)) => tracing::info!(id = id.as_str(), "Startup re-install succeeded"),
-                        Ok(Err(e)) => {
-                            tracing::warn!(id = id.as_str(), error = %e, "Startup re-install failed — will retry next launch");
-                            if let Ok(mut map) = last_health.write() {
-                                map.insert(id.clone(), HealthStatus::Unhealthy(format!("Install failed: {}", e)));
-                            }
-                        },
-                        Err(_) => {
-                            tracing::warn!(id = id.as_str(), "Startup re-install panicked (no async runtime?) — will retry next launch");
-                            if let Ok(mut map) = last_health.write() {
-                                map.insert(id.clone(), HealthStatus::Unhealthy("Install panicked at startup".to_string()));
-                            }
-                        },
-                    }
-                }
-            }
+            // Startup re-install + auto-start moved to an async recovery task
+            // below — it must never block app boot (a Docker-dependent
+            // integration could otherwise trigger a 500MB download + UAC
+            // prompt inside setup, freezing the UI on grey placeholders).
 
             let integration_count = registry.total_count();
             let registry = Arc::new(Mutex::new(registry));
@@ -158,8 +140,10 @@ fn main() {
                 for id in integration_ids {
                     let check_registry = registry.clone();
                     let restart_registry = registry.clone();
+                    let enabled_registry = registry.clone();
                     let id_check = id.clone();
                     let id_restart = id.clone();
+                    let id_enabled = id.clone();
                     let tx = health_tx.clone();
 
                     let last_health_check = last_health.clone();
@@ -201,11 +185,19 @@ fn main() {
                         }
                     };
 
+                    let enabled_fn = move || {
+                        enabled_registry
+                            .lock()
+                            .map(|reg| reg.is_enabled(&id_enabled))
+                            .unwrap_or(false)
+                    };
+
                     tauri::async_runtime::spawn(health_check_loop(
                         id,
                         HealthCheckConfig::default(),
                         check_fn,
                         restart_fn,
+                        enabled_fn,
                         tx,
                     ));
                 }
@@ -222,6 +214,79 @@ fn main() {
                             tracing::warn!(error = %e, "Failed to emit health event");
                         }
                     }
+                });
+            }
+
+            // --- Startup recovery (async — never blocks app boot) ---
+            // Re-install enabled-but-missing integrations, then start enabled
+            // ones. Docker-dependent integrations are deferred (with a visible
+            // reason) unless the engine is already Ready: a Docker download or
+            // UAC install must only ever happen on an explicit user toggle.
+            {
+                let startup_registry = registry.clone();
+                let startup_health = last_health.clone();
+                tauri::async_runtime::spawn(async move {
+                    use integrations::docker_manager::{docker_status, status_user_message, DockerStatus};
+
+                    let ids: Vec<String> = {
+                        let reg = startup_registry.lock().unwrap();
+                        reg.list()
+                            .iter()
+                            .map(|i| i.id().to_string())
+                            .filter(|id| reg.is_enabled(id))
+                            .collect()
+                    };
+
+                    for id in ids {
+                        let integration = {
+                            let reg = startup_registry.lock().unwrap();
+                            match reg.get(&id) {
+                                Some(i) => i,
+                                None => continue,
+                            }
+                        };
+
+                        if integration.requires_docker() {
+                            let status = tokio::task::block_in_place(docker_status);
+                            if status != DockerStatus::Ready {
+                                tracing::info!(id = id.as_str(), ?status, "Startup: Docker not ready — deferring integration");
+                                if let Ok(mut map) = startup_health.write() {
+                                    map.insert(id.clone(), HealthStatus::Unhealthy(status_user_message(status)));
+                                }
+                                continue;
+                            }
+                        }
+
+                        let installed =
+                            tokio::task::block_in_place(|| integration.installed_version()).is_some();
+                        if !installed {
+                            tracing::info!(id = id.as_str(), "Startup: enabled but not installed — attempting install");
+                            if let Err(e) = integration.install().await {
+                                tracing::warn!(id = id.as_str(), error = %e, "Startup re-install failed — will retry next launch");
+                                if let Ok(mut map) = startup_health.write() {
+                                    map.insert(id.clone(), HealthStatus::Unhealthy(format!("Install failed: {}", e)));
+                                }
+                                continue;
+                            }
+                            tracing::info!(id = id.as_str(), "Startup re-install succeeded");
+                        }
+
+                        match integration.start().await {
+                            Ok(()) => {
+                                tracing::info!(id = id.as_str(), "Startup: integration started");
+                                if let Ok(mut map) = startup_health.write() {
+                                    map.insert(id.clone(), HealthStatus::Starting);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(id = id.as_str(), error = %e, "Startup start failed");
+                                if let Ok(mut map) = startup_health.write() {
+                                    map.insert(id.clone(), HealthStatus::Unhealthy(format!("Start failed: {}", e)));
+                                }
+                            }
+                        }
+                    }
+                    tracing::info!("Startup recovery pass complete");
                 });
             }
 
@@ -325,18 +390,16 @@ fn main() {
                                         });
                                     }
                                 }
+                                // Cache stake_tiers from the same response —
+                                // no second /versions/FEM round-trip per tick.
+                                if let Some(tiers) = info.stake_tiers {
+                                    if let Ok(mut cache) = poc_stake_tiers.write() {
+                                        *cache = Some(tiers);
+                                    }
+                                }
                             }
                             Err(e) => {
                                 tracing::debug!(error = %e, "version fetch failed, using cached/default");
-                            }
-                        }
-
-                        // Cache stake_tiers from the version response (already fetched above)
-                        if let Ok(info) = api::versions::check_version(&poc_client, "FEM", std::env::consts::OS).await {
-                            if let Some(tiers) = info.stake_tiers {
-                                if let Ok(mut cache) = poc_stake_tiers.write() {
-                                    *cache = Some(tiers);
-                                }
                             }
                         }
 
@@ -389,6 +452,7 @@ fn main() {
             commands::rewards::get_poc_slots,
             commands::settings::get_settings,
             commands::settings::save_settings,
+            commands::system::get_system_status,
             commands::migration::check_migration,
             commands::migration::run_migration,
             commands::updates::check_updates,

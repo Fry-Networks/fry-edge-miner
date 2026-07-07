@@ -1,5 +1,6 @@
 use super::download::{download_file_with_options, partners_base_dir};
 use anyhow::Result;
+use serde::Serialize;
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -12,15 +13,146 @@ const DOCKER_PATHS: &[&str] = &[
     "C:\\Program Files (x86)\\Docker\\Docker\\Docker.exe",
 ];
 
-/// Check if Docker daemon is running by attempting `docker info`.
-fn docker_running() -> bool {
-    crate::supervisor::platform::command("docker")
+/// Docker Desktop virtualization troubleshooting guide shown to users when
+/// VT-x/AMD-V is disabled in firmware.
+pub const VIRTUALIZATION_HELP_URL: &str =
+    "https://docs.docker.com/desktop/troubleshoot-and-support/troubleshoot/topics/";
+
+/// Distinct Docker runtime states. `docker info` alone cannot distinguish
+/// "not installed" from "daemon stopped" — callers need the difference to
+/// show accurate guidance instead of a generic timeout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DockerStatus {
+    Ready,
+    DaemonStopped,
+    NotInstalled,
+    VirtualizationDisabled,
+}
+
+/// Probe the docker CLI: Some(true) = daemon ready, Some(false) = CLI present
+/// but daemon unreachable, None = CLI missing entirely (spawn failed).
+fn docker_cli_probe() -> Option<bool> {
+    match crate::supervisor::platform::command("docker")
         .arg("info")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    {
+        Ok(s) if s.success() => Some(true),
+        Ok(_) => Some(false),
+        Err(_) => None,
+    }
+}
+
+/// Check if Docker daemon is running by attempting `docker info`.
+fn docker_running() -> bool {
+    docker_cli_probe() == Some(true)
+}
+
+/// Whether the CPU/firmware can run Docker Desktop: true when a hypervisor is
+/// already active (Hyper-V/WSL2) OR VT-x/AMD-V is enabled in firmware.
+/// Fail-open on probe errors — an unreadable probe must not block installs.
+/// Cached: the CIM query costs ~1-2s and firmware state can't change while
+/// the app is running.
+pub fn virtualization_supported() -> bool {
+    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        #[cfg(target_os = "windows")]
+        {
+            let out = crate::supervisor::platform::command("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "$h=(Get-CimInstance Win32_ComputerSystem).HypervisorPresent; \
+                     $f=(Get-CimInstance Win32_Processor | Select-Object -First 1).VirtualizationFirmwareEnabled; \
+                     Write-Output \"$h|$f\"",
+                ])
+                .output();
+            match out {
+                Ok(o) => {
+                    let s = String::from_utf8_lossy(&o.stdout).trim().to_lowercase();
+                    let mut parts = s.split('|');
+                    let hypervisor = parts.next().unwrap_or("").contains("true");
+                    let firmware = parts.next().unwrap_or("").contains("true");
+                    if s.is_empty() || !s.contains('|') {
+                        warn!(raw = %s, "Virtualization probe returned unparseable output — assuming supported");
+                        true
+                    } else {
+                        let supported = hypervisor || firmware;
+                        info!(hypervisor, firmware, supported, "Virtualization probe");
+                        supported
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Virtualization probe failed — assuming supported");
+                    true
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            true
+        }
+    })
+}
+
+/// Resolve the current Docker state, including whether virtualization makes
+/// Docker viable at all on this machine.
+pub fn docker_status() -> DockerStatus {
+    match docker_cli_probe() {
+        Some(true) => DockerStatus::Ready,
+        Some(false) => {
+            if virtualization_supported() {
+                DockerStatus::DaemonStopped
+            } else {
+                DockerStatus::VirtualizationDisabled
+            }
+        }
+        None => {
+            // CLI missing — Docker Desktop may still be installed (PATH not
+            // refreshed) or absent entirely.
+            let installed = find_docker_desktop().is_some();
+            if !virtualization_supported() {
+                DockerStatus::VirtualizationDisabled
+            } else if installed {
+                DockerStatus::DaemonStopped
+            } else {
+                DockerStatus::NotInstalled
+            }
+        }
+    }
+}
+
+/// User-facing guidance per Docker state. Non-Docker integrations
+/// (MystNodes, SpaceAcres, Olostep) are unaffected by any of these states.
+pub fn status_user_message(status: DockerStatus) -> String {
+    match status {
+        DockerStatus::Ready => "Docker is running.".to_string(),
+        DockerStatus::DaemonStopped => {
+            "Docker Desktop is installed but not running. Enabling a Docker-based integration will start it automatically, or open Docker Desktop from the Start menu and wait for the engine to report Running.".to_string()
+        }
+        DockerStatus::NotInstalled => {
+            "Docker Desktop is not installed. Enabling a Docker-based integration (Presearch, Diiisco) will download and install it automatically (administrator approval required), or install it manually from https://www.docker.com/products/docker-desktop/.".to_string()
+        }
+        DockerStatus::VirtualizationDisabled => format!(
+            "Hardware virtualization is disabled on this PC, so Docker (required by Presearch and Diiisco) cannot run. Enable virtualization (Intel VT-x / AMD-V / SVM) in your BIOS/UEFI settings, then try again. Guide: {} — Other integrations (MystNodes, SpaceAcres, Olostep) do not need Docker and keep working.",
+            VIRTUALIZATION_HELP_URL
+        ),
+    }
+}
+
+/// Emit a docker-progress event to the frontend (no-op before setup).
+fn emit_progress(stage: &str, detail: String, attempt: u32, total: u32) {
+    crate::events::emit(
+        "docker-progress",
+        serde_json::json!({
+            "stage": stage,
+            "detail": detail,
+            "attempt": attempt,
+            "total": total,
+        }),
+    );
 }
 
 /// Find Docker Desktop executable in standard Windows paths.
@@ -44,21 +176,27 @@ fn try_start_docker_desktop() -> Result<()> {
     Ok(())
 }
 
-/// Poll for Docker daemon availability.
+/// Poll for Docker daemon availability, reporting progress to the UI.
 async fn wait_for_docker(attempts: u32, delay_secs: u64) -> Result<()> {
     for attempt in 1..=attempts {
         if docker_running() {
             info!("Docker daemon is ready");
+            emit_progress("ready", "Docker engine is ready".to_string(), attempt, attempts);
             return Ok(());
         }
         if attempt < attempts {
             info!(attempt = attempt, remaining = attempts - attempt, "Waiting for Docker daemon...");
+            emit_progress(
+                "waiting",
+                format!("Waiting for the Docker engine to start ({}/{})", attempt, attempts),
+                attempt,
+                attempts,
+            );
             tokio::time::sleep(Duration::from_secs(delay_secs)).await;
         }
     }
     anyhow::bail!(
-        "Docker daemon did not become available after {} attempts ({} seconds total)",
-        attempts,
+        "Docker engine did not become ready within {} seconds",
         (attempts as u64) * delay_secs
     )
 }
@@ -70,7 +208,15 @@ async fn download_docker_installer() -> Result<PathBuf> {
     let installer_path = install_dir.join("Docker-Desktop-Installer.exe");
 
     info!("Downloading Docker Desktop installer");
-    download_file_with_options(DOCKER_DOWNLOAD_URL, &installer_path, "", None).await?;
+    emit_progress(
+        "downloading",
+        "Downloading Docker Desktop installer (~500 MB)".to_string(),
+        0,
+        0,
+    );
+    download_file_with_options(DOCKER_DOWNLOAD_URL, &installer_path, "", None)
+        .await
+        .map_err(|e| anyhow::anyhow!("Docker Desktop download failed: {}", e))?;
     info!(path = ?installer_path, "Docker Desktop installer downloaded");
     Ok(installer_path)
 }
@@ -78,6 +224,12 @@ async fn download_docker_installer() -> Result<PathBuf> {
 /// Run Docker Desktop installer with elevation and silent flags.
 async fn run_docker_installer(installer_path: &std::path::Path) -> Result<()> {
     info!(path = ?installer_path, "Running Docker Desktop installer with elevation");
+    emit_progress(
+        "installing",
+        "Installing Docker Desktop — approve the administrator prompt if shown".to_string(),
+        0,
+        0,
+    );
 
     // On Windows, use ShellExecute via std::process with 'runas' verb via windows crate.
     // For simplicity and broad compatibility, we use a PowerShell wrapper that handles elevation.
@@ -119,49 +271,63 @@ Exit $LASTEXITCODE
 
 /// Ensure Docker is available and running.
 ///
-/// Checks if `docker info` works. If not:
-/// 1. If Docker Desktop is installed, try to start it and wait for daemon.
-/// 2. If not installed, download the installer, request elevation, run it, and wait.
-/// 3. If elevation is denied (UAC), return a user-friendly error.
+/// State-aware flow:
+/// - Ready → Ok immediately.
+/// - VirtualizationDisabled → fail fast with BIOS guidance (installing or
+///   starting Docker would be pointless).
+/// - DaemonStopped → start Docker Desktop, wait with UI progress.
+/// - NotInstalled → download installer, elevate, install, wait (first engine
+///   start after install is slow — extended timeout).
+///
+/// Only call on an explicit user action (toggle/install) — never at app boot.
 pub async fn ensure_docker() -> Result<()> {
-    // Quick check: is Docker already running?
-    if docker_running() {
-        info!("Docker is already available");
-        return Ok(());
-    }
-
-    info!("Docker not available, attempting to ensure it...");
-
-    // Check if Docker Desktop binary exists (may be installed but daemon not running)
-    if let Some(docker_exe) = find_docker_desktop() {
-        info!(path = ?docker_exe, "Docker Desktop is installed, attempting to start daemon");
-        if let Err(e) = try_start_docker_desktop() {
-            warn!(error = %e, "Failed to start Docker Desktop");
+    match docker_status() {
+        DockerStatus::Ready => {
+            info!("Docker is already available");
+            Ok(())
         }
-
-        // Wait for daemon to be ready
-        match wait_for_docker(30, 5).await {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                warn!(error = %e, "Docker daemon did not become available after starting Docker Desktop");
-                // Fall through to installer flow
+        DockerStatus::VirtualizationDisabled => {
+            warn!("Virtualization disabled — cannot provide Docker");
+            anyhow::bail!(status_user_message(DockerStatus::VirtualizationDisabled))
+        }
+        DockerStatus::DaemonStopped => {
+            info!("Docker Desktop installed but engine not running — starting it");
+            emit_progress(
+                "starting",
+                "Starting Docker Desktop…".to_string(),
+                0,
+                0,
+            );
+            if let Err(e) = try_start_docker_desktop() {
+                warn!(error = %e, "Failed to launch Docker Desktop");
             }
+            wait_for_docker(30, 5).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "{}. Docker Desktop is installed but its engine did not start. Open Docker Desktop from the Start menu and wait for the engine to report Running, then re-enable this integration. If Docker Desktop shows a virtualization error, enable VT-x/AMD-V in your BIOS: {}",
+                    e,
+                    VIRTUALIZATION_HELP_URL
+                )
+            })
+        }
+        DockerStatus::NotInstalled => {
+            info!("Docker Desktop not installed — downloading installer");
+            let installer_path = download_docker_installer().await?;
+            run_docker_installer(&installer_path).await?;
+            std::fs::remove_file(&installer_path).ok();
+
+            // Fresh installs may need a first-run engine bootstrap; some
+            // machines require the Desktop app to be launched explicitly.
+            if !docker_running() {
+                let _ = try_start_docker_desktop();
+            }
+            wait_for_docker(60, 5).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "Docker Desktop was installed, but {}. A restart of Windows may be required to finish setup (WSL2/Hyper-V components). Restart, open Docker Desktop once, then re-enable this integration.",
+                    e
+                )
+            })?;
+            info!("Docker Desktop installation and startup complete");
+            Ok(())
         }
     }
-
-    // Docker is not installed or failed to start — download and install
-    info!("Docker Desktop not installed or failed to start, downloading installer");
-    let installer_path = download_docker_installer().await?;
-
-    // Run installer with elevation
-    run_docker_installer(&installer_path).await?;
-
-    // Clean up installer
-    std::fs::remove_file(&installer_path).ok();
-
-    // Wait for Docker daemon to be ready after installation
-    wait_for_docker(30, 5).await?;
-
-    info!("Docker Desktop installation and startup complete");
-    Ok(())
 }

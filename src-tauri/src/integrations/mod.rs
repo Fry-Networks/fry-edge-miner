@@ -49,6 +49,8 @@ pub struct IntegrationStatus {
     pub lifecycle: LifecycleState,
     pub version: Option<String>,
     pub poc_contribution: f64,
+    #[serde(default)]
+    pub requires_docker: bool,
 }
 
 // --- PoC Gate Data ---
@@ -95,6 +97,11 @@ pub trait Integration: Send + Sync {
     }
     fn installed_version(&self) -> Option<String> {
         None
+    }
+    /// Whether this integration needs a running Docker engine. Drives
+    /// availability display and prevents Docker auto-install at app boot.
+    fn requires_docker(&self) -> bool {
+        false
     }
 }
 
@@ -163,6 +170,7 @@ impl IntegrationRegistry {
                     } else {
                         0.0
                     },
+                    requires_docker: i.requires_docker(),
                 }
             })
             .collect()

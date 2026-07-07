@@ -34,13 +34,16 @@ function toPocSlots(slots: BackendPocSlot[]): PocSlotUi[] {
   return slots.map((s) => ({ done: s.online || s.data, pass: s.online || s.data }))
 }
 
+// 144 slots/day ÷ 24h — mirrors SLOT_INTERVAL_MINUTES=10 in poc/reporter.rs.
+const SLOTS_PER_HOUR = 6
+
 function toHourlyGates(slots: BackendPocSlot[]): HourlyGates[] {
   const hours: HourlyGates[] = Array.from({ length: 24 }, () => ({
     data: false, online: false, mac_match: false,
     pol: false, poi: false, poa: false
   }))
   for (const s of slots) {
-    const h = Math.floor(s.slot_index / 6)
+    const h = Math.floor(s.slot_index / SLOTS_PER_HOUR)
     if (h < 24) {
       hours[h].data = hours[h].data || s.data
       hours[h].online = hours[h].online || s.online

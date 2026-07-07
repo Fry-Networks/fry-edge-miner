@@ -42,6 +42,25 @@ fn compose_file() -> PathBuf {
     deploy_dir().join("docker-compose.yml")
 }
 
+/// The diiisco-node image is built locally by install(); it is never
+/// published to a registry, so `compose up` must not be allowed to fall back
+/// to pulling it.
+fn image_built() -> bool {
+    crate::supervisor::platform::command("docker")
+        .args(["images", "-q", "diiisco-node:latest"])
+        .output()
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// Last `n` lines of subprocess output — full walls of Docker logs go to the
+/// log file, not the UI error banner.
+fn tail_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
 #[async_trait]
 impl Integration for DiiiscoIntegration {
     fn id(&self) -> &str {
@@ -107,7 +126,8 @@ impl Integration for DiiiscoIntegration {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("docker compose build failed: {}", stderr);
+            warn!(stderr = %stderr, "docker compose build failed (full output)");
+            anyhow::bail!("docker compose build failed: {}", tail_lines(&stderr, 15));
         }
         info!("Diiisco install complete — image built with per-device wallet");
         Ok(())
@@ -117,17 +137,97 @@ impl Integration for DiiiscoIntegration {
         super::docker_manager::ensure_docker().await?;
         let compose = compose_file();
         if !compose.exists() {
-            anyhow::bail!("Diiisco deploy directory not found at {}", deploy_dir().display());
+            anyhow::bail!(
+                "Diiisco is not installed yet (deploy directory missing at {}) — toggle it off and on to reinstall",
+                deploy_dir().display()
+            );
         }
+
+        // The compose file interpolates ${ALGO_ADDRESS}/${ALGO_MNEMONIC}/
+        // ${DIIISCO_API_KEY} on EVERY invocation, `up` included — without
+        // them compose warns "variable is not set" and passes blank build
+        // args. Fetch the same credentials install() uses.
+        let cfg = self.config.get();
+        let miner_key = cfg.miner_key.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("Miner key not set — complete device registration before starting Diiisco")
+        })?;
+        let creds = crate::api::credentials::lookup(&self.api_client, miner_key)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch credentials: {}", e))?;
+        let algo_address = creds.algo_address.ok_or_else(|| {
+            anyhow::anyhow!("Device has no Algorand wallet — re-register or contact support")
+        })?;
+        let algo_mnemonic = creds.algo_mnemonic.ok_or_else(|| {
+            anyhow::anyhow!("Device Algorand mnemonic unavailable — contact support")
+        })?;
+        let bearer = diiisco_bearer_token();
+        if bearer.is_empty() {
+            anyhow::bail!("DIIISCO_BEARER_TOKEN not configured — set the environment variable before enabling Diiisco");
+        }
+
+        let deploy = deploy_dir();
+
+        // diiisco-node is built locally, never pulled. If the image is
+        // missing (failed/interrupted install), `up` would try to pull it
+        // from a registry — "pull access denied". Build first.
+        if !image_built() {
+            info!("diiisco-node image missing — building before start");
+            let output = crate::supervisor::platform::command("docker")
+                .args(["compose", "build"])
+                .env("ALGO_ADDRESS", &algo_address)
+                .env("ALGO_MNEMONIC", &algo_mnemonic)
+                .env("DIIISCO_API_KEY", &bearer)
+                .current_dir(&deploy)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                warn!(stderr = %stderr, "Diiisco pre-start image build failed (full output)");
+                anyhow::bail!("Diiisco image build failed: {}", tail_lines(&stderr, 15));
+            }
+        }
+
+        // Best-effort cleanup of stale containers/networks from prior failed
+        // runs ("network diiisco_default already exists"). Volumes survive.
+        // Failures don't block startup, but they must be visible in logs.
+        info!("Cleaning up stale Diiisco containers/networks");
+        match crate::supervisor::platform::command("docker")
+            .args(["compose", "down", "--remove-orphans"])
+            .env("ALGO_ADDRESS", &algo_address)
+            .env("ALGO_MNEMONIC", &algo_mnemonic)
+            .env("DIIISCO_API_KEY", &bearer)
+            .current_dir(&deploy)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+        {
+            Ok(o) if !o.status.success() => {
+                warn!(
+                    stderr = %String::from_utf8_lossy(&o.stderr),
+                    "Diiisco pre-start cleanup reported errors (continuing)"
+                );
+            }
+            Err(e) => {
+                warn!(error = %e, "Diiisco pre-start cleanup failed to run (continuing)");
+            }
+            _ => {}
+        }
+
         info!("Starting Diiisco containers");
         let output = crate::supervisor::platform::command("docker")
-            .args(["compose", "-f", &compose.to_string_lossy(), "up", "-d"])
+            .args(["compose", "up", "-d"])
+            .env("ALGO_ADDRESS", &algo_address)
+            .env("ALGO_MNEMONIC", &algo_mnemonic)
+            .env("DIIISCO_API_KEY", &bearer)
+            .current_dir(&deploy)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .output()?;
         if !output.status.success() {
-            anyhow::bail!(
-                "Failed to start Diiisco: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(stderr = %stderr, "Failed to start Diiisco (full output)");
+            anyhow::bail!("Failed to start Diiisco: {}", tail_lines(&stderr, 15));
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         Ok(())
@@ -180,11 +280,16 @@ impl Integration for DiiiscoIntegration {
     }
 
     fn installed_version(&self) -> Option<String> {
-        if compose_file().exists() {
-            Some("installed".into())
-        } else {
-            None
+        if !compose_file().exists() {
+            return None;
         }
+        // Compose file present but image never built = failed/interrupted
+        // install — report not-installed so the toggle path re-runs install.
+        // Only checkable when the Docker engine is reachable.
+        if docker_available() && !image_built() {
+            return None;
+        }
+        Some("installed".into())
     }
 
     fn collect_poc_data(&self) -> PocGateData {
@@ -194,5 +299,9 @@ impl Integration for DiiiscoIntegration {
             poa: compose_exists && docker_available(),
             ..Default::default()
         }
+    }
+
+    fn requires_docker(&self) -> bool {
+        true
     }
 }

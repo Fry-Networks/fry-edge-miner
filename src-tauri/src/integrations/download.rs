@@ -53,13 +53,38 @@ pub async fn download_file_with_options(
                 let status = response.status();
 
                 if status.is_success() {
-                    let bytes = response.bytes().await?;
+                    // Stream to a .part file: large installers must not be
+                    // buffered in RAM, and a mid-body failure ("error
+                    // decoding response body") must stay INSIDE the retry
+                    // loop instead of escaping via `?`.
                     if let Some(parent) = dest.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
-                    std::fs::write(dest, &bytes)?;
-                    info!(dest = ?dest, bytes = bytes.len(), "Download complete");
-                    return Ok(());
+                    let part_path = dest.with_extension("part");
+                    match stream_to_file(response, &part_path).await {
+                        Ok(bytes) => {
+                            if dest.exists() {
+                                std::fs::remove_file(dest)?;
+                            }
+                            std::fs::rename(&part_path, dest)?;
+                            info!(dest = ?dest, bytes = bytes, "Download complete");
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            let _ = std::fs::remove_file(&part_path);
+                            warn!(url = url, error = %e, attempt = attempt, "Download body read failed");
+                            last_error = Some(anyhow::anyhow!(
+                                "Download of {} failed while reading the response body: {}",
+                                url,
+                                e
+                            ));
+                            if attempt < max_attempts {
+                                let delay = base_delay * 2u32.pow(attempt - 1);
+                                tokio::time::sleep(delay).await;
+                            }
+                            continue;
+                        }
+                    }
                 }
 
                 let headers = response.headers();
@@ -110,7 +135,21 @@ pub async fn download_file_with_options(
         }
     }
 
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Download failed after all retries")))
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Download of {} failed after all retries", url)))
+}
+
+/// Write the response body to `dest` chunk by chunk, returning bytes written.
+async fn stream_to_file(mut response: reqwest::Response, dest: &Path) -> anyhow::Result<u64> {
+    use std::io::Write;
+
+    let mut file = std::fs::File::create(dest)?;
+    let mut total: u64 = 0;
+    while let Some(chunk) = response.chunk().await? {
+        file.write_all(&chunk)?;
+        total += chunk.len() as u64;
+    }
+    file.flush()?;
+    Ok(total)
 }
 
 /// Build a reqwest client suitable for downloading public release assets.

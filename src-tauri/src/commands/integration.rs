@@ -8,7 +8,7 @@ pub async fn get_integrations(
     let (entries, total) = {
         let reg = state.registry.lock().map_err(|e| e.to_string())?;
         let total = reg.total_count();
-        let entries: Vec<(String, String, bool, Option<String>)> = reg
+        let entries: Vec<(String, String, bool, Option<String>, bool)> = reg
             .list()
             .iter()
             .map(|i| {
@@ -17,6 +17,7 @@ pub async fn get_integrations(
                     i.display_name().to_string(),
                     reg.is_enabled(i.id()),
                     i.installed_version(),
+                    i.requires_docker(),
                 )
             })
             .collect();
@@ -28,7 +29,7 @@ pub async fn get_integrations(
 
     let statuses = entries
         .into_iter()
-        .map(|(id, display_name, enabled, version)| {
+        .map(|(id, display_name, enabled, version, requires_docker)| {
             let health = if enabled {
                 last.get(&id)
                     .cloned()
@@ -50,6 +51,10 @@ pub async fn get_integrations(
                 }
             };
 
+            // Healthy-based so the UI matches what the PoC reporter actually
+            // submits (reporter proportion counts Healthy only).
+            let healthy = matches!(health, HealthStatus::Healthy);
+
             IntegrationStatus {
                 id,
                 display_name,
@@ -57,7 +62,8 @@ pub async fn get_integrations(
                 health,
                 lifecycle,
                 version,
-                poc_contribution: if enabled { 1.0 / total as f64 } else { 0.0 },
+                poc_contribution: if enabled && healthy { 1.0 / total as f64 } else { 0.0 },
+                requires_docker,
             }
         })
         .collect();

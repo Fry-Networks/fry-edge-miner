@@ -115,9 +115,15 @@ impl Integration for PresearchIntegration {
 
         if target_exists {
             info!(target = %target, "Starting existing keyed Presearch container");
-            crate::supervisor::platform::command("docker")
+            let output = crate::supervisor::platform::command("docker")
                 .args(["start", &target])
                 .output()?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "Failed to start Presearch container: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
         } else if legacy_exists {
             info!("Migrating legacy Presearch container to keyed name");
             let _ = crate::supervisor::platform::command("docker")
@@ -190,6 +196,10 @@ impl Integration for PresearchIntegration {
             ..Default::default()
         }
     }
+
+    fn requires_docker(&self) -> bool {
+        true
+    }
 }
 
 impl PresearchIntegration {
@@ -211,9 +221,15 @@ impl PresearchIntegration {
             warn!("No PRESEARCH_REG_CODE set — starting Presearch in unclaimed mode");
         }
         args.push(DOCKER_IMAGE.into());
-        crate::supervisor::platform::command("docker")
+        let output = crate::supervisor::platform::command("docker")
             .args(&args)
             .output()?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "Presearch container create failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
         Ok(())
     }
 }

@@ -27,7 +27,19 @@ impl AemIntegration {
                     .map(|n| n.starts_with("app-"))
                     .unwrap_or(false)
             })
-            .max_by_key(|e| e.file_name())
+            // Squirrel dirs are app-X.Y.Z — compare version components
+            // numerically; lexicographic order picks app-9.0 over app-10.0.
+            .max_by_key(|e| {
+                e.file_name()
+                    .to_str()
+                    .and_then(|n| n.strip_prefix("app-"))
+                    .map(|v| {
+                        v.split('.')
+                            .map(|p| p.parse::<u32>().unwrap_or(0))
+                            .collect::<Vec<u32>>()
+                    })
+                    .unwrap_or_default()
+            })
             .map(|e| e.path().join("OlostepBrowser.exe"))
             .filter(|p| p.exists())
     }
@@ -117,14 +129,23 @@ impl Integration for AemIntegration {
             );
         }
         // Squirrel installers run async — wait for binary to appear
-        for _ in 0..30 {
+        let mut appeared = false;
+        for _ in 0..60 {
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             if Self::olostep_binary().is_some() {
+                appeared = true;
                 break;
             }
         }
+        if !appeared {
+            anyhow::bail!(
+                "OlostepBrowser installer ran but the app did not appear within 120 seconds — antivirus or a permission prompt may have blocked it. Toggle Olostep again to retry."
+            );
+        }
         Self::stage_config()?;
-        std::fs::remove_file(&installer_path).ok();
+        if let Err(e) = std::fs::remove_file(&installer_path) {
+            warn!(error = %e, "Could not remove OlostepBrowser installer (overwritten on next install)");
+        }
         info!("OlostepBrowser installation complete");
         Ok(())
     }

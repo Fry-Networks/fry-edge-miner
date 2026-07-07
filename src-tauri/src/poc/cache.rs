@@ -17,6 +17,10 @@ pub struct PocCache {
     root: PathBuf,
 }
 
+/// Day-files older than this are deleted — without a sweep the cache grows
+/// forever (one file per day, ~1440 lines each).
+const RETENTION_DAYS: i64 = 30;
+
 impl PocCache {
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {
@@ -29,6 +33,7 @@ impl PocCache {
         let date = Local::now().format("%Y-%m-%d").to_string();
         let path = self.root.join(format!("{}.jsonl", date));
         fs::create_dir_all(&self.root)?;
+        let first_write_of_day = !path.exists();
 
         let mut file = OpenOptions::new()
             .create(true)
@@ -37,7 +42,29 @@ impl PocCache {
 
         let line = serde_json::to_string(slot)?;
         writeln!(file, "{}", line)?;
+
+        if first_write_of_day {
+            self.prune_old_files();
+        }
         Ok(())
+    }
+
+    /// Best-effort deletion of day-files past retention. Runs once per day,
+    /// on the first append to a fresh day file.
+    fn prune_old_files(&self) {
+        let cutoff = Local::now().date_naive() - chrono::Duration::days(RETENTION_DAYS);
+        if let Ok(entries) = fs::read_dir(&self.root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Some(stem) = name.strip_suffix(".jsonl") {
+                    if let Ok(d) = chrono::NaiveDate::parse_from_str(stem, "%Y-%m-%d") {
+                        if d < cutoff {
+                            let _ = fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Load all unique slots for a given date (`YYYY-MM-DD`).

@@ -17,6 +17,9 @@ export default function Step3Install({ minerKey, walletAddress, onDone }: Step3P
   const { register } = useDevice()
   const [status, setStatus] = useState<'installing' | 'done' | 'error'>('installing')
   const [errorMsg, setErrorMsg] = useState('')
+  // Bumped by the Retry button — registration only re-runs when this changes,
+  // since none of the other effect deps change on retry.
+  const [attempt, setAttempt] = useState(0)
   const deviceName = useRef(makeName()).current
 
   useEffect(() => {
@@ -32,7 +35,7 @@ export default function Step3Install({ minerKey, walletAddress, onDone }: Step3P
         }
       })
     return () => { cancelled = true }
-  }, [register, walletAddress, minerKey])
+  }, [register, walletAddress, minerKey, attempt])
 
   if (status === 'done') {
     return (
@@ -172,7 +175,14 @@ export default function Step3Install({ minerKey, walletAddress, onDone }: Step3P
         >
           {errorMsg}
         </div>
-        <Btn v="p" onClick={() => setStatus('installing')} sx={{ fontSize: 14, padding: '10px 24px' }}>
+        <Btn
+          v="p"
+          onClick={() => {
+            setStatus('installing')
+            setAttempt((a) => a + 1)
+          }}
+          sx={{ fontSize: 14, padding: '10px 24px' }}
+        >
           <RefreshCw size={14} style={{ marginRight: 6 }} />
           Retry
         </Btn>

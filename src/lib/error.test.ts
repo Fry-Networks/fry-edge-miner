@@ -1,43 +1,48 @@
+import { describe, it, expect } from 'vitest'
 import { extractErrorMessage } from './error'
 
-function assertEqual(actual: string, expected: string, label: string) {
-  if (actual !== expected) {
-    throw new Error(`FAIL ${label}: expected "${expected}", got "${actual}"`)
-  }
-  console.log(`PASS ${label}`)
-}
+describe('extractErrorMessage', () => {
+  it('returns plain string as-is', () => {
+    expect(extractErrorMessage('something went wrong')).toBe('something went wrong')
+  })
 
-// plain string
-assertEqual(extractErrorMessage('something went wrong'), 'something went wrong', 'plain string')
+  it('strips "Error:" prefix', () => {
+    expect(extractErrorMessage('Error: backend rejected key')).toBe('backend rejected key')
+  })
 
-// string with "Error:" prefix
-assertEqual(extractErrorMessage('Error: backend rejected key'), 'backend rejected key', 'Error: prefix stripped')
+  it('extracts message from Error object', () => {
+    expect(extractErrorMessage(new Error('object message'))).toBe('object message')
+  })
 
-// Error object
-assertEqual(extractErrorMessage(new Error('object message')), 'object message', 'Error object')
+  it('extracts message field from object', () => {
+    expect(extractErrorMessage({ message: 'obj msg' })).toBe('obj msg')
+  })
 
-// object with message field
-assertEqual(extractErrorMessage({ message: 'obj msg' }), 'obj msg', 'object message field')
+  it('extracts error field from object', () => {
+    expect(extractErrorMessage({ error: 'err field' })).toBe('err field')
+  })
 
-// object with error field
-assertEqual(extractErrorMessage({ error: 'err field' }), 'err field', 'object error field')
+  it('extracts detail field from object', () => {
+    expect(extractErrorMessage({ detail: 'det field' })).toBe('det field')
+  })
 
-// object with detail field
-assertEqual(extractErrorMessage({ detail: 'det field' }), 'det field', 'object detail field')
+  it('returns fallback for null', () => {
+    expect(extractErrorMessage(null)).toBe('Registration failed')
+  })
 
-// null
-assertEqual(extractErrorMessage(null), 'Registration failed', 'null fallback')
+  it('returns fallback for undefined', () => {
+    expect(extractErrorMessage(undefined)).toBe('Registration failed')
+  })
 
-// undefined
-assertEqual(extractErrorMessage(undefined), 'Registration failed', 'undefined fallback')
+  it('returns fallback for number', () => {
+    expect(extractErrorMessage(42)).toBe('Registration failed')
+  })
 
-// number
-assertEqual(extractErrorMessage(42), 'Registration failed', 'number fallback')
+  it('returns fallback for unknown object', () => {
+    expect(extractErrorMessage({ foo: 'bar' })).toBe('Registration failed')
+  })
 
-// object without known fields (must NOT stringify secrets)
-assertEqual(extractErrorMessage({ foo: 'bar' }), 'Registration failed', 'unknown object fallback')
-
-// object with empty message
-assertEqual(extractErrorMessage({ message: '' }), 'Registration failed', 'empty message fallback')
-
-console.log('All tests passed')
+  it('returns fallback for empty message', () => {
+    expect(extractErrorMessage({ message: '' })).toBe('Registration failed')
+  })
+})

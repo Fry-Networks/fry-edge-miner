@@ -1,15 +1,18 @@
 import type { ReactNode } from 'react'
-import { Download, Loader2 } from 'lucide-react'
+import { AlertTriangle, Download, Loader2 } from 'lucide-react'
 import type { FrontendIntegration } from '../hooks/useIntegrations'
+import { unhealthyReason } from '../lib/types'
 import Tag from './primitives/Tag'
 import Tog from './primitives/Tog'
 
 interface IntCardProps {
   intg: FrontendIntegration
   onToggle: (id: string) => void
+  // Docker prerequisite message when this card needs Docker and it isn't ready.
+  dockerNote?: string | null
 }
 
-export default function IntCard({ intg, onToggle }: IntCardProps) {
+export default function IntCard({ intg, onToggle, dockerNote }: IntCardProps) {
   const {
     id,
     name,
@@ -19,11 +22,13 @@ export default function IntCard({ intg, onToggle }: IntCardProps) {
     col,
     enabled,
     healthy,
+    health,
     lifecycle,
-    version,
-    uptime
+    version
   } = intg
   const inst = version !== null
+  const reason = unhealthyReason(health)
+  const dockerBlocked = !!dockerNote
 
   let st: 'run' | 'err' | 'stopped' | 'info' = 'stopped'
   let stLbl = 'Not installed'
@@ -38,6 +43,9 @@ export default function IntCard({ intg, onToggle }: IntCardProps) {
         {stLbl}
       </span>
     )
+  } else if (!inst && dockerBlocked) {
+    st = 'stopped'
+    stLbl = 'Unavailable'
   } else if (!inst) {
     st = 'stopped'
     stLbl = 'Not installed'
@@ -47,6 +55,11 @@ export default function IntCard({ intg, onToggle }: IntCardProps) {
   } else if (healthy) {
     st = 'run'
     stLbl = 'Running'
+  } else if (health === 'Stopped' || health === 'Starting' || health === 'Unknown') {
+    // Enabled but not running yet — the backend health loop auto-restarts;
+    // don't scare the user with a red badge for a transient state.
+    st = 'info'
+    stLbl = 'Starting'
   } else {
     st = 'err'
     stLbl = 'Unhealthy'
@@ -62,7 +75,9 @@ export default function IntCard({ intg, onToggle }: IntCardProps) {
           ? 'run'
           : st === 'err'
             ? 'err'
-            : 'def'
+            : st === 'info'
+              ? 'info'
+              : 'def'
   const pct = enabled && healthy ? Math.round(intg.poc_contribution * 100) : 0
 
   return (
@@ -107,7 +122,9 @@ export default function IntCard({ intg, onToggle }: IntCardProps) {
             >
               {tag}
             </span>
-            <Tag v={tv}>{stNode}</Tag>
+            <span title={reason ?? undefined} style={reason ? { cursor: 'help' } : undefined}>
+              <Tag v={tv}>{stNode}</Tag>
+            </span>
           </div>
           <div
             style={{
@@ -120,7 +137,7 @@ export default function IntCard({ intg, onToggle }: IntCardProps) {
           >
             {desc}
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             {version && (
               <span
                 style={{
@@ -132,13 +149,50 @@ export default function IntCard({ intg, onToggle }: IntCardProps) {
                   borderRadius: 'var(--radsm)'
                 }}
               >
-                v{version}
+                {/^\d/.test(version) ? `v${version}` : 'Installed'}
               </span>
             )}
-            {uptime > 0 && (
-              <span style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--t2)' }}>{Math.round(uptime)}% uptime</span>
+            {reason && st === 'err' && (
+              <span
+                style={{
+                  fontFamily: 'var(--fb)',
+                  fontSize: 11,
+                  color: 'var(--amb)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  minWidth: 0,
+                  maxWidth: 420,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap'
+                }}
+                title={reason}
+              >
+                <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {reason}
+              </span>
             )}
-            {!inst && lifecycle !== 'Installing' && (
+            {dockerNote && (
+              <span
+                style={{
+                  fontFamily: 'var(--fb)',
+                  fontSize: 11,
+                  color: 'var(--amb)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  minWidth: 0,
+                  maxWidth: 420,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap'
+                }}
+                title={dockerNote}
+              >
+                <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {dockerNote}
+              </span>
+            )}
+            {!inst && !dockerNote && lifecycle !== 'Installing' && (
               <span
                 style={{
                   fontFamily: 'var(--fb)',

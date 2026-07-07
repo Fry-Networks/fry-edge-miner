@@ -190,10 +190,42 @@ pub fn plan_migration(
 mod tests {
     use super::*;
 
+    /// Temp fixture with Drop cleanup so a failing assertion still removes it.
+    struct TempFixture(PathBuf);
+    impl Drop for TempFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn build_fixture() -> TempFixture {
+        let root = std::env::temp_dir().join(format!("fem_migration_fixture_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // RDN: real key file
+        let rdn_cfg = root.join("miner-RDN").join("config");
+        std::fs::create_dir_all(&rdn_cfg).unwrap();
+        std::fs::write(rdn_cfg.join("miner_key.txt"), "RDN-TESTFIXTURE00000000000000000000").unwrap();
+        // BM: config dir exists but no key file — exercises the fallback path
+        std::fs::create_dir_all(root.join("miner-BM").join("config")).unwrap();
+        // SDN: real key file
+        let sdn_cfg = root.join("miner-SDN").join("config");
+        std::fs::create_dir_all(&sdn_cfg).unwrap();
+        std::fs::write(sdn_cfg.join("miner_key.txt"), "SDN-TESTFIXTURE00000000000000000000").unwrap();
+        TempFixture(root)
+    }
+
     #[test]
     fn test_detection_and_mapping() {
-        let fixture = std::env::var("FEM_TEST_FIXTURE_DIR")
-            .expect("FEM_TEST_FIXTURE_DIR must be set to fixture path");
+        // An externally provided fixture (CI) wins; otherwise the test builds
+        // its own temp fixture so `cargo test` passes on any machine.
+        let (_guard, fixture) = match std::env::var("FEM_TEST_FIXTURE_DIR") {
+            Ok(dir) => (None, dir),
+            Err(_) => {
+                let g = build_fixture();
+                let p = g.0.to_string_lossy().to_string();
+                (Some(g), p)
+            }
+        };
 
         // FAIL CLOSED: detection MUST return Some
         let inst = detect_fryhub_at(&fixture)

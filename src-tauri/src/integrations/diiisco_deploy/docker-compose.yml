@@ -29,7 +29,9 @@ services:
       retries: 10
       start_period: 15s
 
-  # ─── Model Bootstrapper: Pulls phi2 into Ollama on first run ─────────
+  # ─── Model Bootstrapper: Pulls phi (Phi-2) into Ollama on first run ──
+  # NOTE: the library model name is "phi" (Phi-2 2.7B) — "phi2" does not
+  # exist in the Ollama registry and always fails with MANIFEST_UNKNOWN.
   ollama-init:
     image: ollama/ollama:latest
     container_name: diiisco-ollama-init
@@ -39,14 +41,16 @@ services:
     restart: "no"
     entrypoint: >
       sh -c "
-        echo 'Checking if phi2 model is available...' &&
-        if ollama show phi2 --modelfile 2>/dev/null | grep -q 'FROM'; then
-          echo 'Model phi2 already exists. Skipping pull.';
-        else
-          echo 'Pulling phi2 model...' &&
-          ollama pull phi2 &&
-          echo 'Model phi2 ready.';
-        fi
+        if ollama show phi --modelfile 2>/dev/null | grep -q FROM; then
+          echo 'Model phi already present - skipping pull.'; exit 0;
+        fi;
+        for i in 1 2 3; do
+          echo Pulling phi model, attempt $$i of 3...;
+          if ollama pull phi; then echo 'Model phi ready.'; exit 0; fi;
+          sleep 10;
+        done;
+        echo 'ERROR: failed to pull phi model after 3 attempts.';
+        exit 1
       "
     environment:
       OLLAMA_HOST: "http://ollama:11434"
@@ -73,7 +77,9 @@ services:
     volumes:
       - diiisco_data:/app/data
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8181/v1/models", "||", "exit", "1"]
+      # CMD-SHELL required: exec-form CMD passes "||"/"exit"/"1" as literal
+      # curl arguments, which fails every probe.
+      test: ["CMD-SHELL", "curl -sf http://localhost:8181/v1/models || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
