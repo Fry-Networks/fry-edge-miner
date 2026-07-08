@@ -50,7 +50,7 @@ export default function UpdCard({ name, Icon, col, current, available, status, o
       <div style={{ flex: 1 }}>
         <div style={{ fontFamily: 'var(--fh)', fontWeight: 700, fontSize: 13, color: 'var(--txt)', marginBottom: 2 }}>{name}</div>
         <div style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--t2)' }}>
-          {current ? `v${current}` : 'Not installed'}
+          {current ? (/^\d/.test(current) ? `v${current}` : 'Installed') : 'Not installed'}
           {hasUpd && (
             <>
               {' '}→ <span style={{ color: 'var(--amb)' }}>v{available}</span>
