@@ -49,6 +49,7 @@ pub struct ApiClient {
 impl ApiClient {
     pub fn new(base_url: String, bearer_token: String) -> Self {
         let http = Client::builder()
+            .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
             .build()
             .expect("failed to build HTTP client");

@@ -127,15 +127,24 @@ pub async fn register_device(
         is_installed: Some(true),
     };
 
-    // One retry on connection-level errors (DNS/TLS/timeout); not on HTTP status errors.
-    let reg_result = match crate::api::installations::register(&state.api_client, &heartbeat).await {
-        Err(crate::api::client::ApiError::Request(ref _e)) => {
-            tracing::warn!("Registration request failed — retrying in 2s");
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            crate::api::installations::register(&state.api_client, &heartbeat).await
+    // Exponential backoff retry on connection-level errors (DNS/TLS/timeout); not on HTTP status errors.
+    let mut reg_result = crate::api::installations::register(&state.api_client, &heartbeat).await;
+    for attempt in 1..=3u32 {
+        match &reg_result {
+            Err(crate::api::client::ApiError::Request(_)) => {
+                let delay = 2u64.pow(attempt); // 2s, 4s, 8s
+                tracing::warn!(
+                    attempt = attempt,
+                    max_retries = 3,
+                    delay_secs = delay,
+                    "Registration request failed — retrying"
+                );
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+                reg_result = crate::api::installations::register(&state.api_client, &heartbeat).await;
+            }
+            _ => break, // success or non-Request error — stop retrying
         }
-        other => other,
-    };
+    }
 
     match reg_result {
         Ok(response) => {
