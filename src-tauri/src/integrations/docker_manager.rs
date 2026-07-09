@@ -155,6 +155,35 @@ fn emit_progress(stage: &str, detail: String, attempt: u32, total: u32) {
     );
 }
 
+/// Scan Docker Desktop logs for specific known startup errors and return
+/// a targeted user-facing message if found. Returns None for generic failures.
+fn detect_docker_startup_error() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let log_dir = dirs::data_local_dir()?.join("Docker").join("log");
+        for entry in std::fs::read_dir(&log_dir).ok()? {
+            let path = entry.ok()?.path();
+            if path.extension().map_or(true, |e| e != "log" && e != "txt") {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                // Check last 8KB only (recent entries)
+                let tail = if content.len() > 8192 { &content[content.len() - 8192..] } else { &content };
+                if tail.contains("hosts' is denied") || tail.contains("Access to the path") && tail.contains("drivers\\etc\\hosts") {
+                    return Some(
+                        "Docker Desktop cannot start because it cannot access your system hosts file. \
+                         Fix: right-click Docker Desktop → 'Run as administrator', or fix the file permissions \
+                         by running this command in an Administrator PowerShell:\n\
+                         icacls C:\\WINDOWS\\System32\\drivers\\etc\\hosts /grant Users:RW\n\
+                         Then re-enable this integration.".to_string()
+                    );
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Find Docker Desktop executable in standard Windows paths.
 fn find_docker_desktop() -> Option<PathBuf> {
     for path in DOCKER_PATHS {
@@ -302,6 +331,10 @@ pub async fn ensure_docker() -> Result<()> {
                 warn!(error = %e, "Failed to launch Docker Desktop");
             }
             wait_for_docker(30, 5).await.map_err(|e| {
+                // Check Docker Desktop logs for specific known errors
+                if let Some(specific) = detect_docker_startup_error() {
+                    return anyhow::anyhow!("{}", specific);
+                }
                 anyhow::anyhow!(
                     "{}. Docker Desktop is installed but its engine did not start. Open Docker Desktop from the Start menu and wait for the engine to report Running, then re-enable this integration. If Docker Desktop shows a virtualization error, enable VT-x/AMD-V in your BIOS: {}",
                     e,

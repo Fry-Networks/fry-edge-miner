@@ -12,13 +12,49 @@ pub struct ConfigStore {
 }
 
 impl ConfigStore {
-    /// Create a new ConfigStore, loading existing config from disk or using defaults
+    /// Create a new ConfigStore, loading existing config from disk or using defaults.
+    /// Logs diagnostics about config file state to help debug re-registration issues.
     pub fn new(config_dir: PathBuf) -> Result<Self> {
         let path = config_dir.join("fem_config.json");
+        let backup_path = config_dir.join("fem_config.backup.json");
+
+        tracing::info!(
+            config_dir = %config_dir.display(),
+            config_path = %path.display(),
+            config_exists = path.exists(),
+            "ConfigStore: resolving config file"
+        );
+
         let config = if path.exists() {
             let data = std::fs::read_to_string(&path)?;
-            serde_json::from_str(&data)?
+            let cfg: FemConfig = serde_json::from_str(&data)?;
+            tracing::info!(
+                has_miner_key = cfg.miner_key.is_some(),
+                has_install_id = cfg.install_id.is_some(),
+                has_wallet = cfg.wallet_address.is_some(),
+                "ConfigStore: loaded existing config"
+            );
+            // Save a backup copy on successful load (for recovery after failed updates)
+            if cfg.miner_key.is_some() {
+                if let Err(e) = std::fs::copy(&path, &backup_path) {
+                    tracing::warn!(error = %e, "ConfigStore: failed to save backup");
+                }
+            }
+            cfg
+        } else if backup_path.exists() {
+            // Config missing but backup exists — recover from backup
+            tracing::warn!("ConfigStore: config file missing, recovering from backup");
+            let data = std::fs::read_to_string(&backup_path)?;
+            let cfg: FemConfig = serde_json::from_str(&data)?;
+            // Restore the main config file
+            std::fs::copy(&backup_path, &path)?;
+            tracing::info!(
+                has_miner_key = cfg.miner_key.is_some(),
+                "ConfigStore: recovered config from backup"
+            );
+            cfg
         } else {
+            tracing::info!("ConfigStore: no config file found, using defaults (new install)");
             FemConfig::default()
         };
         Ok(Self {

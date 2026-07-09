@@ -3,8 +3,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{info, warn};
 use crate::api::client::ApiClient;
+use crate::api::types::CredentialInfo;
 use crate::config::store::ConfigStore;
 
 const HEALTH_URL: &str = "http://localhost:8181/health";
@@ -26,6 +28,28 @@ fn deploy_dir() -> PathBuf {
         .expect("no local data dir")
         .join("FryEdgeMiner")
         .join("diiisco")
+}
+
+/// Fetch credentials with exponential-backoff retry on network errors.
+/// Retries up to 3 times (2s, 4s, 8s delay) for connection-level failures
+/// only — HTTP error responses are NOT retried.
+async fn fetch_credentials_with_retry(
+    api_client: &ApiClient,
+    miner_key: &str,
+) -> std::result::Result<CredentialInfo, crate::api::client::ApiError> {
+    let mut result = crate::api::credentials::lookup(api_client, miner_key).await;
+    for attempt in 1..=3u32 {
+        match &result {
+            Err(crate::api::client::ApiError::Request(_)) => {
+                let delay = 2u64.pow(attempt);
+                warn!(attempt, delay_secs = delay, "Credential fetch failed (network error), retrying");
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+                result = crate::api::credentials::lookup(api_client, miner_key).await;
+            }
+            _ => break,
+        }
+    }
+    result
 }
 
 fn docker_available() -> bool {
@@ -99,7 +123,7 @@ impl Integration for DiiiscoIntegration {
         let miner_key = cfg.miner_key.as_deref().ok_or_else(|| {
             anyhow::anyhow!("Miner key not set — complete device registration before installing Diiisco")
         })?;
-        let creds = crate::api::credentials::lookup(&self.api_client, miner_key).await
+        let creds = fetch_credentials_with_retry(&self.api_client, miner_key).await
             .map_err(|e| anyhow::anyhow!("Failed to fetch credentials: {}", e))?;
         let algo_address = creds.algo_address.ok_or_else(|| {
             anyhow::anyhow!("Device has no Algorand wallet — re-register or contact support")
@@ -151,8 +175,7 @@ impl Integration for DiiiscoIntegration {
         let miner_key = cfg.miner_key.as_deref().ok_or_else(|| {
             anyhow::anyhow!("Miner key not set — complete device registration before starting Diiisco")
         })?;
-        let creds = crate::api::credentials::lookup(&self.api_client, miner_key)
-            .await
+        let creds = fetch_credentials_with_retry(&self.api_client, miner_key).await
             .map_err(|e| anyhow::anyhow!("Failed to fetch credentials: {}", e))?;
         let algo_address = creds.algo_address.ok_or_else(|| {
             anyhow::anyhow!("Device has no Algorand wallet — re-register or contact support")
