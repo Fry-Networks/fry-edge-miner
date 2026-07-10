@@ -4,10 +4,7 @@ import { listen } from '@tauri-apps/api/event'
 import type { DockerProgress, HealthStatus, IntegrationStatus, LifecycleState, SystemStatus } from '../lib/types'
 import { extractErrorMessage } from '../lib/error'
 import { INTEGRATION_META, type IntegrationMeta } from '../lib/integrationMeta'
-
-function isTauri(): boolean {
-  return typeof window !== 'undefined' && !!(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
-}
+import { isTauri } from '../lib/tauri'
 
 function deriveLifecycle(enabled: boolean, health: HealthStatus): LifecycleState {
   if (!enabled) return 'Disabled'
@@ -68,6 +65,22 @@ export function useIntegrations() {
   const inflightToggles = useRef(0)
 
   const fetch = useCallback(async () => {
+    if (!isTauri()) {
+      // Browser preview mode — show all integrations with mock data
+      const mock: IntegrationStatus[] = INTEGRATION_META.map((m) => ({
+        id: m.id,
+        display_name: m.name,
+        enabled: false,
+        health: 'Stopped' as HealthStatus,
+        lifecycle: 'Disabled' as LifecycleState,
+        version: '0.0.0-preview',
+        poc_contribution: 1 / INTEGRATION_META.length,
+        requires_docker: true,
+      }))
+      setIntegrations(toFrontend(mock))
+      setLoading(false)
+      return
+    }
     try {
       const data = await invoke<IntegrationStatus[]>('get_integrations')
       setIntegrations(toFrontend(data))

@@ -2,6 +2,13 @@ import { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import type { DeviceInfo } from '../lib/types'
 import { extractErrorMessage } from '../lib/error'
+import { isTauri } from '../lib/tauri'
+
+const BROWSER_MOCK_DEVICE: DeviceInfo = {
+  miner_key: 'FEM-BROWSER-PREVIEW-MODE',
+  wallet_address: 'BROWSER-PREVIEW-NO-WALLET',
+  registered: true,
+}
 
 export function useDevice() {
   const [device, setDevice] = useState<DeviceInfo | null>(null)
@@ -9,6 +16,11 @@ export function useDevice() {
   const [error, setError] = useState<string | null>(null)
 
   const fetch = useCallback(async () => {
+    if (!isTauri()) {
+      setDevice(BROWSER_MOCK_DEVICE)
+      setLoading(false)
+      return
+    }
     try {
       const data = await invoke<DeviceInfo>('get_device_info')
       setDevice(data)
