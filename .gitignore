@@ -9,3 +9,7 @@ src-tauri/target/
 *.bak*
 
 testsprite_tests\tmp\config.json
+
+playwright-report/
+test-results/
+playwright/.cache/

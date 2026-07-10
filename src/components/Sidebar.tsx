@@ -25,9 +25,17 @@ interface SidebarProps {
   activeCount: number
   hasUnhealthy?: boolean
   deviceName?: string
+  minerKey?: string
 }
 
-export default function Sidebar({ page, onNav, activeCount, hasUnhealthy, deviceName = 'nimble-swift-wolf' }: SidebarProps) {
+function truncateMinerKey(key: string): string {
+  if (!key || !key.startsWith('FEM-') || key.length < 12) return key || 'FEM-…'
+  const body = key.slice(4)
+  return `FEM-${body.slice(0, 4).toLowerCase()}…${body.slice(-4).toLowerCase()}`
+}
+
+export default function Sidebar({ page, onNav, activeCount, hasUnhealthy, deviceName = 'nimble-swift-wolf', minerKey }: SidebarProps) {
+  const minerKeyDisplay = truncateMinerKey(minerKey ?? '')
   return (
     <div
       style={{
@@ -154,7 +162,7 @@ export default function Sidebar({ page, onNav, activeCount, hasUnhealthy, device
             whiteSpace: 'nowrap'
           }}
         >
-          FEM-b9e4…733e
+          {minerKeyDisplay}
         </div>
       </div>
     </div>

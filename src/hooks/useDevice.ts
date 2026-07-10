@@ -10,6 +10,14 @@ const BROWSER_MOCK_DEVICE: DeviceInfo = {
   registered: true,
 }
 
+// Browser-only test hook: `?wizard=1` in URL renders wizard even when the
+// mock reports the device as registered. Zero effect under real Tauri.
+const BROWSER_MOCK_UNREGISTERED: DeviceInfo = {
+  miner_key: '',
+  wallet_address: '',
+  registered: false,
+}
+
 export function useDevice() {
   const [device, setDevice] = useState<DeviceInfo | null>(null)
   const [loading, setLoading] = useState(true)
@@ -17,7 +25,10 @@ export function useDevice() {
 
   const fetch = useCallback(async () => {
     if (!isTauri()) {
-      setDevice(BROWSER_MOCK_DEVICE)
+      const forceWizard =
+        typeof window !== 'undefined' &&
+        new URLSearchParams(window.location.search).get('wizard') === '1'
+      setDevice(forceWizard ? BROWSER_MOCK_UNREGISTERED : BROWSER_MOCK_DEVICE)
       setLoading(false)
       return
     }

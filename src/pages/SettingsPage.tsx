@@ -263,7 +263,7 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf', deregis
           {[
             ['Version', APP_VERSION],
             ['Platform', 'Windows x64'],
-            ['Tauri', '2.1.0']
+            ['Tauri', '2.11']
           ].map(([l, v]) => (
             <div key={l}>
               <Lbl sx={{ marginBottom: 4 }}>{l}</Lbl>

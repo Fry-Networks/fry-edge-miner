@@ -80,7 +80,7 @@ function ErrorBanner({ error }: { error: string }) {
   )
 }
 
-function AppShell({ deviceName, deregister }: { deviceName: string; deregister: () => Promise<void> }) {
+function AppShell({ deviceName, minerKey, deregister }: { deviceName: string; minerKey?: string; deregister: () => Promise<void> }) {
   const [page, setPage] = useState<NavPage>('dashboard')
   const { integrations, toggle, error, system, dockerProgress } = useIntegrations()
   const activeCount = integrations.filter((i) => i.enabled).length
@@ -96,7 +96,7 @@ function AppShell({ deviceName, deregister }: { deviceName: string; deregister: 
         fontFamily: 'var(--fb)'
       }}
     >
-      <Sidebar page={page} onNav={setPage} activeCount={activeCount} hasUnhealthy={hasUnhealthy} deviceName={deviceName} />
+      <Sidebar page={page} onNav={setPage} activeCount={activeCount} hasUnhealthy={hasUnhealthy} deviceName={deviceName} minerKey={minerKey} />
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <TopBar page={page} />
         {error && <ErrorBanner error={error} />}
@@ -129,5 +129,5 @@ export default function FEMApp() {
     return <Wizard onDone={(name) => { setDeviceName(name); setPhase('app') }} />
   }
 
-  return <AppShell deviceName={deviceName} deregister={deregister} />
+  return <AppShell deviceName={deviceName} minerKey={device?.miner_key ?? undefined} deregister={deregister} />
 }
