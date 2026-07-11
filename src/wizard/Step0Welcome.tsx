@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { ArrowRight, Check, X } from 'lucide-react'
 import Btn from '../components/primitives/Btn'
 import Lbl from '../components/primitives/Lbl'
@@ -7,13 +8,52 @@ interface Step0Props {
   onNext: () => void
 }
 
+type CheckItem = { label: string; ok: boolean | null }
+
+function platformLabel(): string {
+  const p = typeof navigator !== 'undefined' ? navigator.platform : ''
+  if (p.startsWith('Linux')) return 'Linux (64-bit)'
+  if (p.startsWith('Win')) return 'Windows 10 / 11 (64-bit)'
+  if (p.includes('Mac')) return 'macOS (64-bit)'
+  return `${p || 'Unknown'} (64-bit)`
+}
+
 export default function Step0Welcome({ onNext }: Step0Props) {
-  const checks: [string, boolean][] = [
-    [navigator.platform.startsWith('Linux') ? 'Linux (64-bit)' : navigator.platform.startsWith('Win') ? 'Windows 10 / 11 (64-bit)' : navigator.platform.includes('Mac') ? 'macOS (64-bit)' : navigator.platform + ' (64-bit)', true],
-    ['4 GB free disk space', true],
-    ['Active internet connection', true],
-    ['Algorand-compatible wallet', true]
-  ]
+  const [checks, setChecks] = useState<CheckItem[]>(() => [
+    { label: platformLabel(), ok: true },
+    { label: '4 GB free disk space', ok: null },
+    { label: 'Active internet connection', ok: null },
+    { label: 'Algorand-compatible wallet', ok: true }
+  ])
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const online = typeof navigator !== 'undefined' ? navigator.onLine : true
+      let diskOk = true
+      try {
+        const nav = typeof navigator !== 'undefined' ? navigator : undefined
+        if (nav && nav.storage && typeof nav.storage.estimate === 'function') {
+          const est = await nav.storage.estimate()
+          const free = (est.quota ?? 0) - (est.usage ?? 0)
+          diskOk = free >= 4 * 1024 * 1024 * 1024
+        }
+      } catch {
+        diskOk = true
+      }
+      if (cancelled) return
+      setChecks((prev) =>
+        prev.map((c) => {
+          if (c.label === '4 GB free disk space') return { ...c, ok: diskOk }
+          if (c.label === 'Active internet connection') return { ...c, ok: online }
+          return c
+        })
+      )
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const whatsNew = [
     'Single binary replaces FryHub + 5 installer types',
@@ -63,7 +103,7 @@ export default function Step0Welcome({ onNext }: Step0Props) {
 
       <div style={{ marginBottom: 24 }}>
         <Lbl sx={{ marginBottom: 10 }}>System Checks</Lbl>
-        {checks.map(([l, ok], i) => (
+        {checks.map(({ label, ok }, i) => (
           <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 7 }}>
             <div
               style={{
@@ -71,15 +111,19 @@ export default function Step0Welcome({ onNext }: Step0Props) {
                 height: 16,
                 borderRadius: '50%',
                 flexShrink: 0,
-                background: ok ? 'var(--teal)' : 'var(--red)',
+                background: ok === null ? 'var(--t2)' : ok ? 'var(--teal)' : 'var(--red)',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center'
               }}
             >
-              {ok ? <Check size={9} color="#041f18" strokeWidth={3} /> : <X size={9} color="#fff" strokeWidth={3} />}
+              {ok === null ? null : ok ? (
+                <Check size={9} color="#041f18" strokeWidth={3} />
+              ) : (
+                <X size={9} color="#fff" strokeWidth={3} />
+              )}
             </div>
-            <span style={{ fontFamily: 'var(--fb)', fontSize: 13, color: 'var(--t1)' }}>{l}</span>
+            <span style={{ fontFamily: 'var(--fb)', fontSize: 13, color: 'var(--t1)' }}>{label}</span>
           </div>
         ))}
       </div>

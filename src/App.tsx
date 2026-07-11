@@ -80,11 +80,17 @@ function ErrorBanner({ error }: { error: string }) {
   )
 }
 
-function AppShell({ deviceName, minerKey, deregister }: { deviceName: string; minerKey?: string; deregister: () => Promise<void> }) {
+function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceName: string; minerKey?: string; deregister: () => Promise<void>; deviceError: string | null }) {
   const [page, setPage] = useState<NavPage>('dashboard')
   const { integrations, toggle, error, system, dockerProgress } = useIntegrations()
   const activeCount = integrations.filter((i) => i.enabled).length
   const hasUnhealthy = integrations.some((i) => i.enabled && !i.healthy)
+  const connectivity: 'connected' | 'degraded' | 'disconnected' =
+    (deviceError || error)
+      ? 'disconnected'
+      : (system && system.docker !== 'ready')
+        ? 'degraded'
+        : 'connected'
 
   return (
     <div
@@ -98,7 +104,7 @@ function AppShell({ deviceName, minerKey, deregister }: { deviceName: string; mi
     >
       <Sidebar page={page} onNav={setPage} activeCount={activeCount} hasUnhealthy={hasUnhealthy} deviceName={deviceName} minerKey={minerKey} />
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <TopBar page={page} />
+        <TopBar page={page} connectivity={connectivity} />
         {error && <ErrorBanner error={error} />}
         <div style={{ flex: 1, overflow: 'hidden' }}>
           {page === 'dashboard' && <Dashboard intgs={integrations} />}
@@ -117,7 +123,7 @@ function AppShell({ deviceName, minerKey, deregister }: { deviceName: string; mi
 export default function FEMApp() {
   const [phase, setPhase] = useState<'wizard' | 'app'>('wizard')
   const [deviceName, setDeviceName] = useState('nimble-swift-wolf')
-  const { device, loading, deregister } = useDevice()
+  const { device, loading, deregister, error: deviceError } = useDevice()
 
   if (loading) return null // wait for get_device_info before deciding Wizard vs AppShell
 
@@ -129,5 +135,5 @@ export default function FEMApp() {
     return <Wizard onDone={(name) => { setDeviceName(name); setPhase('app') }} />
   }
 
-  return <AppShell deviceName={deviceName} minerKey={device?.miner_key ?? undefined} deregister={deregister} />
+  return <AppShell deviceName={deviceName} minerKey={device?.miner_key ?? undefined} deregister={deregister} deviceError={deviceError} />
 }

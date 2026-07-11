@@ -15,6 +15,25 @@ function normalizeFemKey(input: string): string | null {
   return `FEM-${body}`
 }
 
+// Stake tiers displayed pre-registration. Multipliers match backend `stake_tiers`
+// served by hardwareapi (unregistered:0x, none:1.0x, 24h:1.5x, 6mo:3.0x).
+// FRY amounts are the Verification Stake specification — sourced from the FEM
+// product spec, NOT the backend (backend serves multipliers only, not amounts).
+// If the product spec changes, update these constants and cross-check with:
+//   main.products.findOne({type_code: 'FEM'}).stake_amount
+//   PoC.versions.findOne({miner_code: 'FEM'}).stake_amount
+type StakeTier = {
+  label: string
+  multiplier: string
+  labelColor: string
+  bg: string
+}
+const STAKE_TIERS: ReadonlyArray<StakeTier> = [
+  { label: '6-month lock · 745 FRY 2.0',   multiplier: '3.0×', labelColor: 'var(--teal)', bg: 'var(--tealg)' },
+  { label: '24-hour lock · 2,235 FRY 2.0', multiplier: '1.5×', labelColor: 'var(--amb)',  bg: 'rgba(240,165,0,.06)' },
+  { label: 'No verification stake',        multiplier: '1.0×', labelColor: 'var(--t1)',   bg: 'transparent' }
+]
+
 export default function Step1Device({ onNext, onBack }: Step1Props) {
   const [key, setKey] = useState('')
   const [addr, setAddr] = useState('')
@@ -168,11 +187,7 @@ export default function Step1Device({ onNext, onBack }: Step1Props) {
         <div style={{ padding: '9px 13px', borderBottom: '1px solid var(--b0)' }}>
           <Lbl>Verification Stakes & Multipliers</Lbl>
         </div>
-        {[
-          ['6-month lock · 745 FRY 2.0', '3.0×', 'var(--teal)', 'var(--tealg)'],
-          ['24-hour lock · 2,235 FRY 2.0', '1.5×', 'var(--amb)', 'rgba(240,165,0,.06)'],
-          ['No verification stake', '1.0×', 'var(--t1)', 'transparent']
-        ].map(([l, m, c, bg], i) => (
+        {STAKE_TIERS.map((tier, i) => (
           <div
             key={i}
             style={{
@@ -180,20 +195,20 @@ export default function Step1Device({ onNext, onBack }: Step1Props) {
               justifyContent: 'space-between',
               alignItems: 'center',
               padding: '9px 13px',
-              borderBottom: i < 2 ? '1px solid var(--b0)' : 'none',
-              background: bg as string
+              borderBottom: i < STAKE_TIERS.length - 1 ? '1px solid var(--b0)' : 'none',
+              background: tier.bg
             }}
           >
-            <span style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--t1)' }}>{l}</span>
+            <span style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--t1)' }}>{tier.label}</span>
             <span
               style={{
                 fontFamily: 'var(--fm)',
                 fontSize: 13,
-                color: c as string,
+                color: tier.labelColor,
                 fontWeight: 500
               }}
             >
-              {m}
+              {tier.multiplier}
             </span>
           </div>
         ))}

@@ -4,6 +4,13 @@ import { APP_VERSION } from '../lib/version'
 
 interface TopBarProps {
   page: NavPage
+  connectivity: 'connected' | 'degraded' | 'disconnected'
+}
+
+const CONNECTIVITY_STYLE = {
+  connected:    { dot: 'run' as const,     label: 'Connected',    col: 'var(--teal)' },
+  degraded:     { dot: 'warn' as const,    label: 'Degraded',     col: 'var(--amb)'  },
+  disconnected: { dot: 'stopped' as const, label: 'Disconnected', col: 'var(--red)'  },
 }
 
 const L: Record<NavPage, string> = {
@@ -22,7 +29,8 @@ const S: Record<NavPage, string> = {
   updates: 'Software version management'
 }
 
-export default function TopBar({ page }: TopBarProps) {
+export default function TopBar({ page, connectivity }: TopBarProps) {
+  const cs = CONNECTIVITY_STYLE[connectivity]
   return (
     <div
       style={{
@@ -50,8 +58,8 @@ export default function TopBar({ page }: TopBarProps) {
         <div style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t2)', marginTop: 1 }}>{S[page]}</div>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-        <Dot status="run" size={5} />
-        <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--teal)' }}>Connected</span>
+        <Dot status={cs.dot} size={5} />
+        <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: cs.col }}>{cs.label}</span>
         <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--t2)', marginLeft: 3 }}>v{APP_VERSION}</span>
       </div>
     </div>
