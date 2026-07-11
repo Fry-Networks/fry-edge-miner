@@ -56,11 +56,11 @@ export default function Step0Welcome({ onNext }: Step0Props) {
   }, [])
 
   const whatsNew = [
-    'Single binary replaces FryHub + 5 installer types',
-    'Toggleable integrations with 20% proportional rewards each',
-    'Tauri v2 Rust backend — 5× lighter than Python',
-    'Ed25519 auto-updates via hardwareapi version checks',
-    "Tauri Secure Storage replaces FryHub's PBKDF2+Fernet"
+    'Clearer registration errors — DNS/carrier-block troubleshooting steps built in',
+    'Status indicator now distinguishes Degraded (local issue) from Disconnected',
+    'Registration retries transient server errors automatically',
+    'Accessibility: toggles and copy buttons now screen-reader friendly',
+    'Expanded automated test coverage (87 end-to-end checks)'
   ]
 
   return (
