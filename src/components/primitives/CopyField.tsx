@@ -15,6 +15,7 @@ export default function CopyField({ val }: CopyFieldProps) {
   return (
     <button
       onClick={copy}
+      aria-label={copied ? 'Copied' : 'Copy to clipboard'}
       style={{
         display: 'flex',
         alignItems: 'center',

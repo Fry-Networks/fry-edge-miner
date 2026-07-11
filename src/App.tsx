@@ -85,10 +85,12 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
   const { integrations, toggle, error, system, dockerProgress } = useIntegrations()
   const activeCount = integrations.filter((i) => i.enabled).length
   const hasUnhealthy = integrations.some((i) => i.enabled && !i.healthy)
+  // Only device/API-level failures mean the backend is unreachable; a failed
+  // integration toggle or a non-ready Docker is a local problem → degraded.
   const connectivity: 'connected' | 'degraded' | 'disconnected' =
-    (deviceError || error)
+    deviceError
       ? 'disconnected'
-      : (system && system.docker !== 'ready')
+      : (error || (system && system.docker !== 'ready'))
         ? 'degraded'
         : 'connected'
 

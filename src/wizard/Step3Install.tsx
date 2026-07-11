@@ -170,7 +170,10 @@ export default function Step3Install({ minerKey, walletAddress, onDone }: Step3P
             fontSize: 13,
             color: 'var(--t1)',
             marginBottom: 24,
-            maxWidth: 320
+            maxWidth: 420,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            textAlign: 'left'
           }}
         >
           {errorMsg}

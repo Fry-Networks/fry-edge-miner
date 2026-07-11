@@ -127,23 +127,27 @@ pub async fn register_device(
         is_installed: Some(true),
     };
 
-    // Exponential backoff retry on connection-level errors (DNS/TLS/timeout); not on HTTP status errors.
+    // Exponential backoff retry on connection-level errors (DNS/TLS/timeout)
+    // and transient server errors (HTTP 5xx); not on 4xx or decode errors.
     let mut reg_result = crate::api::installations::register(&state.api_client, &heartbeat).await;
     for attempt in 1..=3u32 {
-        match &reg_result {
-            Err(crate::api::client::ApiError::Request(_)) => {
-                let delay = 2u64.pow(attempt); // 2s, 4s, 8s
-                tracing::warn!(
-                    attempt = attempt,
-                    max_retries = 3,
-                    delay_secs = delay,
-                    "Registration request failed — retrying"
-                );
-                tokio::time::sleep(Duration::from_secs(delay)).await;
-                reg_result = crate::api::installations::register(&state.api_client, &heartbeat).await;
-            }
-            _ => break, // success or non-Request error — stop retrying
+        let retryable = matches!(
+            &reg_result,
+            Err(crate::api::client::ApiError::Request(_))
+                | Err(crate::api::client::ApiError::HttpStatus(500..=599, _))
+        );
+        if !retryable {
+            break; // success or non-retryable error — stop retrying
         }
+        let delay = 2u64.pow(attempt); // 2s, 4s, 8s
+        tracing::warn!(
+            attempt = attempt,
+            max_retries = 3,
+            delay_secs = delay,
+            "Registration request failed — retrying"
+        );
+        tokio::time::sleep(Duration::from_secs(delay)).await;
+        reg_result = crate::api::installations::register(&state.api_client, &heartbeat).await;
     }
 
     match reg_result {
@@ -252,7 +256,15 @@ pub async fn register_device(
                     cfg.wallet_address = None;
                 })
                 .map_err(|e| e.to_string())?;
-            Err(format!("API registration failed: {}", format_error_chain(&e)))
+            // Connection-level failures get a classified, actionable message
+            // (UB-2: some carriers/DNS providers block *.frynetworks.com).
+            let msg = match &e {
+                crate::api::client::ApiError::Request(req_err) => {
+                    crate::api::error_classify::user_facing_registration_error(req_err)
+                }
+                _ => format!("API registration failed: {}", format_error_chain(&e)),
+            };
+            Err(msg)
         }
     }
 }

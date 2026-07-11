@@ -208,7 +208,7 @@ export default function IntCard({ intg, onToggle, dockerNote }: IntCardProps) {
             )}
           </div>
         </div>
-        <Tog checked={enabled} onChange={() => onToggle(id)} />
+        <Tog checked={enabled} onChange={() => onToggle(id)} label={`Toggle ${name}`} />
       </div>
       <div
         style={{

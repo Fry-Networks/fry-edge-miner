@@ -2,13 +2,16 @@ interface TogProps {
   checked: boolean
   onChange: (val: boolean) => void
   disabled?: boolean
+  label?: string
 }
 
-export default function Tog({ checked, onChange, disabled }: TogProps) {
+export default function Tog({ checked, onChange, disabled, label }: TogProps) {
   return (
     <button
       onClick={() => !disabled && onChange(!checked)}
       disabled={disabled}
+      aria-label={label ?? 'toggle'}
+      aria-pressed={checked}
       style={{
         width: 42,
         height: 24,

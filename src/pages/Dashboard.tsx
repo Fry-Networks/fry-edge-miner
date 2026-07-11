@@ -155,7 +155,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
           </div>
           <div style={{ marginBottom: 12 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-              <span style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t1)' }}>Proportion</span>
+              <span style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t1)' }}>Active</span>
               <span style={{ fontFamily: 'var(--fm)', fontSize: 11, color: 'var(--teal)' }}>{active.length}/5</span>
             </div>
             <div style={{ height: 4, background: 'var(--b1)', borderRadius: 2, overflow: 'hidden' }}>

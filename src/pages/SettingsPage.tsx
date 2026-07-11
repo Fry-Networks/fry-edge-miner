@@ -223,6 +223,7 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf', deregis
         <SettingRow label="Start on boot" sub="Launch FEM when Windows starts">
           <Tog
             checked={boot}
+            label="Start on boot"
             onChange={(v) => {
               setBoot(v)
               savePrefs({ boot: v })
@@ -232,6 +233,7 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf', deregis
         <SettingRow label="Minimize to tray" sub="Keep running in the system tray when closed">
           <Tog
             checked={tray}
+            label="Minimize to tray"
             onChange={(v) => {
               setTray(v)
               savePrefs({ tray: v })
@@ -241,6 +243,7 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf', deregis
         <SettingRow label="Auto-update" sub="Automatically apply FEM updates when available">
           <Tog
             checked={auto}
+            label="Auto-update"
             onChange={(v) => {
               setAuto(v)
               savePrefs({ auto: v })
@@ -250,6 +253,7 @@ export default function SettingsPage({ deviceName = 'nimble-swift-wolf', deregis
         <SettingRow label="Notifications" sub="Desktop notifications for reward events and alerts">
           <Tog
             checked={notif}
+            label="Notifications"
             onChange={(v) => {
               setNotif(v)
               savePrefs({ notif: v })
