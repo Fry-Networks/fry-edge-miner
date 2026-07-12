@@ -1,6 +1,6 @@
 {
   "productName": "Fry Edge Miner",
-  "version": "0.2.24",
+  "version": "0.2.25",
   "build": {
     "beforeBuildCommand": "npm run build",
     "beforeDevCommand": "npm run dev",
