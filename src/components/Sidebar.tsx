@@ -34,7 +34,7 @@ function truncateMinerKey(key: string): string {
   return `FEM-${body.slice(0, 4).toLowerCase()}…${body.slice(-4).toLowerCase()}`
 }
 
-export default function Sidebar({ page, onNav, activeCount, hasUnhealthy, deviceName = 'nimble-swift-wolf', minerKey }: SidebarProps) {
+export default function Sidebar({ page, onNav, activeCount, hasUnhealthy, deviceName = 'FEM Device', minerKey }: SidebarProps) {
   const minerKeyDisplay = truncateMinerKey(minerKey ?? '')
   return (
     <div

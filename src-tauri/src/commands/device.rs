@@ -22,6 +22,7 @@ fn format_error_chain(err: &dyn std::error::Error) -> String {
 pub struct DeviceInfo {
     pub miner_key: Option<String>,
     pub wallet_address: Option<String>,
+    pub device_name: Option<String>,
     pub registered: bool,
 }
 
@@ -84,6 +85,7 @@ pub async fn get_device_info(
         registered: miner_key.is_some(),
         miner_key,
         wallet_address: wallet,
+        device_name: config.device_name.clone(),
     })
 }
 
@@ -91,6 +93,7 @@ pub async fn get_device_info(
 pub async fn register_device(
     wallet: String,
     miner_key: Option<String>,
+    device_name: Option<String>,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<String, String> {
     crate::config::wallet::validate_address(&wallet).map_err(|e| e.to_string())?;
@@ -104,12 +107,22 @@ pub async fn register_device(
     };
     let install_id = generate_install_id();
 
-    // Save miner_key + wallet to config first (install_id saved after API success)
+    // Snapshot prior state for rollback on failure
+    let prior_config = state.config.get();
+    let prior_miner_key = prior_config.miner_key.clone();
+    let prior_wallet = prior_config.wallet_address.clone();
+    let prior_device_token = prior_config.device_token.clone();
+    let prior_install_id = prior_config.install_id.clone();
+
+    // Save miner_key + wallet + device_name to config first (install_id saved after API success)
     state
         .config
         .update(|cfg| {
             cfg.miner_key = Some(miner_key.clone());
             cfg.wallet_address = Some(wallet.clone());
+            if device_name.is_some() {
+                cfg.device_name = device_name.clone();
+            }
         })
         .map_err(|e| e.to_string())?;
 
@@ -167,8 +180,10 @@ pub async fn register_device(
                     .config
                     .update(|cfg| {
                         cfg.install_id = Some(install_id);
+                        cfg.device_token = None;
                     })
                     .map_err(|e| e.to_string())?;
+                state.api_client.set_bearer_token(state.config.get().effective_api_token());
             }
 
             tracing::info!(
@@ -248,19 +263,27 @@ pub async fn register_device(
             Ok(miner_key)
         }
         Err(e) => {
-            // Roll back config on registration failure
+            // Restore prior state on registration failure
             state
                 .config
                 .update(|cfg| {
-                    cfg.miner_key = None;
-                    cfg.wallet_address = None;
+                    cfg.miner_key = prior_miner_key.clone();
+                    cfg.wallet_address = prior_wallet.clone();
+                    cfg.device_token = prior_device_token.clone();
+                    cfg.install_id = prior_install_id.clone();
                 })
                 .map_err(|e| e.to_string())?;
+            // Reset API client bearer token to reflect restored state
+            state.api_client.set_bearer_token(state.config.get().effective_api_token());
+
             // Connection-level failures get a classified, actionable message
             // (UB-2: some carriers/DNS providers block *.frynetworks.com).
             let msg = match &e {
                 crate::api::client::ApiError::Request(req_err) => {
                     crate::api::error_classify::user_facing_registration_error(req_err)
+                }
+                crate::api::client::ApiError::HttpStatus(code @ (401 | 403), _) => {
+                    format!("Server rejected the request (HTTP {}). Your saved registration was NOT changed. If this persists, check your network/VPN or dashboard.frynetworks.com status, then retry.", code)
                 }
                 _ => format!("API registration failed: {}", format_error_chain(&e)),
             };
@@ -294,6 +317,22 @@ pub async fn deregister_device(
     state.api_client.set_bearer_token(cfg.effective_api_token());
 
     tracing::info!("Device deregistered");
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_device_name(
+    name: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    state
+        .config
+        .update(|cfg| {
+            cfg.device_name = Some(name.clone());
+        })
+        .map_err(|e| e.to_string())?;
+
+    tracing::info!(name = %name, "Device name set");
     Ok(())
 }
 

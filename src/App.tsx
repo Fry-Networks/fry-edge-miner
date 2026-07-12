@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { ChevronDown, ChevronUp } from 'lucide-react'
 import Sidebar, { type NavPage } from './components/Sidebar'
 import TopBar from './components/TopBar'
@@ -10,6 +10,8 @@ import Updates from './pages/Updates'
 import Wizard from './wizard/Wizard'
 import { useIntegrations } from './hooks/useIntegrations'
 import { useDevice } from './hooks/useDevice'
+import { makeName } from './lib/names'
+import { isTauri } from './lib/tauri'
 
 // Truncated error banner with expandable details — raw multi-line backend
 // output (e.g. Docker logs) must never flood the layout.
@@ -124,8 +126,29 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
 
 export default function FEMApp() {
   const [phase, setPhase] = useState<'wizard' | 'app'>('wizard')
-  const [deviceName, setDeviceName] = useState('nimble-swift-wolf')
-  const { device, loading, deregister, error: deviceError } = useDevice()
+  const [deviceName, setDeviceName] = useState('')
+  const { device, loading, deregister, setDeviceName: setDeviceNameViaBackend, error: deviceError } = useDevice()
+
+  useEffect(() => {
+    if (!loading && device) {
+      if (device.device_name) {
+        // Use stored name
+        setDeviceName(device.device_name)
+      } else if (device.registered && !deviceName) {
+        // Device is registered but has no stored name — generate one and backfill
+        const generatedName = makeName()
+        setDeviceName(generatedName)
+        if (isTauri()) {
+          setDeviceNameViaBackend(generatedName).catch((e) => {
+            console.warn('Failed to persist device name:', e)
+          })
+        }
+      } else if (!device.registered && !deviceName) {
+        // Device not registered yet — use fallback
+        setDeviceName('FEM Device')
+      }
+    }
+  }, [device, loading, deviceName, setDeviceNameViaBackend])
 
   if (loading) return null // wait for get_device_info before deciding Wizard vs AppShell
 
@@ -137,5 +160,5 @@ export default function FEMApp() {
     return <Wizard onDone={(name) => { setDeviceName(name); setPhase('app') }} />
   }
 
-  return <AppShell deviceName={deviceName} minerKey={device?.miner_key ?? undefined} deregister={deregister} deviceError={deviceError} />
+  return <AppShell deviceName={deviceName || 'FEM Device'} minerKey={device?.miner_key ?? undefined} deregister={deregister} deviceError={deviceError} />
 }

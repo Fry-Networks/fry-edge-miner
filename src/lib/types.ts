@@ -78,6 +78,7 @@ export interface PocSlot {
 export interface DeviceInfo {
   miner_key: string | null
   wallet_address: string | null
+  device_name: string | null
   registered: boolean
 }
 

@@ -7,6 +7,7 @@ import { isTauri } from '../lib/tauri'
 const BROWSER_MOCK_DEVICE: DeviceInfo = {
   miner_key: 'FEM-BROWSER-PREVIEW-MODE',
   wallet_address: 'BROWSER-PREVIEW-NO-WALLET',
+  device_name: 'preview-device',
   registered: true,
 }
 
@@ -15,6 +16,7 @@ const BROWSER_MOCK_DEVICE: DeviceInfo = {
 const BROWSER_MOCK_UNREGISTERED: DeviceInfo = {
   miner_key: '',
   wallet_address: '',
+  device_name: null,
   registered: false,
 }
 
@@ -49,9 +51,9 @@ export function useDevice() {
   }, [fetch])
 
   const register = useCallback(
-    async (wallet: string, minerKey?: string) => {
+    async (wallet: string, minerKey?: string, deviceName?: string) => {
       try {
-        const result = await invoke<string>('register_device', { wallet, minerKey })
+        const result = await invoke<string>('register_device', { wallet, minerKey, deviceName })
         await fetch()
         return result
       } catch (e) {
@@ -72,5 +74,18 @@ export function useDevice() {
     }
   }, [fetch])
 
-  return { device, loading, error, register, deregister, refetch: fetch }
+  const setDeviceName = useCallback(
+    async (name: string) => {
+      try {
+        await invoke('set_device_name', { name })
+        await fetch()
+      } catch (e) {
+        setError(extractErrorMessage(e))
+        throw e
+      }
+    },
+    [fetch]
+  )
+
+  return { device, loading, error, register, deregister, setDeviceName, refetch: fetch }
 }

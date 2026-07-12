@@ -19,6 +19,8 @@ pub struct FemConfig {
     pub api_token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
     #[serde(default = "default_true")]
     pub start_on_boot: bool,
     #[serde(default = "default_true")]
@@ -61,6 +63,7 @@ impl Default for FemConfig {
             api_base_url: "https://hardwareapi.frynetworks.com".to_string(),
             api_token: default_api_token(),
             device_token: None,
+            device_name: None,
             start_on_boot: true,
             minimize_to_tray: true,
             auto_update: true,

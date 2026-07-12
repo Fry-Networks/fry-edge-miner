@@ -53,13 +53,7 @@ async fn fetch_credentials_with_retry(
 }
 
 fn docker_available() -> bool {
-    crate::supervisor::platform::command("docker")
-        .arg("info")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    super::docker_manager::docker_cli_probe_bounded() == Some(true)
 }
 
 fn compose_file() -> PathBuf {

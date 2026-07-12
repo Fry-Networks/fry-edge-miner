@@ -447,6 +447,7 @@ fn main() {
             commands::device::get_device_info,
             commands::device::register_device,
             commands::device::deregister_device,
+            commands::device::set_device_name,
             commands::rewards::get_reward_summary,
             commands::rewards::get_poc_slots,
             commands::settings::get_settings,

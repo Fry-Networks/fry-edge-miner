@@ -55,7 +55,7 @@ interface SettingsPageProps {
   deregister: () => Promise<void>
 }
 
-export default function SettingsPage({ deviceName = 'nimble-swift-wolf', deregister }: SettingsPageProps) {
+export default function SettingsPage({ deviceName = 'FEM Device', deregister }: SettingsPageProps) {
   const { device, register, refetch } = useDevice()
   const [boot, setBoot] = useState(true)
   const [tray, setTray] = useState(true)

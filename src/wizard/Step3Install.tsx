@@ -24,7 +24,7 @@ export default function Step3Install({ minerKey, walletAddress, onDone }: Step3P
 
   useEffect(() => {
     let cancelled = false
-    register(walletAddress, minerKey ?? undefined)
+    register(walletAddress, minerKey ?? undefined, deviceName)
       .then(() => {
         if (!cancelled) setStatus('done')
       })
@@ -35,7 +35,7 @@ export default function Step3Install({ minerKey, walletAddress, onDone }: Step3P
         }
       })
     return () => { cancelled = true }
-  }, [register, walletAddress, minerKey, attempt])
+  }, [register, walletAddress, minerKey, deviceName, attempt])
 
   if (status === 'done') {
     return (

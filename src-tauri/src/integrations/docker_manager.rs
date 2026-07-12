@@ -30,19 +30,42 @@ pub enum DockerStatus {
     VirtualizationDisabled,
 }
 
-/// Probe the docker CLI: Some(true) = daemon ready, Some(false) = CLI present
-/// but daemon unreachable, None = CLI missing entirely (spawn failed).
-fn docker_cli_probe() -> Option<bool> {
-    match crate::supervisor::platform::command("docker")
+/// Bounded docker probe with 3-second timeout. Spawn `docker info`, poll every 100ms
+/// for status; kill on timeout. Returns Some(true/false) on completion, None on spawn error.
+pub fn docker_cli_probe_bounded() -> Option<bool> {
+    const TIMEOUT_SECS: u64 = 3;
+    const POLL_INTERVAL_MS: u64 = 100;
+    const MAX_POLLS: u64 = (TIMEOUT_SECS * 1000) / POLL_INTERVAL_MS;
+
+    let mut child = crate::supervisor::platform::command("docker")
         .arg("info")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-    {
-        Ok(s) if s.success() => Some(true),
-        Ok(_) => Some(false),
-        Err(_) => None,
+        .spawn()
+        .ok()?;
+
+    for _poll in 0..MAX_POLLS {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            Ok(None) => {
+                std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
+            }
+            Err(_) => return None,
+        }
     }
+
+    // Timeout reached — kill and reap the child so it can't linger as a zombie.
+    let _ = child.kill();
+    let _ = child.wait();
+    tracing::warn!("Docker probe timed out after {} seconds", TIMEOUT_SECS);
+    None
+}
+
+/// Probe the docker CLI: Some(true) = daemon ready, Some(false) = CLI present
+/// but daemon unreachable, None = CLI missing entirely (spawn failed).
+/// Uses bounded probe with 3-second timeout to prevent hangs.
+fn docker_cli_probe() -> Option<bool> {
+    docker_cli_probe_bounded()
 }
 
 /// Check if Docker daemon is running by attempting `docker info`.

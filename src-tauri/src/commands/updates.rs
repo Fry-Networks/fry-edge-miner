@@ -25,7 +25,11 @@ pub async fn check_updates(
     let mut updates = Vec::new();
 
     // FEM self-update via the Tauri updater plugin.
-    match app.updater() {
+    match app
+        .updater_builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
         Ok(updater) => match updater.check().await {
             Ok(Some(update)) => {
                 let current = env!("CARGO_PKG_VERSION").to_string();
@@ -175,7 +179,11 @@ pub async fn install_update(
         if id != "fem" {
             return Err(format!("Unknown app id '{}'; only 'fem' is supported", id));
         }
-        let updater = app.updater().map_err(|e| e.to_string())?;
+        let updater = app
+            .updater_builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| e.to_string())?;
         let update = updater
             .check()
             .await
