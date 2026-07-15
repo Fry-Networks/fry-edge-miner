@@ -201,3 +201,16 @@ pub struct RewardConfig {
     #[serde(default)]
     pub stake_token_name: String,
 }
+
+
+/// Live PoC/lease reporting health, surfaced to the UI (B2).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ReportingStatus {
+    pub registered: bool,
+    pub last_tick_at: Option<String>,
+    pub last_poc_ok_at: Option<String>,
+    pub last_poc_error: Option<String>,
+    pub consecutive_poc_failures: u32,
+    pub lease_active: bool,
+    pub lease_error: Option<String>,
+}

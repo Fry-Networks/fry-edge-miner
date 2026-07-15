@@ -85,6 +85,7 @@ export interface DeviceInfo {
 export interface FemConfig {
   miner_key: string | null
   wallet_address: string | null
+  config_warning?: string | null
   integrations_enabled: Record<string, boolean>
   api_base_url: string
   start_on_boot?: boolean

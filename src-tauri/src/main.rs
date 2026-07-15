@@ -32,6 +32,7 @@ pub struct AppState {
     pub cached_reward_config: Arc<RwLock<Option<crate::api::types::RewardConfig>>>,
     pub cached_stake_tiers: Arc<RwLock<Option<HashMap<String, crate::api::types::StakeTier>>>>,
     pub cached_verified_status: Arc<RwLock<Option<crate::api::types::VerifiedStatus>>>,
+    pub reporting_status: Arc<RwLock<crate::api::types::ReportingStatus>>,
 }
 
 fn main() {
@@ -45,6 +46,10 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
             use tauri::Manager;
 
@@ -57,8 +62,7 @@ fn main() {
                 .path()
                 .app_data_dir()
                 .expect("failed to resolve app data dir");
-            let config_store =
-                ConfigStore::new(config_dir.clone()).expect("failed to initialize config store");
+            let config_store = ConfigStore::new(config_dir.clone());
             let config_store = Arc::new(config_store);
 
             // API client (initial bearer token is the configured token; per-device token applied after registration)
@@ -289,6 +293,48 @@ fn main() {
                 });
             }
 
+            let reporting_status =
+                Arc::new(RwLock::new(crate::api::types::ReportingStatus::default()));
+
+            // B6: reconcile OS autostart with the persisted setting at startup.
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                let autolaunch = app.autolaunch();
+                let want = cfg.start_on_boot;
+                let result = if want {
+                    autolaunch.enable()
+                } else if autolaunch.is_enabled().unwrap_or(false) {
+                    autolaunch.disable()
+                } else {
+                    Ok(())
+                };
+                match result {
+                    Ok(_) => tracing::info!(start_on_boot = want, "Autostart reconciled"),
+                    Err(e) => tracing::warn!(error = %e, "Autostart reconcile failed"),
+                }
+            }
+
+            // B7: purge legacy PyInstaller _MEI* temp dirs from the pre-Tauri
+            // FEM era — stale caches confused key/wallet recovery.
+            #[cfg(target_os = "windows")]
+            tauri::async_runtime::spawn(async move {
+                let Ok(tmp) = std::env::var("TEMP") else { return };
+                let Ok(entries) = std::fs::read_dir(&tmp) else { return };
+                let mut purged = 0u32;
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with("_MEI") && entry.path().is_dir() {
+                        match std::fs::remove_dir_all(entry.path()) {
+                            Ok(_) => purged += 1,
+                            Err(e) => tracing::debug!(dir = name.as_str(), error = %e, "_MEI purge skipped (in use?)"),
+                        }
+                    }
+                }
+                if purged > 0 {
+                    tracing::info!(purged = purged, "Legacy _MEI* temp dirs removed");
+                }
+            });
+
             // PoC reporter + lease renewal timer (every 10 minutes)
             let poc_config = config_store.clone();
             let poc_registry = registry.clone();
@@ -298,6 +344,7 @@ fn main() {
             let poc_stake_tiers = cached_stake_tiers.clone();
             let poc_verified_status = cached_verified_status.clone();
             let poc_cache_loop = poc_cache.clone();
+            let poc_reporting = reporting_status.clone();
             tauri::async_runtime::spawn(async move {
                 // Verify runtime supports block_in_place — panics at first poll if
                 // current_thread, not 10 min later in the reward path. Same worker
@@ -316,11 +363,35 @@ fn main() {
                             poc::reporter::build_poc_doc(key, &reg, &health_map)
                         };
                         let wrapped = api::types::PocDocumentWrapper { document: doc };
-                        if let Err(e) = poc_client
+                        // B2: retry once after a short delay, then record the
+                        // outcome so the UI shows truthful reporting state.
+                        let mut poc_result = poc_client
                             .put_json(&format!("/PoC/{}/hardware", key), &wrapped)
-                            .await
+                            .await;
+                        if let Err(ref e) = poc_result {
+                            tracing::warn!(error = %e, "PoC submission failed — retrying once");
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            poc_result = poc_client
+                                .put_json(&format!("/PoC/{}/hardware", key), &wrapped)
+                                .await;
+                        }
                         {
-                            tracing::warn!(error = %e, "PoC submission failed");
+                            let mut st = poc_reporting.write().unwrap();
+                            st.registered = true;
+                            st.last_tick_at = Some(chrono::Utc::now().to_rfc3339());
+                            match &poc_result {
+                                Ok(_) => {
+                                    st.last_poc_ok_at = Some(chrono::Utc::now().to_rfc3339());
+                                    st.last_poc_error = None;
+                                    st.consecutive_poc_failures = 0;
+                                }
+                                Err(e) => {
+                                    st.last_poc_error = Some(e.to_string());
+                                    st.consecutive_poc_failures =
+                                        st.consecutive_poc_failures.saturating_add(1);
+                                    tracing::warn!(error = %e, failures = st.consecutive_poc_failures, "PoC submission failed after retry");
+                                }
+                            }
                         }
                         if let Some(slot) = wrapped.document.slots.first() {
                             if let Err(e) = poc_cache_loop.append(slot) {
@@ -332,36 +403,60 @@ fn main() {
                         if let Some(ref install_id) = cfg.install_id {
                             let action = api::types::LeaseAction::default();
                             // Try renew first; if denied (no active lease), acquire
-                            match api::leases::renew(&poc_client, key, install_id, &action).await {
-                                Ok(resp) if resp.granted => {
-                                    tracing::debug!(
-                                        miner_key = key.as_str(),
-                                        ttl = resp.ttl_seconds,
-                                        "Lease renewed"
-                                    );
-                                }
-                                _ => {
-                                    // Renew failed or denied — try acquire
-                                    match api::leases::acquire(&poc_client, key, install_id, &action).await {
-                                        Ok(resp) if resp.granted => {
-                                            tracing::info!(
-                                                miner_key = key.as_str(),
-                                                "Lease acquired"
-                                            );
+                            let lease_outcome: Result<bool, String> =
+                                match api::leases::renew(&poc_client, key, install_id, &action).await {
+                                    Ok(resp) if resp.granted => {
+                                        tracing::debug!(
+                                            miner_key = key.as_str(),
+                                            ttl = resp.ttl_seconds,
+                                            "Lease renewed"
+                                        );
+                                        Ok(true)
+                                    }
+                                    _ => {
+                                        // Renew failed or denied — try acquire
+                                        match api::leases::acquire(&poc_client, key, install_id, &action).await {
+                                            Ok(resp) if resp.granted => {
+                                                tracing::info!(
+                                                    miner_key = key.as_str(),
+                                                    "Lease acquired"
+                                                );
+                                                Ok(true)
+                                            }
+                                            Ok(resp) => {
+                                                tracing::warn!(
+                                                    miner_key = key.as_str(),
+                                                    error_code = resp.error_code.as_deref().unwrap_or("none"),
+                                                    "Lease denied"
+                                                );
+                                                Err(format!(
+                                                    "lease denied ({})",
+                                                    resp.error_code.as_deref().unwrap_or("no active lease")
+                                                ))
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(error = %e, "Lease acquire failed");
+                                                Err(e.to_string())
+                                            }
                                         }
-                                        Ok(resp) => {
-                                            tracing::warn!(
-                                                miner_key = key.as_str(),
-                                                error_code = resp.error_code.as_deref().unwrap_or("none"),
-                                                "Lease denied"
-                                            );
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "Lease acquire failed");
-                                        }
+                                    }
+                                };
+                            {
+                                let mut st = poc_reporting.write().unwrap();
+                                match lease_outcome {
+                                    Ok(_) => {
+                                        st.lease_active = true;
+                                        st.lease_error = None;
+                                    }
+                                    Err(msg) => {
+                                        st.lease_active = false;
+                                        st.lease_error = Some(msg);
                                     }
                                 }
                             }
+                            // Surface the fresh snapshot to the UI every tick (B2).
+                            let snapshot = poc_reporting.read().unwrap().clone();
+                            crate::events::emit("reporting-status", snapshot);
                         }
 
                         // Refresh base_reward AND reward config from /versions/FEM
@@ -425,6 +520,7 @@ fn main() {
 
             // Manage shared state
             app.manage(AppState {
+                reporting_status,
                 config: config_store,
                 registry,
                 supervisor,
@@ -448,6 +544,7 @@ fn main() {
             commands::device::register_device,
             commands::device::deregister_device,
             commands::device::set_device_name,
+            commands::device::get_reporting_status,
             commands::rewards::get_reward_summary,
             commands::rewards::get_poc_slots,
             commands::settings::get_settings,

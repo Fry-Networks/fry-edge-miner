@@ -24,7 +24,23 @@ export default function Step3Install({ minerKey, walletAddress, onDone }: Step3P
 
   useEffect(() => {
     let cancelled = false
-    register(walletAddress, minerKey ?? undefined, deviceName)
+    // B8: hard cap — the spinner must never run forever. The backend's own
+    // retry ladder tops out well under this, so a hit here means a hung IPC
+    // or network path; surface a distinct timeout state with Retry.
+    const REGISTER_TIMEOUT_MS = 120_000
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              'Registration timed out after 120 seconds.\nThe request may still be processing — wait a moment, then press Retry. If it keeps timing out, check your connection (some networks block *.frynetworks.com).'
+            )
+          ),
+        REGISTER_TIMEOUT_MS
+      )
+    })
+    Promise.race([register(walletAddress, minerKey ?? undefined, deviceName), timeout])
       .then(() => {
         if (!cancelled) setStatus('done')
       })
@@ -34,7 +50,13 @@ export default function Step3Install({ minerKey, walletAddress, onDone }: Step3P
           setStatus('error')
         }
       })
-    return () => { cancelled = true }
+      .finally(() => {
+        if (timer) clearTimeout(timer)
+      })
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
   }, [register, walletAddress, minerKey, deviceName, attempt])
 
   if (status === 'done') {

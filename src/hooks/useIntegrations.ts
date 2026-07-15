@@ -81,16 +81,38 @@ export function useIntegrations() {
       setLoading(false)
       return
     }
-    try {
-      const data = await invoke<IntegrationStatus[]>('get_integrations')
-      setIntegrations(toFrontend(data))
-      setError(null)
-    } catch (e) {
-      console.warn('get_integrations failed:', e)
-      setError(String(e))
-    } finally {
-      setLoading(false)
+    // B4: retry with backoff, then fall back to the last-good cached list so
+    // a transient IPC/backend hiccup can't blank the integrations page.
+    const attempts = [0, 1000, 3000]
+    let lastErr: unknown = null
+    for (const delay of attempts) {
+      if (delay > 0) await new Promise((r) => setTimeout(r, delay))
+      try {
+        const data = await invoke<IntegrationStatus[]>('get_integrations')
+        setIntegrations(toFrontend(data))
+        setError(null)
+        lastErr = null
+        try {
+          localStorage.setItem('fem.integrations.lastGood', JSON.stringify(data))
+        } catch { /* storage unavailable — cache skipped */ }
+        break
+      } catch (e) {
+        lastErr = e
+      }
     }
+    if (lastErr !== null) {
+      console.warn('get_integrations failed after retries:', lastErr)
+      setError(String(lastErr))
+      setIntegrations((prev) => {
+        if (prev.length > 0) return prev
+        try {
+          const cached = localStorage.getItem('fem.integrations.lastGood')
+          if (cached) return toFrontend(JSON.parse(cached) as IntegrationStatus[])
+        } catch { /* ignore bad cache */ }
+        return prev
+      })
+    }
+    setLoading(false)
   }, [])
 
   const fetchSystem = useCallback(async () => {

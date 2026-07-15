@@ -6,6 +6,7 @@ import PoCGrid from '../components/PoCGrid'
 import StatCard from '../components/StatCard'
 import Divider from '../components/primitives/Divider'
 import { useRewards } from '../hooks/useRewards'
+import { useReporting } from '../hooks/useReporting'
 
 interface DashboardIntegration {
   id: string
@@ -22,6 +23,14 @@ interface DashboardProps {
 
 export default function Dashboard({ intgs }: DashboardProps) {
   const { rewards } = useRewards()
+  const reporting = useReporting()
+  // B2: truthful reporting banner — red when PoC/lease is persistently
+  // failing, amber during transient retries.
+  const notReporting =
+    !!reporting?.registered &&
+    (reporting.consecutive_poc_failures >= 3 || (!reporting.lease_active && !!reporting.lease_error))
+  const reportingDegraded =
+    !!reporting?.registered && !notReporting && reporting.consecutive_poc_failures > 0
   const summary = rewards.summary
   const active = intgs.filter((i) => i.enabled)
   const pct = intgs.length > 0 ? ((active.length / intgs.length) * 100).toFixed(0) : '0'
@@ -42,6 +51,38 @@ export default function Dashboard({ intgs }: DashboardProps) {
         height: '100%'
       }}
     >
+      {notReporting && (
+        <div
+          style={{
+            padding: '10px 14px',
+            background: 'var(--red)18',
+            border: '1px solid var(--red)40',
+            borderRadius: 'var(--rad)',
+            fontFamily: 'var(--fb)',
+            fontSize: 12,
+            color: 'var(--red)'
+          }}
+        >
+          <strong>Not reporting to Fry Networks.</strong>{' '}
+          {reporting?.last_poc_error || reporting?.lease_error || 'PoC submissions are failing.'}{' '}
+          Rewards pause while reporting is down — the status below may be stale.
+        </div>
+      )}
+      {reportingDegraded && (
+        <div
+          style={{
+            padding: '10px 14px',
+            background: 'var(--amb)18',
+            border: '1px solid var(--amb)40',
+            borderRadius: 'var(--rad)',
+            fontFamily: 'var(--fb)',
+            fontSize: 12,
+            color: 'var(--amb)'
+          }}
+        >
+          Reporting hiccup — retrying automatically. Last error: {reporting?.last_poc_error}
+        </div>
+      )}
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
         <StatCard
           Icon={Puzzle}

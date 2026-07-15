@@ -114,6 +114,21 @@ pub async fn register_device(
     let prior_device_token = prior_config.device_token.clone();
     let prior_install_id = prior_config.install_id.clone();
 
+    // B9: idempotent re-registration — if this exact binding already exists
+    // locally (same key, same wallet, install + token present) the device is
+    // already registered; reuse it instead of re-running the flow.
+    if prior_miner_key.as_deref() == Some(miner_key.as_str())
+        && prior_wallet.as_deref() == Some(wallet.as_str())
+        && prior_install_id.is_some()
+        && prior_device_token.is_some()
+    {
+        tracing::info!(
+            miner_key = miner_key.as_str(),
+            "Registration idempotent — existing binding reused"
+        );
+        return Ok(miner_key);
+    }
+
     // Save miner_key + wallet + device_name to config first (install_id saved after API success)
     state
         .config
@@ -282,6 +297,17 @@ pub async fn register_device(
                 crate::api::client::ApiError::Request(req_err) => {
                     crate::api::error_classify::user_facing_registration_error(req_err)
                 }
+                crate::api::client::ApiError::HttpStatus(code, body)
+                    if *code == 409
+                        || body.to_lowercase().contains("already registered")
+                        || body.contains("IP_ALREADY_REGISTERED") =>
+                {
+                    if body.contains("IP_ALREADY_REGISTERED") {
+                        format!("IP conflict: another miner is already registered from this network address (HTTP {}).\nIf you run multiple devices behind one IP, contact Fry Networks support.\n\nServer detail: {}", code, body)
+                    } else {
+                        format!("This device key is already registered (HTTP {}).\nIf this is your device, your existing registration is intact — no further action is needed. Open Settings to confirm your miner key and wallet.\n\nServer detail: {}", code, body)
+                    }
+                }
                 crate::api::client::ApiError::HttpStatus(code @ (401 | 403), _) => {
                     format!("Server rejected the request (HTTP {}). Your saved registration was NOT changed. If this persists, check your network/VPN or dashboard.frynetworks.com status, then retry.", code)
                 }
@@ -401,4 +427,12 @@ pub async fn attempt_device_token_migration(
             );
         }
     }
+}
+
+
+#[tauri::command]
+pub async fn get_reporting_status(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<crate::api::types::ReportingStatus, String> {
+    Ok(state.reporting_status.read().unwrap().clone())
 }

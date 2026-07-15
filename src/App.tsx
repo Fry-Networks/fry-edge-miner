@@ -12,6 +12,7 @@ import { useIntegrations } from './hooks/useIntegrations'
 import { useDevice } from './hooks/useDevice'
 import { makeName } from './lib/names'
 import { isTauri } from './lib/tauri'
+import { invoke } from '@tauri-apps/api/core'
 
 // Truncated error banner with expandable details — raw multi-line backend
 // output (e.g. Docker logs) must never flood the layout.
@@ -82,9 +83,57 @@ function ErrorBanner({ error }: { error: string }) {
   )
 }
 
+// B4: shown when the integrations list is empty AND the loader errored —
+// a visible dead-end with a retry, never a silent blank page.
+function IntegrationsErrorCard({ error, onRetry }: { error: string; onRetry: () => void }) {
+  return (
+    <div
+      style={{
+        padding: '40px 24px',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: 12,
+        textAlign: 'center'
+      }}
+    >
+      <div style={{ fontFamily: 'var(--fh)', fontWeight: 700, fontSize: 16, color: 'var(--red)' }}>
+        Integrations failed to load
+      </div>
+      <div
+        style={{
+          fontFamily: 'var(--fb)',
+          fontSize: 12,
+          color: 'var(--t1)',
+          maxWidth: 420,
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word'
+        }}
+      >
+        {error}
+      </div>
+      <button
+        onClick={onRetry}
+        style={{
+          fontFamily: 'var(--fb)',
+          fontSize: 13,
+          padding: '8px 20px',
+          borderRadius: 'var(--radsm)',
+          border: '1px solid var(--teal)',
+          background: 'var(--tealg)',
+          color: 'var(--teal)',
+          cursor: 'pointer'
+        }}
+      >
+        Retry
+      </button>
+    </div>
+  )
+}
+
 function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceName: string; minerKey?: string; deregister: () => Promise<void>; deviceError: string | null }) {
   const [page, setPage] = useState<NavPage>('dashboard')
-  const { integrations, toggle, error, system, dockerProgress } = useIntegrations()
+  const { integrations, toggle, error, system, dockerProgress, refetch } = useIntegrations()
   const activeCount = integrations.filter((i) => i.enabled).length
   const hasUnhealthy = integrations.some((i) => i.enabled && !i.healthy)
   // Only device/API-level failures mean the backend is unreachable; a failed
@@ -112,9 +161,12 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
         {error && <ErrorBanner error={error} />}
         <div style={{ flex: 1, overflow: 'hidden' }}>
           {page === 'dashboard' && <Dashboard intgs={integrations} />}
-          {page === 'integrations' && (
-            <Integrations intgs={integrations} onToggle={toggle} system={system} dockerProgress={dockerProgress} />
-          )}
+          {page === 'integrations' &&
+            (integrations.length === 0 && error ? (
+              <IntegrationsErrorCard error={error} onRetry={refetch} />
+            ) : (
+              <Integrations intgs={integrations} onToggle={toggle} system={system} dockerProgress={dockerProgress} />
+            ))}
           {page === 'rewards' && <Rewards />}
           {page === 'settings' && <SettingsPage deviceName={deviceName} deregister={deregister} />}
           {page === 'updates' && <Updates />}
@@ -128,6 +180,15 @@ export default function FEMApp() {
   const [phase, setPhase] = useState<'wizard' | 'app'>('wizard')
   const [deviceName, setDeviceName] = useState('')
   const { device, loading, deregister, setDeviceName: setDeviceNameViaBackend, error: deviceError } = useDevice()
+
+  // B7: surface config recovery/reset warnings produced at load time.
+  const [configWarning, setConfigWarning] = useState<string | null>(null)
+  useEffect(() => {
+    if (!isTauri()) return
+    invoke<{ config_warning?: string | null }>('get_settings')
+      .then((s) => setConfigWarning(s?.config_warning ?? null))
+      .catch(() => {})
+  }, [])
 
   useEffect(() => {
     if (!loading && device) {
@@ -156,9 +217,30 @@ export default function FEMApp() {
   const initialRegistered = device?.registered ?? false
   const effectivePhase = initialRegistered && phase === 'wizard' ? 'app' : phase
 
-  if (effectivePhase === 'wizard') {
-    return <Wizard onDone={(name) => { setDeviceName(name); setPhase('app') }} />
-  }
+  const body =
+    effectivePhase === 'wizard' ? (
+      <Wizard onDone={(name) => { setDeviceName(name); setPhase('app') }} />
+    ) : (
+      <AppShell deviceName={deviceName || 'FEM Device'} minerKey={device?.miner_key ?? undefined} deregister={deregister} deviceError={deviceError} />
+    )
 
-  return <AppShell deviceName={deviceName || 'FEM Device'} minerKey={device?.miner_key ?? undefined} deregister={deregister} deviceError={deviceError} />
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {configWarning && (
+        <div
+          style={{
+            padding: '8px 16px',
+            background: 'var(--amb)18',
+            borderBottom: '1px solid var(--amb)40',
+            fontFamily: 'var(--fb)',
+            fontSize: 12,
+            color: 'var(--amb)'
+          }}
+        >
+          <strong>Settings notice:</strong> {configWarning}
+        </div>
+      )}
+      <div style={{ flex: 1, minHeight: 0 }}>{body}</div>
+    </div>
+  )
 }
