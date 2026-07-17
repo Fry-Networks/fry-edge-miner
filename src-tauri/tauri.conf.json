@@ -36,6 +36,9 @@
     "createUpdaterArtifacts": true,
     "active": true,
     "targets": "all",
+    "resources": [
+      "resources/frynode.exe"
+    ],
     "icon": [
       "icons/icon.ico"
     ],

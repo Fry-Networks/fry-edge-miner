@@ -14,15 +14,18 @@ pub struct FryVpnIntegration {
 }
 
 impl FryVpnIntegration {
+    /// Resolve frynode binary path: FRYNODE_BIN env var → bundled resource (via PATH) → fallback.
+    /// Note: Bundled frynode.exe is included in bundle.resources and unpacked to AppCache,
+    /// making it available on PATH during app runtime.
     fn binary_path() -> Result<String> {
-        // Try FRYNODE_BIN env var first
+        // Try FRYNODE_BIN env var first (allows override)
         if let Ok(bin_path) = std::env::var("FRYNODE_BIN") {
             if !bin_path.is_empty() {
                 return Ok(bin_path);
             }
         }
 
-        // Fall back to default binary name (will be resolved on PATH at spawn time)
+        // Fall back to binary on PATH (includes bundled resource from AppCache)
         let binary_name = if cfg!(target_os = "windows") {
             "frynode.exe"
         } else {
