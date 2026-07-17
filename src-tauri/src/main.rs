@@ -5,6 +5,7 @@ mod commands;
 mod config;
 mod events;
 mod integrations;
+mod logging;
 mod migration;
 mod poc;
 mod supervisor;
@@ -36,13 +37,6 @@ pub struct AppState {
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -86,6 +80,11 @@ fn main() {
                 .path()
                 .app_log_dir()
                 .expect("failed to resolve app log dir");
+
+            // Initialize logging with scrubbing (rotating 10×5MB files in release)
+            logging::init_logging(&log_dir)
+                .unwrap_or_else(|e| eprintln!("Warning: failed to initialize logging: {}", e));
+
             let supervisor = Arc::new(Mutex::new(Supervisor::new(log_dir.clone())));
 
             // Integration registry
@@ -541,6 +540,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::debug::export_debug_bundle,
             commands::integration::get_integrations,
             commands::integration::install_integration,
             commands::integration::toggle_integration,

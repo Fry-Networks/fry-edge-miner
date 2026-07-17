@@ -142,6 +142,7 @@ pub async fn register_device(
         .map_err(|e| e.to_string())?;
 
     // Register with the hardwareapi
+    let cfg = state.config.get();
     let heartbeat = InstallationHeartbeat {
         miner_key: miner_key.clone(),
         install_id: install_id.clone(),
@@ -153,7 +154,7 @@ pub async fn register_device(
             .or_else(|| std::env::var("HOSTNAME").ok()),
         os: Some(std::env::consts::OS.to_string()),
         is_installed: Some(true),
-        device_name: None,
+        device_name: cfg.device_name.clone(),
     };
 
     // Exponential backoff retry on connection-level errors (DNS/TLS/timeout)
@@ -208,72 +209,14 @@ pub async fn register_device(
                 "Device registered with hardwareapi"
             );
 
-            // Auto-install all integrations on first registration (non-blocking).
-            // Spawn as background task so the frontend sees success immediately.
+            // Mark initial setup done (explicit opt-in only, no auto-install seeding)
             if !state.config.get().initial_setup_done {
-                let bg_config = std::sync::Arc::clone(&state.config);
-                let bg_registry = state.registry.clone();
-                tauri::async_runtime::spawn(async move {
-                    tracing::info!("First registration — auto-installing integrations in background");
-
-                    let ids: Vec<String> = match bg_registry.lock() {
-                        Ok(reg) => reg.list().iter().map(|i| i.id().to_string()).collect(),
-                        Err(e) => {
-                            tracing::error!(error = %e, "Failed to lock registry for auto-install");
-                            return;
-                        }
-                    };
-
-                    for id in &ids {
-                        let integration = match bg_registry.lock() {
-                            Ok(reg) => reg.get(id),
-                            Err(_) => continue,
-                        };
-
-                        let Some(integration) = integration else { continue };
-
-                        let result = tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current()
-                                .block_on(integration.install())
-                                .map_err(|e| e.to_string())
-                        });
-                        match result {
-                            Ok(_) => tracing::info!(integration = id.as_str(), "Auto-install succeeded"),
-                            Err(e) => tracing::warn!(integration = id.as_str(), error = %e, "Auto-install failed — skipping"),
-                        }
-                    }
-
-                    let installed_ids: Vec<String> = match bg_registry.lock() {
-                        Ok(reg) => reg.list()
-                            .iter()
-                            .filter(|i| i.installed_version().is_some())
-                            .map(|i| i.id().to_string())
-                            .collect(),
-                        Err(_) => Vec::new(),
-                    };
-
-                    if let Ok(mut reg) = bg_registry.lock() {
-                        for id in &installed_ids {
-                            reg.set_enabled(id, true);
-                        }
-                    }
-
-                    let ids_for_config = installed_ids.clone();
-                    if let Err(e) = bg_config.update(|cfg| {
+                state
+                    .config
+                    .update(|cfg| {
                         cfg.initial_setup_done = true;
-                        for id in &ids_for_config {
-                            cfg.integrations_enabled.insert(id.clone(), true);
-                        }
-                    }) {
-                        tracing::error!(error = %e, "Failed to persist auto-install state");
-                    }
-
-                    tracing::info!(
-                        installed = installed_ids.len(),
-                        total = ids.len(),
-                        "Background auto-install complete"
-                    );
-                });
+                    })
+                    .ok();
             }
 
             Ok(miner_key)
