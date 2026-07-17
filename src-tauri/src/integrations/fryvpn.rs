@@ -6,21 +6,26 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, warn};
 
+const FRYNODE_VERSION: &str = "0.1.0";
+
 pub struct FryVpnIntegration {
     pub config: Arc<ConfigStore>,
     pub supervisor: Arc<Mutex<crate::supervisor::Supervisor>>,
 }
 
 impl FryVpnIntegration {
+    /// Resolve frynode binary path: FRYNODE_BIN env var → bundled resource (via PATH) → fallback.
+    /// Note: Bundled frynode.exe is included in bundle.resources and unpacked to AppCache,
+    /// making it available on PATH during app runtime.
     fn binary_path() -> Result<String> {
-        // Try FRYNODE_BIN env var first
+        // Try FRYNODE_BIN env var first (allows override)
         if let Ok(bin_path) = std::env::var("FRYNODE_BIN") {
             if !bin_path.is_empty() {
                 return Ok(bin_path);
             }
         }
 
-        // Fall back to default binary name (will be resolved on PATH at spawn time)
+        // Fall back to binary on PATH (includes bundled resource from AppCache)
         let binary_name = if cfg!(target_os = "windows") {
             "frynode.exe"
         } else {
@@ -52,13 +57,32 @@ impl Integration for FryVpnIntegration {
     async fn start(&self) -> Result<()> {
         let binary = Self::binary_path()?;
 
+        // Build CLI flags for frynode
+        let args = vec![
+            "-registry-app-id".to_string(),
+            "3636586918".to_string(),
+            "-fvpn-asa-id".to_string(),
+            "2485198745".to_string(),
+            "-algod-server".to_string(),
+            "https://mainnet-api.algonode.cloud".to_string(),
+            "-algod-port".to_string(),
+            "443".to_string(),
+            "-algod-token".to_string(),
+            "".to_string(), // algonode is tokenless
+            "-api-port".to_string(),
+            "8088".to_string(),
+            "-wg-port".to_string(),
+            "51820".to_string(),
+        ];
+
         {
             let mut sup = self.supervisor.lock().unwrap();
-            sup.start_integration("fryvpn", &binary, &[])
+            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            sup.start_integration("fryvpn", &binary, &arg_refs)
                 .map_err(|e| anyhow::anyhow!("Failed to spawn frynode: {}", e))?;
         }
 
-        info!("Fry dVPN started");
+        info!("Fry dVPN started with CLI flags");
         Ok(())
     }
 
@@ -97,15 +121,27 @@ impl Integration for FryVpnIntegration {
                 // Try to parse response as JSON
                 match resp.json::<serde_json::Value>().await {
                     Ok(body) => {
-                        if body.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        let is_healthy = body
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s == "healthy")
+                            .unwrap_or(false);
+                        let is_registered = body
+                            .get("registered")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+
+                        if is_healthy && is_registered {
                             HealthStatus::Healthy
+                        } else if !is_healthy {
+                            HealthStatus::Unhealthy("dVPN health check: status != healthy".to_string())
                         } else {
-                            HealthStatus::Unhealthy("Health check returned ok=false".to_string())
+                            HealthStatus::Unhealthy("dVPN not registered on-chain".to_string())
                         }
                     }
-                    Err(_) => {
-                        // If response isn't JSON but HTTP 200, assume healthy
-                        HealthStatus::Healthy
+                    Err(e) => {
+                        warn!(error = %e, "Failed to parse health response");
+                        HealthStatus::Unhealthy("Invalid health response format".to_string())
                     }
                 }
             }
@@ -128,7 +164,7 @@ impl Integration for FryVpnIntegration {
 
     fn installed_version(&self) -> Option<String> {
         if Self::binary_path().is_ok() {
-            Some("installed".into())
+            Some(FRYNODE_VERSION.to_string())
         } else {
             None
         }
@@ -153,7 +189,7 @@ mod tests {
     #[test]
     fn test_fryvpn_id() {
         let integration = FryVpnIntegration {
-            config: Arc::new(crate::config::store::ConfigStore::new(None).unwrap()),
+            config: Arc::new(crate::config::store::ConfigStore::new(std::path::PathBuf::from("/tmp"))),
             supervisor: Arc::new(Mutex::new(crate::supervisor::Supervisor::new(
                 std::path::PathBuf::from("/tmp"),
             ))),
@@ -164,7 +200,7 @@ mod tests {
     #[test]
     fn test_fryvpn_display_name() {
         let integration = FryVpnIntegration {
-            config: Arc::new(crate::config::store::ConfigStore::new(None).unwrap()),
+            config: Arc::new(crate::config::store::ConfigStore::new(std::path::PathBuf::from("/tmp"))),
             supervisor: Arc::new(Mutex::new(crate::supervisor::Supervisor::new(
                 std::path::PathBuf::from("/tmp"),
             ))),

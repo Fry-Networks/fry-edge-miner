@@ -63,7 +63,7 @@ export default function UpdCard({ name, Icon, col, current, available, status, o
       {status === 'error' && <Tag v="warn">Check failed</Tag>}
       {status === 'updating' && <Tag v="info">Updating…</Tag>}
       {status === 'update' && (
-        <Btn v="p" sx={{ padding: '4px 12px', fontSize: 11 }} onClick={onUpdate}>
+        <Btn v="p" sx={{ padding: '4px 12px', fontSize: 11 }} onClick={onUpdate} data-testid="update-button">
           <Download size={11} /> Update
         </Btn>
       )}

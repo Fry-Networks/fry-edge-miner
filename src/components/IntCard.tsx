@@ -154,6 +154,8 @@ export default function IntCard({ intg, onToggle, dockerNote }: IntCardProps) {
             )}
             {reason && st === 'err' && (
               <span
+                data-testid={`error-${id}`}
+                role="alert"
                 style={{
                   fontFamily: 'var(--fb)',
                   fontSize: 11,
@@ -208,7 +210,13 @@ export default function IntCard({ intg, onToggle, dockerNote }: IntCardProps) {
             )}
           </div>
         </div>
-        <Tog checked={enabled} onChange={() => onToggle(id)} label={`Toggle ${name}`} />
+        <Tog
+          checked={enabled}
+          onChange={() => onToggle(id)}
+          label={`Toggle ${name} integration`}
+          data-testid={`toggle-${id}`}
+          aria-label={`Toggle ${name} integration`}
+        />
       </div>
       <div
         style={{

@@ -7,9 +7,10 @@ interface BtnProps {
   disabled?: boolean
   sx?: CSSProperties
   full?: boolean
+  'data-testid'?: string
 }
 
-export default function Btn({ v = 'p', onClick, children, disabled, sx = {}, full }: BtnProps) {
+export default function Btn({ v = 'p', onClick, children, disabled, sx = {}, full, ...rest }: BtnProps) {
   const base: CSSProperties = {
     display: 'inline-flex',
     alignItems: 'center',
@@ -31,20 +32,20 @@ export default function Btn({ v = 'p', onClick, children, disabled, sx = {}, ful
 
   if (v === 'p') {
     return (
-      <button className="bp" onClick={onClick} disabled={disabled} style={{ ...base, background: 'var(--red)', color: '#fff' }}>
+      <button className="bp" onClick={onClick} disabled={disabled} style={{ ...base, background: 'var(--red)', color: '#fff' }} data-testid={rest['data-testid']}>
         {children}
       </button>
     )
   }
   if (v === 't') {
     return (
-      <button className="bt" onClick={onClick} disabled={disabled} style={{ ...base, background: 'var(--teal)', color: '#041f18' }}>
+      <button className="bt" onClick={onClick} disabled={disabled} style={{ ...base, background: 'var(--teal)', color: '#041f18' }} data-testid={rest['data-testid']}>
         {children}
       </button>
     )
   }
   return (
-    <button className="bg" onClick={onClick} disabled={disabled} style={{ ...base, background: 'var(--s2)', color: 'var(--t1)', border: '1px solid var(--b1)' }}>
+    <button className="bg" onClick={onClick} disabled={disabled} style={{ ...base, background: 'var(--s2)', color: 'var(--t1)', border: '1px solid var(--b1)' }} data-testid={rest['data-testid']}>
       {children}
     </button>
   )

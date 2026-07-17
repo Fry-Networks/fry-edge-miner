@@ -5,6 +5,7 @@ mod commands;
 mod config;
 mod events;
 mod integrations;
+mod logging;
 mod migration;
 mod poc;
 mod supervisor;
@@ -28,6 +29,7 @@ pub struct AppState {
     pub api_client: Arc<ApiClient>,
     pub cached_base_reward: Arc<AtomicU64>,
     pub last_health: Arc<RwLock<HashMap<String, HealthStatus>>>,
+    pub last_integration_error: Arc<RwLock<HashMap<String, Option<String>>>>,
     pub poc_cache: Arc<PocCache>,
     pub cached_reward_config: Arc<RwLock<Option<crate::api::types::RewardConfig>>>,
     pub cached_stake_tiers: Arc<RwLock<Option<HashMap<String, crate::api::types::StakeTier>>>>,
@@ -36,13 +38,6 @@ pub struct AppState {
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -86,6 +81,11 @@ fn main() {
                 .path()
                 .app_log_dir()
                 .expect("failed to resolve app log dir");
+
+            // Initialize logging with scrubbing (rotating 10×5MB files in release)
+            logging::init_logging(&log_dir)
+                .unwrap_or_else(|e| eprintln!("Warning: failed to initialize logging: {}", e));
+
             let supervisor = Arc::new(Mutex::new(Supervisor::new(log_dir.clone())));
 
             // Integration registry
@@ -99,6 +99,7 @@ fn main() {
             registry.register(Arc::new(integrations::presearch::PresearchIntegration {
                 config: config_store.clone(),
             }));
+            registry.register(Arc::new(integrations::storj::StorjIntegration));
             registry.register(Arc::new(integrations::diiisco::DiiiscoIntegration {
                 api_client: api_client.clone(),
                 config: config_store.clone(),
@@ -531,6 +532,7 @@ fn main() {
                 api_client,
                 cached_base_reward,
                 last_health,
+                last_integration_error: Arc::new(RwLock::new(HashMap::new())),
                 poc_cache,
                 cached_reward_config,
                 cached_stake_tiers,
@@ -541,6 +543,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::debug::export_debug_bundle,
             commands::integration::get_integrations,
             commands::integration::install_integration,
             commands::integration::toggle_integration,

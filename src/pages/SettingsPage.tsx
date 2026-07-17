@@ -303,13 +303,16 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
         </div>
       </SettingSection>
 
-      {isRegistered && (
-        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+      <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+        {isRegistered && (
           <Btn v="g" onClick={() => { if (window.confirm('Deregister this device? This cannot be undone.')) deregister() }} >
             Deregister
           </Btn>
-        </div>
-      )}
+        )}
+        <Btn v="g" data-testid="export-debug-bundle" onClick={() => console.log('Export debug bundle TODO')}>
+          Export Debug Bundle
+        </Btn>
+      </div>
     </div>
   )
 }
