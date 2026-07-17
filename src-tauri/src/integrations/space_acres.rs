@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{info, warn};
 
+const SPACE_ACRES_MIN_GB: u64 = 50;
+
 pub struct SpaceAcresIntegration;
 
 const GITHUB_API_URL: &str = "https://api.github.com/repos/autonomys/space-acres/releases/latest";
@@ -169,6 +171,38 @@ impl SpaceAcresIntegration {
             false
         }
     }
+
+    /// Check if system meets SpaceAcres eligibility requirements:
+    /// - System has an SSD (or the SeekPenalty=false fallback indicates one)
+    /// - Free disk space >= SPACE_ACRES_MIN_GB
+    /// Returns (eligible, Option<reason>) — if ineligible, reason explains why.
+    pub async fn check_eligibility() -> (bool, Option<String>) {
+        if !has_ssd() {
+            return (false, Some("No SSD detected — SpaceAcres requires solid-state storage".to_string()));
+        }
+
+        // Check free disk space on the partners base directory
+        match check_free_space().await {
+            Ok(free_gb) => {
+                if free_gb < SPACE_ACRES_MIN_GB {
+                    return (
+                        false,
+                        Some(format!(
+                            "Insufficient disk space — {} GB free, {} GB required",
+                            free_gb, SPACE_ACRES_MIN_GB
+                        )),
+                    );
+                }
+                (true, None)
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to check disk space");
+                // TODO-verify: SpaceAcres actual minimum
+                // Assume eligible if check fails (don't block on uncertain state)
+                (true, None)
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -325,15 +359,66 @@ impl Integration for SpaceAcresIntegration {
     }
 }
 
+/// Check available disk space on the partners directory.
+/// Returns available space in GB.
+async fn check_free_space() -> anyhow::Result<u64> {
+    let base_dir = partners_base_dir();
+    #[cfg(target_os = "windows")]
+    {
+        let path = base_dir.to_string_lossy().to_string();
+        let drive = path.split(':').next().unwrap_or("C");
+
+        let output = crate::supervisor::platform::command("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "((Get-Volume -DriveLetter {} | Select-Object -Expand SizeRemaining) / 1GB) -as [int64]",
+                    drive
+                ),
+            ])
+            .output()?;
+
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<u64>()
+            .map_err(|e| anyhow::anyhow!("Failed to parse disk space: {}", e))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let output = crate::supervisor::platform::command("df")
+            .arg("-BG")
+            .arg(&base_dir)
+            .output()?;
+
+        // df output format: Filesystem 1G-blocks Used Available Use% Mounted on
+        let lines: Vec<&str> = String::from_utf8_lossy(&output.stdout).lines().collect();
+        if lines.len() > 1 {
+            let parts: Vec<&str> = lines[1].split_whitespace().collect();
+            if parts.len() > 3 {
+                return parts[3]
+                    .trim_end_matches('G')
+                    .parse::<u64>()
+                    .map_err(|e| anyhow::anyhow!("Failed to parse disk space: {}", e));
+            }
+        }
+        anyhow::bail!("Failed to parse df output")
+    }
+}
+
 /// Detect if system has an SSD.
 /// Cached: the probe spawns a full PowerShell process (~1-3s) and this is
 /// called from the 30s health-check loop — uncached it burns CPU forever,
 /// and physical disks don't change while the app runs.
+///
+/// Primary: Get-PhysicalDisk | Where MediaType -eq 'SSD'
+/// Fallback: MSFT_PhysicalDisk with SeekPenalty==false (indicates SSD)
 #[cfg(target_os = "windows")]
 fn has_ssd() -> bool {
     static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CACHE.get_or_init(|| {
-        crate::supervisor::platform::command("powershell")
+        // Primary check: explicit SSD MediaType
+        let primary_check = crate::supervisor::platform::command("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
@@ -346,6 +431,26 @@ fn has_ssd() -> bool {
                     .parse::<u32>()
                     .unwrap_or(0)
                     > 0
+            })
+            .unwrap_or(false);
+
+        if primary_check {
+            return true;
+        }
+
+        // Fallback: MSFT_PhysicalDisk with SeekPenalty==false indicates SSD
+        crate::supervisor::platform::command("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "(Get-WmiObject -Namespace \"root/Microsoft/Windows/Storage\" -Class MSFT_PhysicalDisk | Where-Object SeekPenalty -EQ $false | Measure-Object).Count -gt 0",
+            ])
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .to_lowercase()
+                    .contains("true")
             })
             .unwrap_or(false)
     })
