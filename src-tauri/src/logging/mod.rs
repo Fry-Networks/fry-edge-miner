@@ -2,7 +2,7 @@ pub mod scrubber;
 
 use std::path::Path;
 
-/// Initialize logging with rotating files + scrubbing (10 files × 5MB).
+/// Initialize logging with daily rotating files + scrubbing.
 /// Keeps stdout in dev mode, uses file in release.
 ///
 /// Scrubber redacts:
@@ -32,15 +32,8 @@ pub fn init_logging(log_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(not(debug_assertions))]
     {
-        // Release: rotating files with scrubbing
-        std::fs::create_dir_all(log_dir)?;
-
-        let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
-            .rotation(tracing_appender::rolling::Rotation::FILES_PER_DAY)
-            .max_bytes(5_000_000) // 5 MB per file
-            .max_backups(10)
-            .build(log_dir)?;
-
+        // Release: daily rotating files with scrubbing
+        let file_appender = tracing_appender::rolling::daily(log_dir, "fem.log");
         let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
         tracing_subscriber::fmt()
