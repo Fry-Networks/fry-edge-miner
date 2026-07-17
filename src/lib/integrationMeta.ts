@@ -4,6 +4,7 @@ import {
   Cpu,
   HardDrive,
   Eye,
+  Shield,
   type LucideIcon
 } from 'lucide-react'
 
@@ -62,6 +63,15 @@ export const INTEGRATION_META: IntegrationMeta[] = [
     Icon: Eye,
     col: '#00c49a',
     uptime: 96.1
+  },
+  {
+    id: 'fryvpn',
+    name: 'Fry dVPN',
+    tag: 'VPN NODE',
+    desc: 'Provide bandwidth to the Fry decentralized VPN network',
+    Icon: Shield,
+    col: '#ef4444',
+    uptime: 0
   }
 ]
 

@@ -105,6 +105,10 @@ fn main() {
             }));
             registry.register(Arc::new(integrations::space_acres::SpaceAcresIntegration));
             registry.register(Arc::new(integrations::aem::AemIntegration));
+            registry.register(Arc::new(integrations::fryvpn::FryVpnIntegration {
+                config: config_store.clone(),
+                supervisor: supervisor.clone(),
+            }));
 
             // Restore enabled states from config
             for (id, enabled) in &cfg.integrations_enabled {

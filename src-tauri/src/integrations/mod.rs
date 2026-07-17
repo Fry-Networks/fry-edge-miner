@@ -2,6 +2,7 @@ pub mod aem;
 pub mod diiisco;
 pub mod docker_manager;
 pub mod download;
+pub mod fryvpn;
 pub mod mysterium;
 pub mod presearch;
 pub mod space_acres;
