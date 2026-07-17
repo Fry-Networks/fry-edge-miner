@@ -26,6 +26,7 @@ pub async fn get_integrations(
 
     // Read the most recent health check results written by the health loop in main.rs.
     let last = state.last_health.read().map_err(|e| e.to_string())?;
+    let last_errors = state.last_integration_error.read().map_err(|e| e.to_string())?;
 
     let statuses = entries
         .into_iter()
@@ -56,7 +57,7 @@ pub async fn get_integrations(
             let healthy = matches!(health, HealthStatus::Healthy);
 
             IntegrationStatus {
-                id,
+                id: id.clone(),
                 display_name,
                 enabled,
                 health,
@@ -64,6 +65,7 @@ pub async fn get_integrations(
                 version,
                 poc_contribution: if enabled && healthy { 1.0 / total as f64 } else { 0.0 },
                 requires_docker,
+                error: last_errors.get(&id).and_then(|e| e.clone()),
             }
         })
         .collect();
@@ -104,11 +106,37 @@ pub async fn toggle_integration(
     if enabled {
         // Auto-install integrations that have not been deployed yet (e.g., Diiisco).
         if integration.installed_version().is_none() {
-            integration.install().await.map_err(|e| e.to_string())?;
+            if let Err(e) = integration.install().await {
+                let err_msg = e.to_string();
+                if let Ok(mut errs) = state.last_integration_error.write() {
+                    errs.insert(id.clone(), Some(err_msg.clone()));
+                }
+                return Err(err_msg);
+            }
         }
-        integration.start().await.map_err(|e| e.to_string())?;
+        if let Err(e) = integration.start().await {
+            let err_msg = e.to_string();
+            if let Ok(mut errs) = state.last_integration_error.write() {
+                errs.insert(id.clone(), Some(err_msg.clone()));
+            }
+            return Err(err_msg);
+        }
+        // Clear error on success
+        if let Ok(mut errs) = state.last_integration_error.write() {
+            errs.insert(id.clone(), None);
+        }
     } else {
-        integration.stop().await.map_err(|e| e.to_string())?;
+        if let Err(e) = integration.stop().await {
+            let err_msg = e.to_string();
+            if let Ok(mut errs) = state.last_integration_error.write() {
+                errs.insert(id.clone(), Some(err_msg.clone()));
+            }
+            return Err(err_msg);
+        }
+        // Clear error on success
+        if let Ok(mut errs) = state.last_integration_error.write() {
+            errs.insert(id.clone(), None);
+        }
     }
 
     // Only update state on success

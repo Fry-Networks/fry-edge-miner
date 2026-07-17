@@ -52,6 +52,8 @@ pub struct IntegrationStatus {
     pub poc_contribution: f64,
     #[serde(default)]
     pub requires_docker: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 // --- PoC Gate Data ---
@@ -172,6 +174,7 @@ impl IntegrationRegistry {
                         0.0
                     },
                     requires_docker: i.requires_docker(),
+                    error: None,
                 }
             })
             .collect()
