@@ -153,6 +153,7 @@ pub async fn register_device(
             .or_else(|| std::env::var("HOSTNAME").ok()),
         os: Some(std::env::consts::OS.to_string()),
         is_installed: Some(true),
+        device_name: None,
     };
 
     // Exponential backoff retry on connection-level errors (DNS/TLS/timeout)
@@ -399,6 +400,7 @@ pub async fn attempt_device_token_migration(
             .or_else(|| std::env::var("HOSTNAME").ok()),
         os: Some(std::env::consts::OS.to_string()),
         is_installed: Some(true),
+        device_name: cfg.device_name.clone(),
     };
 
     match crate::api::installations::register(api_client, &heartbeat).await {
