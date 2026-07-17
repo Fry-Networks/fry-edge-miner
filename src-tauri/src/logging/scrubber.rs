@@ -50,7 +50,7 @@ fn redact_mnemonic(s: &str) -> String {
 fn redact_bearer_token(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        Regex::new(r#"(?i)bearer\s*=\s*"[^"]*"|Bearer:\s*\S+"#).unwrap()
+        Regex::new(r#"(?i)bearer[\s:=]+"?[^"\s]+"?"#).unwrap()
     });
     re.replace_all(s, "bearer=[REDACTED]").to_string()
 }
@@ -68,7 +68,7 @@ fn redact_api_key(s: &str) -> String {
 fn redact_token(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        Regex::new(r#"(?i)token\s*=\s*"[^"]*"|token:\s*\S+(?=\s|$)"#).unwrap()
+        Regex::new(r#"(?i)token\s*=\s*"[^"]*"|token:\s*\S+"#).unwrap()
     });
     re.replace_all(s, "token=[REDACTED]").to_string()
 }
@@ -77,7 +77,7 @@ fn redact_token(s: &str) -> String {
 fn redact_op_session(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        Regex::new(r"OP_[A-Z_]+\s*=\s*\S+").unwrap()
+        Regex::new(r"OP_[A-Za-z0-9_]+\s*=\s*\S+").unwrap()
     });
     re.replace_all(s, "[REDACTED]").to_string()
 }
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_scrub_algorand_address() {
-        let addr = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let addr = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
         let line = format!("wallet: {}", addr);
         let scrubbed = scrub_line(&line);
         assert!(scrubbed.contains("AAAA…AAAA"));
