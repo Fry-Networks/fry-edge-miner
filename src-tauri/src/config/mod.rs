@@ -31,6 +31,8 @@ pub struct FemConfig {
     pub auto_update: bool,
     #[serde(default = "default_true")]
     pub notifications: bool,
+    #[serde(default)]
+    pub myst_lan_override: bool,
 }
 
 impl FemConfig {
@@ -71,6 +73,7 @@ impl Default for FemConfig {
             minimize_to_tray: true,
             auto_update: true,
             notifications: true,
+            myst_lan_override: false,
         }
     }
 }
