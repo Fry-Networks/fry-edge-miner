@@ -5,6 +5,7 @@ import {
   HardDrive,
   Eye,
   Shield,
+  Cloud,
   type LucideIcon
 } from 'lucide-react'
 
@@ -36,6 +37,15 @@ export const INTEGRATION_META: IntegrationMeta[] = [
     Icon: Search,
     col: '#a855f7',
     uptime: 97.8
+  },
+  {
+    id: 'storj',
+    name: 'Storj',
+    tag: 'STORAGE NODE',
+    desc: 'Provide decentralized storage to the Storj Network',
+    Icon: Cloud,
+    col: '#0066ff',
+    uptime: 0
   },
   {
     id: 'diiisco',

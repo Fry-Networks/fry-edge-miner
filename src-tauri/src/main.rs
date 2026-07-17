@@ -99,6 +99,7 @@ fn main() {
             registry.register(Arc::new(integrations::presearch::PresearchIntegration {
                 config: config_store.clone(),
             }));
+            registry.register(Arc::new(integrations::storj::StorjIntegration));
             registry.register(Arc::new(integrations::diiisco::DiiiscoIntegration {
                 api_client: api_client.clone(),
                 config: config_store.clone(),
