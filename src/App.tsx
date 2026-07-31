@@ -133,7 +133,7 @@ function IntegrationsErrorCard({ error, onRetry }: { error: string; onRetry: () 
 
 function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceName: string; minerKey?: string; deregister: () => Promise<void>; deviceError: string | null }) {
   const [page, setPage] = useState<NavPage>('dashboard')
-  const { integrations, toggle, error, system, dockerProgress, refetch } = useIntegrations()
+  const { integrations, toggle, forceReinstall, error, system, dockerProgress, refetch } = useIntegrations()
   const activeCount = integrations.filter((i) => i.enabled).length
   const hasUnhealthy = integrations.some((i) => i.enabled && !i.healthy)
   // Only device/API-level failures mean the backend is unreachable; a failed
@@ -165,7 +165,7 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
             (integrations.length === 0 && error ? (
               <IntegrationsErrorCard error={error} onRetry={refetch} />
             ) : (
-              <Integrations intgs={integrations} onToggle={toggle} system={system} dockerProgress={dockerProgress} />
+              <Integrations intgs={integrations} onToggle={toggle} system={system} dockerProgress={dockerProgress} onForceReinstall={forceReinstall} />
             ))}
           {page === 'rewards' && <Rewards />}
           {page === 'settings' && <SettingsPage deviceName={deviceName} deregister={deregister} />}

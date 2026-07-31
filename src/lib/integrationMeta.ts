@@ -1,6 +1,5 @@
 import {
   Globe,
-  Search,
   Cpu,
   HardDrive,
   Eye,
@@ -28,15 +27,6 @@ export const INTEGRATION_META: IntegrationMeta[] = [
     Icon: Globe,
     col: '#4a9eff',
     uptime: 99.2
-  },
-  {
-    id: 'presearch',
-    name: 'Presearch',
-    tag: 'SEARCH NODE',
-    desc: 'Serve queries on the decentralized search network',
-    Icon: Search,
-    col: '#a855f7',
-    uptime: 97.8
   },
   {
     id: 'storj',
