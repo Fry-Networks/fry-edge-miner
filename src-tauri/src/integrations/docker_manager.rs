@@ -156,10 +156,10 @@ pub fn status_user_message(status: DockerStatus) -> String {
             "Docker Desktop is installed but not running. Enabling a Docker-based integration will start it automatically, or open Docker Desktop from the Start menu and wait for the engine to report Running.".to_string()
         }
         DockerStatus::NotInstalled => {
-            "Docker Desktop is not installed. Enabling a Docker-based integration (Presearch, Diiisco) will download and install it automatically (administrator approval required), or install it manually from https://www.docker.com/products/docker-desktop/.".to_string()
+            "Docker Desktop is not installed. Enabling a Docker-based integration (Diiisco) will download and install it automatically (administrator approval required), or install it manually from https://www.docker.com/products/docker-desktop/.".to_string()
         }
         DockerStatus::VirtualizationDisabled => format!(
-            "Hardware virtualization is disabled on this PC, so Docker (required by Presearch and Diiisco) cannot run. Enable virtualization (Intel VT-x / AMD-V / SVM) in your BIOS/UEFI settings, then try again. Guide: {} — Other integrations (MystNodes, SpaceAcres, Olostep) do not need Docker and keep working.",
+            "Hardware virtualization is disabled on this PC, so Docker (required by Diiisco) cannot run. Enable virtualization (Intel VT-x / AMD-V / SVM) in your BIOS/UEFI settings, then try again. Guide: {} — Other integrations (MystNodes, SpaceAcres, Olostep) do not need Docker and keep working.",
             VIRTUALIZATION_HELP_URL
         ),
     }

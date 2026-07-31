@@ -23,7 +23,8 @@ const MINER_PREFIXES: &[(&str, &str)] = &[
 fn map_type_to_integrations(miner_type: &str) -> Vec<&'static str> {
     match miner_type {
         "BM" => vec!["mysterium"],
-        "RDN" => vec!["presearch", "diiisco"],
+        // Presearch removed 2026-07 (project shut down) — RDN now maps to diiisco only.
+        "RDN" => vec!["diiisco"],
         "SDN" | "SVN" => vec!["space_acres"],
         _ => vec![],
     }
@@ -243,16 +244,16 @@ mod tests {
         let bm_found = inst.found_keys.iter().any(|k| k.miner_type == "BM");
         assert!(bm_found, "BM miner must be detected (fallback path)");
 
-        // RDN maps to presearch+diiisco
+        // RDN maps to diiisco (presearch removed — project shut down)
         let rdn_found = inst.found_keys.iter().any(|k| k.miner_type == "RDN");
         assert!(rdn_found, "RDN miner must be detected");
         assert!(
-            plan.integrations.contains(&"presearch".to_string()),
-            "RDN must map to presearch"
-        );
-        assert!(
             plan.integrations.contains(&"diiisco".to_string()),
             "RDN must map to diiisco"
+        );
+        assert!(
+            !plan.integrations.contains(&"presearch".to_string()),
+            "Removed presearch must never appear in a migration plan"
         );
 
         // SDN maps to space_acres
