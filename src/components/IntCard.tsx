@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { AlertTriangle, Download, Loader2 } from 'lucide-react'
+import { AlertTriangle, Download, Loader2, RefreshCw } from 'lucide-react'
 import type { FrontendIntegration } from '../hooks/useIntegrations'
 import { unhealthyReason } from '../lib/types'
 import Tag from './primitives/Tag'
@@ -10,9 +10,11 @@ interface IntCardProps {
   onToggle: (id: string) => void
   // Docker prerequisite message when this card needs Docker and it isn't ready.
   dockerNote?: string | null
+  // F2: clean-slate reinstall (Olostep only — backend rejects other ids).
+  onForceReinstall?: (id: string) => void
 }
 
-export default function IntCard({ intg, onToggle, dockerNote }: IntCardProps) {
+export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }: IntCardProps) {
   const {
     id,
     name,
@@ -207,6 +209,30 @@ export default function IntCard({ intg, onToggle, dockerNote }: IntCardProps) {
               >
                 <Download size={11} /> Auto-installs on enable
               </span>
+            )}
+            {onForceReinstall && enabled && !healthy && lifecycle !== 'Installing' && (
+              <button
+                type="button"
+                onClick={() => onForceReinstall(id)}
+                data-testid={`reinstall-${id}`}
+                aria-label={`Reinstall ${name}`}
+                title="Remove all installed files and reinstall from scratch"
+                style={{
+                  fontFamily: 'var(--fb)',
+                  fontSize: 11,
+                  color: 'var(--teal)',
+                  background: 'var(--tealg)',
+                  border: '1px solid var(--b1)',
+                  borderRadius: 'var(--radsm)',
+                  padding: '3px 9px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  cursor: 'pointer'
+                }}
+              >
+                <RefreshCw size={11} /> Reinstall
+              </button>
             )}
           </div>
         </div>

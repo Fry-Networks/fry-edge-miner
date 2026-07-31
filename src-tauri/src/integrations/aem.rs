@@ -66,13 +66,74 @@ impl AemIntegration {
         dirs::config_dir().map(|d| d.join("Olostep-Browser").join("config.json"))
     }
 
+    /// Last few lines of Squirrel's own install log — the only place the real
+    /// install-failure reason (AV block, lock, disk) is recorded.
+    fn squirrel_log_tail() -> Option<String> {
+        let log = dirs::data_local_dir()?
+            .join("SquirrelTemp")
+            .join("SquirrelSetup.log");
+        let contents = std::fs::read_to_string(log).ok()?;
+        let tail: Vec<&str> = contents.lines().rev().take(3).collect();
+        let mut joined = tail
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join(" | ");
+        if joined.len() > 300 {
+            joined = joined[joined.len() - 300..].to_string();
+        }
+        if joined.is_empty() { None } else { Some(joined) }
+    }
+
+    /// Force-clean every Olostep artifact so a reinstall starts from zero:
+    /// kill the process (exit code ignored — "not running" is expected), then
+    /// best-effort delete the install dir, Squirrel temp, and our installer temp.
+    pub(crate) fn force_clean() {
+        #[cfg(target_os = "windows")]
+        {
+            let _ = crate::supervisor::platform::command("taskkill")
+                .args(["/IM", "OlostepBrowser.exe", "/F"])
+                .output();
+        }
+        let dirs_to_remove = [
+            dirs::data_local_dir().map(|d| d.join("Olostep-Browser")),
+            dirs::data_local_dir().map(|d| d.join("SquirrelTemp")),
+            Some(partners_base_dir().join("aem")),
+        ];
+        for dir in dirs_to_remove.into_iter().flatten() {
+            if dir.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&dir) {
+                    warn!(path = ?dir, error = %e, "Force-clean: could not remove directory (continuing)");
+                } else {
+                    info!(path = ?dir, "Force-clean: removed");
+                }
+            }
+        }
+    }
+
+    /// True when the Olostep config must be (re)staged: file missing, unreadable,
+    /// unparseable, or the `mellowtel_opt_in_status` key absent — the signature of
+    /// an Olostep Squirrel self-update wiping/resetting config.json. An explicit
+    /// `false` value is a user opt-out made inside Olostep and is respected.
+    fn config_needs_restage(contents: Option<&str>) -> bool {
+        let Some(s) = contents else { return true };
+        match serde_json::from_str::<serde_json::Value>(s) {
+            Ok(v) => v.get("mellowtel_opt_in_status").and_then(|x| x.as_bool()).is_none(),
+            Err(_) => true,
+        }
+    }
+
     /// Stage config.json with Mellowtel opt-in settings
     fn stage_config() -> Result<()> {
         let config_path = Self::olostep_config_path()
             .ok_or_else(|| anyhow::anyhow!("Cannot determine config directory"))?;
-        if config_path.exists() {
-            info!(path = ?config_path, "OlostepBrowser config already exists");
+        let existing = std::fs::read_to_string(&config_path).ok();
+        if !Self::config_needs_restage(existing.as_deref()) {
+            info!(path = ?config_path, "OlostepBrowser config already staged (opt-in key intact)");
             return Ok(());
+        }
+        if existing.is_some() {
+            info!(path = ?config_path, "OlostepBrowser config lost its opt-in key (self-update wipe) — re-staging");
         }
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -138,8 +199,16 @@ impl Integration for AemIntegration {
             }
         }
         if !appeared {
+            let mut diag = String::new();
+            if let Some(code) = output.status.code() {
+                diag.push_str(&format!(" Installer exit code: {}.", code));
+            }
+            if let Some(tail) = Self::squirrel_log_tail() {
+                diag.push_str(&format!(" Squirrel log: {}", tail));
+            }
             anyhow::bail!(
-                "OlostepBrowser installer ran but the app did not appear within 120 seconds — antivirus or a permission prompt may have blocked it. Toggle Olostep again to retry."
+                "OlostepBrowser installer ran but the app did not appear within 120 seconds — antivirus or a permission prompt may have blocked it.{} Use Reinstall on the Olostep card to retry from a clean slate.",
+                diag
             );
         }
         Self::stage_config()?;
@@ -157,6 +226,12 @@ impl Integration for AemIntegration {
         }
         let binary = Self::olostep_binary()
             .ok_or_else(|| anyhow::anyhow!("OlostepBrowser not installed"))?;
+        // Re-assert the staged config before launch — an Olostep self-update
+        // may have wiped it, which would re-prompt the user for a permission
+        // they already granted via the FEM toggle.
+        if let Err(e) = Self::stage_config() {
+            warn!(error = %e, "Could not re-stage OlostepBrowser config before start");
+        }
         info!(binary = ?binary, "Starting OlostepBrowser");
         crate::supervisor::platform::command(&binary).spawn()?;
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
@@ -202,6 +277,15 @@ impl Integration for AemIntegration {
 
     fn collect_poc_data(&self) -> PocGateData {
         let running = Self::is_running();
+        // Self-heal: only reached for ENABLED integrations (poc/gates.rs filters
+        // on is_enabled). If Olostep self-updated and wiped its config, restore
+        // the previously granted opt-in before reading it, so poa doesn't zero
+        // out and the user is never re-prompted.
+        if Self::olostep_binary().is_some() {
+            if let Err(e) = Self::stage_config() {
+                warn!(error = %e, "Olostep config re-stage failed during PoC collection");
+            }
+        }
         let config_ok = Self::olostep_config_path()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -211,5 +295,47 @@ impl Integration for AemIntegration {
             poa: running && config_ok,
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AemIntegration;
+
+    #[test]
+    fn missing_file_needs_restage() {
+        assert!(AemIntegration::config_needs_restage(None));
+    }
+
+    #[test]
+    fn wiped_config_without_opt_in_key_needs_restage() {
+        // Squirrel self-update reset: file exists but the opt-in key is gone (F1).
+        assert!(AemIntegration::config_needs_restage(Some("{}")));
+        assert!(AemIntegration::config_needs_restage(Some(
+            r#"{"terms-accepted":true,"auto-start-enabled":true}"#
+        )));
+    }
+
+    #[test]
+    fn intact_opt_in_does_not_restage() {
+        assert!(!AemIntegration::config_needs_restage(Some(
+            r#"{"mellowtel_opt_in_status":true}"#
+        )));
+    }
+
+    #[test]
+    fn explicit_opt_out_is_respected() {
+        // User opted out inside Olostep — never overwrite that choice.
+        assert!(!AemIntegration::config_needs_restage(Some(
+            r#"{"mellowtel_opt_in_status":false}"#
+        )));
+    }
+
+    #[test]
+    fn corrupt_config_needs_restage() {
+        assert!(AemIntegration::config_needs_restage(Some("not-json{")));
+        assert!(AemIntegration::config_needs_restage(Some(
+            r#"{"mellowtel_opt_in_status":"yes"}"#
+        )));
     }
 }
