@@ -10,9 +10,10 @@ interface IntegrationsProps {
   onToggle: (id: string) => void
   system?: SystemStatus | null
   dockerProgress?: DockerProgress | null
+  onForceReinstall?: (id: string) => void
 }
 
-export default function Integrations({ intgs, onToggle, system, dockerProgress }: IntegrationsProps) {
+export default function Integrations({ intgs, onToggle, system, dockerProgress, onForceReinstall }: IntegrationsProps) {
   const active = intgs.filter((i) => i.enabled).length
   const dockerNotReady = !!system && system.docker !== 'ready'
   const anyNeedsDocker = intgs.some((i) => i.requires_docker)
@@ -108,6 +109,7 @@ export default function Integrations({ intgs, onToggle, system, dockerProgress }
             intg={intg}
             onToggle={onToggle}
             dockerNote={intg.requires_docker && dockerNotReady ? system?.docker_message : null}
+            onForceReinstall={intg.id === 'aem' ? onForceReinstall : undefined}
           />
         ))
       )}

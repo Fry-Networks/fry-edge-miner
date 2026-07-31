@@ -206,3 +206,62 @@ pub async fn toggle_integration(
     tracing::info!(integration = id, enabled = enabled, "Integration toggled");
     Ok(())
 }
+
+/// Force a clean reinstall of an integration whose installer state is stuck
+/// (F2: uninstalled Olostep would neither reinstall nor surface why). Kills
+/// the partner process, wipes every install artifact, then re-runs
+/// install + start. Currently supported for Olostep (aem) only.
+#[tauri::command]
+pub async fn force_reinstall_integration(
+    id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    if id != "aem" {
+        return Err(format!(
+            "Force reinstall is not supported for integration '{}'",
+            id
+        ));
+    }
+
+    let integration = {
+        let reg = state.registry.lock().map_err(|e| e.to_string())?;
+        reg.get(&id)
+            .ok_or_else(|| format!("Integration '{}' not found", id))?
+    };
+
+    tracing::info!(integration = id, "Force reinstall: cleaning previous install");
+    tokio::task::block_in_place(crate::integrations::aem::AemIntegration::force_clean);
+
+    if let Err(e) = integration.install().await {
+        let err_msg = e.to_string();
+        if let Ok(mut errs) = state.last_integration_error.write() {
+            errs.insert(id.clone(), Some(err_msg.clone()));
+        }
+        return Err(err_msg);
+    }
+    if let Err(e) = integration.start().await {
+        let err_msg = e.to_string();
+        if let Ok(mut errs) = state.last_integration_error.write() {
+            errs.insert(id.clone(), Some(err_msg.clone()));
+        }
+        return Err(err_msg);
+    }
+
+    // Reinstall implies the user wants it running — mirror the enable path.
+    {
+        let mut reg = state.registry.lock().map_err(|e| e.to_string())?;
+        reg.set_enabled(&id, true);
+    }
+    state
+        .config
+        .update(|cfg| {
+            cfg.integrations_enabled.insert(id.clone(), true);
+        })
+        .map_err(|e| e.to_string())?;
+    if let Ok(mut errs) = state.last_integration_error.write() {
+        errs.insert(id.clone(), None);
+    }
+
+    tracing::info!(integration = id, "Force reinstall complete");
+    Ok(())
+}
