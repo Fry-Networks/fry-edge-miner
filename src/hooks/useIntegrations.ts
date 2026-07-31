@@ -230,5 +230,32 @@ export function useIntegrations() {
     [integrations, fetch, fetchSystem]
   )
 
-  return { integrations, loading, error, toggle, refetch: fetch, system, dockerProgress }
+  // F2: clean-slate reinstall for a stuck integration (backend wipes all
+  // install artifacts, then installs + starts). Currently Olostep-only.
+  const forceReinstall = useCallback(
+    async (id: string) => {
+      const current = integrations.find((i) => i.id === id)
+      setIntegrations((prev) =>
+        prev.map((i) => (i.id === id ? { ...i, lifecycle: 'Installing' } : i))
+      )
+      inflightToggles.current += 1
+      try {
+        await invoke('force_reinstall_integration', { id })
+        setError(null)
+      } catch (e) {
+        console.warn(`force_reinstall_integration(${id}) failed:`, e)
+        setError(`${current?.name ?? id}: ${extractErrorMessage(e)}`)
+      } finally {
+        inflightToggles.current -= 1
+        if (inflightToggles.current === 0) {
+          setDockerProgress(null)
+        }
+        await fetch()
+        fetchSystem()
+      }
+    },
+    [integrations, fetch, fetchSystem]
+  )
+
+  return { integrations, loading, error, toggle, forceReinstall, refetch: fetch, system, dockerProgress }
 }

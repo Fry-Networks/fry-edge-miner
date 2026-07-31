@@ -10,7 +10,7 @@ pub struct SystemStatus {
 }
 
 /// System prerequisite snapshot for the frontend (Docker state drives the
-/// availability display of Presearch/Diiisco cards).
+/// availability display of the Diiisco card).
 #[tauri::command]
 pub async fn get_system_status() -> Result<SystemStatus, String> {
     // docker info + the CIM virtualization probe are blocking subprocesses.
