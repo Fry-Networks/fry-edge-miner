@@ -38,11 +38,13 @@ pub async fn get_device_info(
 ) -> Result<DeviceInfo, String> {
     let config = state.config.get();
 
-    // Validate config-loaded key format before using
+    // Validate config-loaded key format before using. Case is preserved:
+    // the server-side device doc is keyed by the exact stored string, and a
+    // re-cased display key breaks the dashboard's case-sensitive claim (D1).
     let miner_key = config
         .miner_key
         .as_ref()
-        .and_then(|k| crate::config::miner_key::normalize_fem_key(k).ok());
+        .and_then(|k| crate::config::miner_key::validate_fem_key_preserve_case(k).ok());
     if config.miner_key.is_some() && miner_key.is_none() {
         tracing::warn!("Stored miner_key has invalid format; treating as unregistered");
     }
@@ -99,8 +101,10 @@ pub async fn register_device(
     crate::config::wallet::validate_address(&wallet).map_err(|e| e.to_string())?;
 
     let miner_key = match miner_key {
-        Some(k) => match crate::config::miner_key::normalize_fem_key(&k) {
-            Ok(normalized) => normalized,
+        // Preserve the case of user-provided keys: re-casing registers a NEW
+        // identity server-side and orphans the device's existing records (D1).
+        Some(k) => match crate::config::miner_key::validate_fem_key_preserve_case(&k) {
+            Ok(validated) => validated,
             Err(e) => return Err(e),
         },
         None => crate::config::miner_key::generate(),
@@ -317,9 +321,11 @@ pub async fn attempt_device_token_migration(
     // Only migrate if registered (miner_key + install_id) but no device_token
     let (miner_key, install_id) = match (&cfg.miner_key, &cfg.install_id) {
         (Some(k), Some(id)) if cfg.device_token.is_none() => {
-            // Validate key format before using in heartbeat
-            match crate::config::miner_key::normalize_fem_key(k) {
-                Ok(normalized) => (normalized, id.clone()),
+            // Validate key format before using in heartbeat. Case preserved —
+            // an uppercased key here would upsert a DUPLICATE server-side
+            // device doc for lowercase-keyed installs (D1 twin-doc bug).
+            match crate::config::miner_key::validate_fem_key_preserve_case(k) {
+                Ok(validated) => (validated, id.clone()),
                 Err(_) => {
                     tracing::warn!("Migration skipped: stored miner_key has invalid format");
                     return;
