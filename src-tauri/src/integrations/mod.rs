@@ -5,7 +5,6 @@ pub mod download;
 pub mod fryvpn;
 pub mod mysterium;
 pub mod mysterium_lan_check;
-pub mod presearch;
 pub mod space_acres;
 pub mod storj;
 

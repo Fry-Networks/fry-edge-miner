@@ -96,9 +96,6 @@ fn main() {
                 supervisor: supervisor.clone(),
                 log_dir: log_dir.clone(),
             }));
-            registry.register(Arc::new(integrations::presearch::PresearchIntegration {
-                config: config_store.clone(),
-            }));
             registry.register(Arc::new(integrations::storj::StorjIntegration));
             registry.register(Arc::new(integrations::diiisco::DiiiscoIntegration {
                 api_client: api_client.clone(),
@@ -111,9 +108,53 @@ fn main() {
                 supervisor: supervisor.clone(),
             }));
 
-            // Restore enabled states from config
+            // Restore enabled states from config. Skip ids no longer registered
+            // (e.g. the removed Presearch) — a stale key would otherwise inflate
+            // enabled_count()/proportion() with a ghost entry.
             for (id, enabled) in &cfg.integrations_enabled {
+                if registry.get(id).is_none() {
+                    tracing::info!(id = id.as_str(), "Config references a removed integration — ignoring");
+                    continue;
+                }
                 registry.set_enabled(id, *enabled);
+            }
+
+            // One-time Presearch cleanup (integration removed — project shut down):
+            // best-effort remove any orphaned Docker containers/volume an older FEM
+            // created, then drop the stale enabled key. The key's presence marks the
+            // cleanup as pending; every step swallows errors (Docker may be absent,
+            // containers may not exist) and never blocks boot.
+            if cfg.integrations_enabled.contains_key("presearch") {
+                let cleanup_config = config_store.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::task::block_in_place(|| {
+                        let cfg = cleanup_config.get();
+                        let mut names = vec![
+                            "presearch-node".to_string(),
+                            "presearch-node-unknown".to_string(),
+                        ];
+                        if let Some(key) = cfg.miner_key.as_ref() {
+                            let lower = key.to_lowercase();
+                            let suffix = lower[lower.len().saturating_sub(8)..].to_string();
+                            names.push(format!("presearch-{}", suffix));
+                        }
+                        for name in names {
+                            let _ = supervisor::platform::command("docker")
+                                .args(["rm", "-f", &name])
+                                .output();
+                        }
+                        let _ = supervisor::platform::command("docker")
+                            .args(["volume", "rm", "presearch-node-storage"])
+                            .output();
+                    });
+                    if let Err(e) = cleanup_config.update(|c| {
+                        c.integrations_enabled.remove("presearch");
+                    }) {
+                        tracing::warn!(error = %e, "Could not drop stale presearch config key");
+                    } else {
+                        tracing::info!("Presearch cleanup complete — stale config key dropped");
+                    }
+                });
             }
 
             let last_health = Arc::new(RwLock::new(HashMap::<String, HealthStatus>::new()));
@@ -547,6 +588,7 @@ fn main() {
             commands::integration::get_integrations,
             commands::integration::install_integration,
             commands::integration::toggle_integration,
+            commands::integration::force_reinstall_integration,
             commands::device::get_device_info,
             commands::device::register_device,
             commands::device::deregister_device,
