@@ -35,6 +35,7 @@ pub struct AppState {
     pub cached_stake_tiers: Arc<RwLock<Option<HashMap<String, crate::api::types::StakeTier>>>>,
     pub cached_verified_status: Arc<RwLock<Option<crate::api::types::VerifiedStatus>>>,
     pub reporting_status: Arc<RwLock<crate::api::types::ReportingStatus>>,
+    pub last_token_recovery: Arc<RwLock<Option<std::time::Instant>>>,
 }
 
 fn main() {
@@ -381,6 +382,10 @@ fn main() {
                 }
             });
 
+            // 401 token-recovery cooldown, shared with the reporting loop.
+            let last_token_recovery: Arc<RwLock<Option<std::time::Instant>>> =
+                Arc::new(RwLock::new(None));
+
             // PoC reporter + lease renewal timer (every 10 minutes)
             let poc_config = config_store.clone();
             let poc_registry = registry.clone();
@@ -391,6 +396,7 @@ fn main() {
             let poc_verified_status = cached_verified_status.clone();
             let poc_cache_loop = poc_cache.clone();
             let poc_reporting = reporting_status.clone();
+            let poc_recovery_at = last_token_recovery.clone();
             tauri::async_runtime::spawn(async move {
                 // Verify runtime supports block_in_place — panics at first poll if
                 // current_thread, not 10 min later in the reward path. Same worker
@@ -439,6 +445,42 @@ fn main() {
                                 }
                             }
                         }
+                        // --- 401 recovery: the server no longer recognises this
+                        // device token. Clear it, re-register on the shared token,
+                        // and retry this tick's submission once.
+                        if commands::device::should_attempt_recovery(
+                            poc_result
+                                .as_ref()
+                                .err()
+                                .and_then(commands::device::api_error_status),
+                            cfg.device_token.is_some(),
+                            *poc_recovery_at.read().unwrap(),
+                            std::time::Instant::now(),
+                            commands::device::TOKEN_RECOVERY_COOLDOWN,
+                        ) {
+                            *poc_recovery_at.write().unwrap() = Some(std::time::Instant::now());
+                            if commands::device::attempt_token_recovery(&poc_config, &poc_client)
+                                .await
+                            {
+                                poc_result = poc_client
+                                    .put_json(&format!("/PoC/{}/hardware", key), &wrapped)
+                                    .await;
+                                let mut st = poc_reporting.write().unwrap();
+                                match &poc_result {
+                                    Ok(_) => {
+                                        st.last_poc_ok_at = Some(chrono::Utc::now().to_rfc3339());
+                                        st.last_poc_error = None;
+                                        st.consecutive_poc_failures = 0;
+                                        tracing::info!("PoC submission recovered after token refresh");
+                                    }
+                                    Err(e) => {
+                                        st.last_poc_error = Some(e.to_string());
+                                        tracing::warn!(error = %e, "PoC submission still failing after token recovery");
+                                    }
+                                }
+                            }
+                        }
+
                         if let Some(slot) = wrapped.document.slots.first() {
                             if let Err(e) = poc_cache_loop.append(slot) {
                                 tracing::warn!(error = %e, "PoC slot cache append failed");
@@ -578,6 +620,7 @@ fn main() {
                 cached_reward_config,
                 cached_stake_tiers,
                 cached_verified_status,
+                last_token_recovery,
             });
 
             tracing::info!("FEM initialized — {integration_count} integrations registered");
