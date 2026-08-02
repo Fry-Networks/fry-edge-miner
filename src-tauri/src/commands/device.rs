@@ -381,9 +381,227 @@ pub async fn attempt_device_token_migration(
 }
 
 
+/// Cooldown between automatic device-token recovery attempts.
+pub const TOKEN_RECOVERY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// HTTP status carried by an API error, when it has one.
+pub fn api_error_status(err: &crate::api::client::ApiError) -> Option<u16> {
+    match err {
+        crate::api::client::ApiError::HttpStatus(code, _) => Some(*code),
+        _ => None,
+    }
+}
+
+/// Whether a failed request should trigger device-token recovery.
+///
+/// Only a 401 raised *while holding a per-device token* means the token is
+/// stale: `/credentials/{miner_key}/verified` rejects the shared FEM token by
+/// design, so a device without a device_token 401s there normally and must not
+/// be dragged through recovery. Repeat attempts are bounded by `cooldown`.
+pub fn should_attempt_recovery(
+    status: Option<u16>,
+    has_device_token: bool,
+    last_attempt: Option<std::time::Instant>,
+    now: std::time::Instant,
+    cooldown: std::time::Duration,
+) -> bool {
+    if status != Some(401) || !has_device_token {
+        return false;
+    }
+    match last_attempt {
+        Some(prev) => now.saturating_duration_since(prev) >= cooldown,
+        None => true,
+    }
+}
+
+/// Drop the stored per-device token. Returns true when one was actually held.
+pub fn clear_device_token_in(cfg: &mut crate::config::FemConfig) -> bool {
+    if cfg.device_token.is_none() {
+        return false;
+    }
+    cfg.device_token = None;
+    true
+}
+
+/// Recover from a rejected device token: clear it, re-register on the shared
+/// token, and store the freshly issued device token. Returns true on success.
+///
+/// Fail-safe: any failure leaves the device on the shared token and logs; the
+/// caller retries on a later tick once the cooldown has elapsed.
+pub async fn attempt_token_recovery(
+    config: &std::sync::Arc<crate::config::store::ConfigStore>,
+    api_client: &std::sync::Arc<crate::api::client::ApiClient>,
+) -> bool {
+    let cfg = config.get();
+
+    let (miner_key, install_id) = match (&cfg.miner_key, &cfg.install_id) {
+        (Some(k), Some(id)) => {
+            // Case preserved — see attempt_device_token_migration (D1 twin-doc bug).
+            match crate::config::miner_key::validate_fem_key_preserve_case(k) {
+                Ok(validated) => (validated, id.clone()),
+                Err(_) => {
+                    tracing::warn!("Token recovery skipped: stored miner_key has invalid format");
+                    return false;
+                }
+            }
+        }
+        _ => return false,
+    };
+
+    tracing::warn!(
+        miner_key = %miner_key,
+        "Server rejected the device token (HTTP 401) — clearing it and re-registering"
+    );
+
+    // Drop the dead token first so the re-registration goes out on the shared token.
+    if let Err(e) = config.update(|c| {
+        clear_device_token_in(c);
+    }) {
+        tracing::warn!(error = %e, "Failed to persist device_token clear — continuing in memory");
+    }
+    api_client.set_bearer_token(config.get().effective_api_token());
+
+    // Field sourcing: identical to register_device and attempt_device_token_migration.
+    let heartbeat = crate::api::types::InstallationHeartbeat {
+        miner_key: miner_key.clone(),
+        install_id: install_id.clone(),
+        miner_code: Some("FEM".to_string()),
+        software_version_installed: Some(env!("CARGO_PKG_VERSION").to_string()),
+        poc_version_installed: Some("1.0.0".to_string()),
+        hostname: std::env::var("COMPUTERNAME")
+            .ok()
+            .or_else(|| std::env::var("HOSTNAME").ok()),
+        os: Some(std::env::consts::OS.to_string()),
+        is_installed: Some(true),
+        device_name: cfg.device_name.clone(),
+    };
+
+    match crate::api::installations::register(api_client, &heartbeat).await {
+        Ok(resp) => match resp.device_token {
+            Some(token) => match config.update(|c| {
+                c.device_token = Some(token.clone());
+            }) {
+                Ok(()) => {
+                    api_client.set_bearer_token(token);
+                    tracing::info!(miner_key = %miner_key, "Device token recovered — re-registered");
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Recovered token could not be persisted");
+                    false
+                }
+            },
+            None => {
+                tracing::warn!(miner_key = %miner_key, "Re-registration returned no device_token");
+                false
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                miner_key = %miner_key,
+                error = %e,
+                "Token recovery failed — retrying after the cooldown"
+            );
+            false
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn get_reporting_status(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<crate::api::types::ReportingStatus, String> {
     Ok(state.reporting_status.read().unwrap().clone())
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    const COOLDOWN: Duration = Duration::from_secs(300);
+
+    fn cfg_with(device_token: Option<&str>) -> crate::config::FemConfig {
+        let mut cfg = crate::config::FemConfig::default();
+        cfg.api_token = "bootstrap-token".to_string();
+        cfg.device_token = device_token.map(|s| s.to_string());
+        cfg
+    }
+
+    #[test]
+    fn stale_device_token_401_triggers_recovery() {
+        assert!(should_attempt_recovery(
+            Some(401),
+            true,
+            None,
+            Instant::now(),
+            COOLDOWN
+        ));
+    }
+
+    #[test]
+    fn recovery_skipped_without_a_device_token() {
+        // /credentials/{miner_key}/verified rejects the shared FEM token by design,
+        // so a 401 while holding no device token is expected — not a stale token.
+        assert!(!should_attempt_recovery(
+            Some(401),
+            false,
+            None,
+            Instant::now(),
+            COOLDOWN
+        ));
+    }
+
+    #[test]
+    fn non_401_failures_do_not_trigger_recovery() {
+        let now = Instant::now();
+        assert!(!should_attempt_recovery(Some(500), true, None, now, COOLDOWN));
+        assert!(!should_attempt_recovery(Some(403), true, None, now, COOLDOWN));
+        assert!(!should_attempt_recovery(None, true, None, now, COOLDOWN));
+    }
+
+    #[test]
+    fn cooldown_bounds_repeated_recovery_attempts() {
+        let base = Instant::now();
+        let now = base + Duration::from_secs(600);
+        // last attempt 60s ago — still inside the cooldown
+        assert!(!should_attempt_recovery(
+            Some(401),
+            true,
+            Some(base + Duration::from_secs(540)),
+            now,
+            COOLDOWN
+        ));
+        // last attempt 600s ago — cooldown elapsed
+        assert!(should_attempt_recovery(
+            Some(401),
+            true,
+            Some(base),
+            now,
+            COOLDOWN
+        ));
+    }
+
+    #[test]
+    fn clearing_the_device_token_falls_back_to_the_shared_token() {
+        let mut cfg = cfg_with(Some("dead-device-token"));
+        assert_eq!(cfg.effective_api_token(), "dead-device-token");
+        assert!(clear_device_token_in(&mut cfg));
+        assert!(cfg.device_token.is_none());
+        assert_eq!(cfg.effective_api_token(), "bootstrap-token");
+    }
+
+    #[test]
+    fn clearing_is_idempotent_when_no_device_token_is_held() {
+        let mut cfg = cfg_with(None);
+        assert!(!clear_device_token_in(&mut cfg));
+        assert_eq!(cfg.effective_api_token(), "bootstrap-token");
+    }
+
+    #[test]
+    fn api_error_status_extracts_the_http_code() {
+        let unauthorized =
+            crate::api::client::ApiError::HttpStatus(401, "Invalid token".to_string());
+        assert_eq!(api_error_status(&unauthorized), Some(401));
+    }
 }
