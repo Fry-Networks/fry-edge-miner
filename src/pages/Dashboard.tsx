@@ -7,6 +7,7 @@ import StatCard from '../components/StatCard'
 import Divider from '../components/primitives/Divider'
 import { useRewards } from '../hooks/useRewards'
 import { useReporting } from '../hooks/useReporting'
+import { activeFraction, proportionPct } from '../lib/integrationCount'
 
 interface DashboardIntegration {
   id: string
@@ -33,7 +34,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
     !!reporting?.registered && !notReporting && reporting.consecutive_poc_failures > 0
   const summary = rewards.summary
   const active = intgs.filter((i) => i.enabled)
-  const pct = intgs.length > 0 ? ((active.length / intgs.length) * 100).toFixed(0) : '0'
+  const pct = String(proportionPct(active.length, intgs.length))
   const slotHits = rewards.slots.filter((s) => s.done).length
   const estimated = summary ? summary.estimated_daily.toFixed(2) : '0.00'
   const rewardToken = summary ? summary.reward_token_name : '—'
@@ -87,7 +88,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
         <StatCard
           Icon={Puzzle}
           label="Active Integrations"
-          value={`${active.length} / 5`}
+          value={`${active.length} / ${intgs.length}`}
           sub={`${pct}% reward proportion`}
           accent="var(--teal)"
         />
@@ -197,13 +198,13 @@ export default function Dashboard({ intgs }: DashboardProps) {
           <div style={{ marginBottom: 12 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
               <span style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t1)' }}>Active</span>
-              <span style={{ fontFamily: 'var(--fm)', fontSize: 11, color: 'var(--teal)' }}>{active.length}/5</span>
+              <span style={{ fontFamily: 'var(--fm)', fontSize: 11, color: 'var(--teal)' }}>{activeFraction(active.length, intgs.length)}</span>
             </div>
             <div style={{ height: 4, background: 'var(--b1)', borderRadius: 2, overflow: 'hidden' }}>
               <div
                 style={{
                   height: '100%',
-                  width: `${(active.length / 5) * 100}%`,
+                  width: `${proportionPct(active.length, intgs.length)}%`,
                   background: 'var(--teal)',
                   borderRadius: 2,
                   transition: 'width .5s ease'

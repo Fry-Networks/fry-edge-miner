@@ -41,7 +41,7 @@ export default function Step2Review({ onNext, onBack }: Step2Props) {
           Review Integrations
         </div>
         <div style={{ fontFamily: 'var(--fb)', fontSize: 13, color: 'var(--t1)' }}>
-          All 5 integrations are installed with FEM. You can enable or disable them after setup — disabled
+          All {INTEGRATION_META.length} integrations are installed with FEM. You can enable or disable them after setup — disabled
           integrations reduce your reward proportionally.
         </div>
       </div>
