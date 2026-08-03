@@ -155,7 +155,7 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
         fontFamily: 'var(--fb)'
       }}
     >
-      <Sidebar page={page} onNav={setPage} activeCount={activeCount} hasUnhealthy={hasUnhealthy} deviceName={deviceName} minerKey={minerKey} />
+      <Sidebar page={page} onNav={setPage} activeCount={activeCount} totalCount={integrations.length} hasUnhealthy={hasUnhealthy} deviceName={deviceName} minerKey={minerKey} />
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <TopBar page={page} connectivity={connectivity} />
         {error && <ErrorBanner error={error} />}

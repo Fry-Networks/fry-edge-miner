@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 import NetSVG from './NetSVG'
 import Dot from './primitives/Dot'
+import { activeFraction } from '../lib/integrationCount'
 
 export type NavPage = 'dashboard' | 'integrations' | 'rewards' | 'settings' | 'updates'
 
@@ -23,6 +24,7 @@ interface SidebarProps {
   page: NavPage
   onNav: (id: NavPage) => void
   activeCount: number
+  totalCount: number
   hasUnhealthy?: boolean
   deviceName?: string
   minerKey?: string
@@ -34,7 +36,7 @@ function truncateMinerKey(key: string): string {
   return `FEM-${body.slice(0, 4).toLowerCase()}…${body.slice(-4).toLowerCase()}`
 }
 
-export default function Sidebar({ page, onNav, activeCount, hasUnhealthy, deviceName = 'FEM Device', minerKey }: SidebarProps) {
+export default function Sidebar({ page, onNav, activeCount, totalCount, hasUnhealthy, deviceName = 'FEM Device', minerKey }: SidebarProps) {
   const minerKeyDisplay = truncateMinerKey(minerKey ?? '')
   return (
     <div
@@ -94,7 +96,7 @@ export default function Sidebar({ page, onNav, activeCount, hasUnhealthy, device
             }}
           >
             <Dot status={activeCount === 0 ? 'stopped' : hasUnhealthy ? 'warn' : 'run'} size={5} />
-            <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: hasUnhealthy ? 'var(--amb)' : 'var(--teal)' }}>{activeCount}/5 active</span>
+            <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: hasUnhealthy ? 'var(--amb)' : 'var(--teal)' }}>{activeFraction(activeCount, totalCount)} active</span>
           </div>
         </div>
       </div>
