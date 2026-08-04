@@ -5,6 +5,11 @@ import {
   Eye,
   Shield,
   Cloud,
+  Network,
+  Database,
+  Lock,
+  Server,
+  Wifi,
   type LucideIcon
 } from 'lucide-react'
 
@@ -71,6 +76,51 @@ export const INTEGRATION_META: IntegrationMeta[] = [
     desc: 'Provide bandwidth to the Fry decentralized VPN network',
     Icon: Shield,
     col: '#ef4444',
+    uptime: 0
+  },
+  {
+    id: 'titan',
+    name: 'Titan Network',
+    tag: 'EDGE NODE',
+    desc: 'Storage, bandwidth & IP contribution via Titan edge nodes',
+    Icon: Network,
+    col: '#e8452c',
+    uptime: 0
+  },
+  {
+    id: 'filecoin_checker',
+    name: 'Filecoin / Checker',
+    tag: 'CHECKER NODE',
+    desc: 'Filecoin network verification and CDN retrieval',
+    Icon: Database,
+    col: '#0090ff',
+    uptime: 0
+  },
+  {
+    id: 'sentinel',
+    name: 'Sentinel dVPN',
+    tag: 'VPN NODE',
+    desc: 'Decentralized VPN bandwidth node on Cosmos',
+    Icon: Lock,
+    col: '#0fa0ce',
+    uptime: 0
+  },
+  {
+    id: 'iagon',
+    name: 'Iagon Storage',
+    tag: 'STORAGE NODE',
+    desc: 'Decentralized storage on Cardano',
+    Icon: Server,
+    col: '#7b3fe4',
+    uptime: 0
+  },
+  {
+    id: 'pawns',
+    name: 'Pawns.app',
+    tag: 'BANDWIDTH NODE',
+    desc: 'Residential bandwidth sharing ($0.20/GB)',
+    Icon: Wifi,
+    col: '#f5a623',
     uptime: 0
   }
 ]
