@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   checker-node:
-    image: ghcr.io/checkernetwork/node:latest
+    image: ghcr.io/checkernetwork/node:latest@sha256:451f47322df725d1ef5aa0aed3e0e2e56fb3e5461ffd5eecfbfd70cfc609e63c
     container_name: filecoin_checker_node
     restart: unless-stopped
     environment:
