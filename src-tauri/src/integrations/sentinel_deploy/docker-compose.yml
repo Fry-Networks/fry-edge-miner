@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  sentinel-dvpnx:
+    image: ghcr.io/sentinel-official/sentinel-dvpnx:v9.0.0@sha256:49f7a11ae56baaa2c43de4384b56beff787e8d408bc37196cf63e3f6c10beca5
+    restart: unless-stopped
+    ports:
+      - "8585:8585"
+      - "51647:51647/udp"
+    volumes:
+      - sentinel_config:/root/.sentinel
+    environment:
+      - TZ=UTC
+
+volumes:
+  sentinel_config:
+    driver: local
