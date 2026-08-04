@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  checker-node:
+    image: ghcr.io/checkernetwork/node:latest
+    container_name: filecoin_checker_node
+    restart: unless-stopped
+    environment:
+      FIL_WALLET_ADDRESS: 0x6266b4eCEf7ac00B595F3eB701c42B2594DC8d97
+    volumes:
+      - checker_node_data:/home/node/.local/share/checker-network-node
+    labels:
+      com.docker.compose.project: filecoin_checker
+
+volumes:
+  checker_node_data:
+    driver: local
