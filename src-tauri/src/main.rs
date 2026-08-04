@@ -3,12 +3,14 @@
 mod api;
 mod commands;
 mod config;
+mod docker_watcher;
 mod events;
 mod integrations;
 mod logging;
 mod migration;
 mod poc;
 mod supervisor;
+mod updater_auto;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -338,6 +340,30 @@ fn main() {
                     }
                     tracing::info!("Startup recovery pass complete");
                 });
+            }
+
+            // --- Docker watcher (async — monitors Docker state and auto-heals deferred integrations) ---
+            {
+                let watcher_registry = registry.clone();
+                let watcher_config = config_store.clone();
+                let watcher_health = last_health.clone();
+                let watcher_error = Arc::new(RwLock::new(HashMap::<String, Option<String>>::new()));
+                tauri::async_runtime::spawn(docker_watcher::spawn_docker_watcher(
+                    watcher_registry,
+                    watcher_config,
+                    watcher_health,
+                    watcher_error,
+                ));
+            }
+
+            // --- Auto-updater (async — checks for updates every 6 hours) ---
+            {
+                let updater_config = config_store.clone();
+                let updater_app = app.handle().clone();
+                tauri::async_runtime::spawn(updater_auto::spawn_auto_updater(
+                    updater_app,
+                    updater_config,
+                ));
             }
 
             let reporting_status =
