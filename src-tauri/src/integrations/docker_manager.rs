@@ -219,7 +219,8 @@ fn find_docker_desktop() -> Option<PathBuf> {
 }
 
 /// Try to start Docker Desktop on Windows.
-fn try_start_docker_desktop() -> Result<()> {
+/// User-level spawn, NO UAC prompt. Safe to call from auto-healing paths.
+pub(crate) fn try_start_docker_desktop() -> Result<()> {
     let docker_exe = find_docker_desktop()
         .ok_or_else(|| anyhow::anyhow!("Docker Desktop not found in standard paths"))?;
 

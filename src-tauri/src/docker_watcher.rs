@@ -24,6 +24,8 @@ pub async fn spawn_docker_watcher(
     last_integration_error: Arc<RwLock<HashMap<String, Option<String>>>>,
 ) {
     let mut not_ready_count: u32 = 0;
+    let mut engine_start_attempts: u32 = 0;
+    let mut last_engine_start_time = std::time::Instant::now();
 
     loop {
         // Compute interval: 90 sec normally, back off to 5 min after 10 not-ready polls
@@ -43,6 +45,48 @@ pub async fn spawn_docker_watcher(
 
         if docker_status != DockerStatus::Ready {
             not_ready_count += 1;
+
+            // If DaemonStopped and we haven't exceeded attempt limit and ≥10 min since last attempt
+            if docker_status == DockerStatus::DaemonStopped
+                && engine_start_attempts < 3
+                && last_engine_start_time.elapsed() >= Duration::from_secs(600) // 10 min
+            {
+                info!("Docker daemon stopped — attempting to start it");
+                match tokio::task::block_in_place(|| {
+                    crate::integrations::docker_manager::try_start_docker_desktop()
+                }) {
+                    Ok(()) => {
+                        info!("Docker Desktop start initiated");
+                        engine_start_attempts += 1;
+                        last_engine_start_time = std::time::Instant::now();
+
+                        // Update UI health for Docker-gated integrations
+                        if let Ok(mut health_map) = last_health.write() {
+                            let reg = registry.lock().unwrap();
+                            for integration in reg.list() {
+                                let id = integration.id();
+                                if reg.is_enabled(id) && integration.requires_docker() {
+                                    health_map.insert(
+                                        id.to_string(),
+                                        HealthStatus::Unhealthy("Docker engine starting...".to_string()),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to start Docker Desktop");
+                    }
+                }
+            } else if docker_status == DockerStatus::DaemonStopped {
+                // Log that we're not attempting (limit reached or too soon)
+                info!(
+                    attempts = engine_start_attempts,
+                    elapsed_since_last_attempt_secs = last_engine_start_time.elapsed().as_secs(),
+                    "Docker daemon stopped but not attempting start (limit or cooldown)"
+                );
+            }
+
             info!(
                 ?docker_status,
                 not_ready_count,
@@ -51,8 +95,9 @@ pub async fn spawn_docker_watcher(
             continue;
         }
 
-        // Docker is ready — reset backoff counter
+        // Docker is ready — reset backoff counter and attempt limit
         not_ready_count = 0;
+        engine_start_attempts = 0;
 
         // Attempt recovery for deferred Docker-dependent integrations
         match attempt_docker_dependent_recovery(&registry, &config, &last_health, &last_integration_error)
@@ -74,7 +119,7 @@ pub async fn spawn_docker_watcher(
 /// Returns list of successfully recovered integration IDs, or error if registry lock fails.
 async fn attempt_docker_dependent_recovery(
     registry: &Arc<Mutex<IntegrationRegistry>>,
-    config: &Arc<ConfigStore>,
+    _config: &Arc<ConfigStore>,
     last_health: &Arc<RwLock<HashMap<String, HealthStatus>>>,
     last_integration_error: &Arc<RwLock<HashMap<String, Option<String>>>>,
 ) -> Result<Vec<String>, String> {
@@ -211,7 +256,7 @@ mod tests {
     fn should_attempt_recovery(status: &HealthStatus) -> bool {
         match status {
             HealthStatus::Healthy | HealthStatus::Stopped => false,
-            HealthStatus::Unhealthy(_) | HealthStatus::Unknown | HealthStatus::Starting => true,
+            HealthStatus::Unhealthy(_) | HealthStatus::Unknown | HealthStatus::Starting | HealthStatus::Installing => true,
         }
     }
 }
