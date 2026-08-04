@@ -2,10 +2,7 @@ use super::{HealthStatus, Integration, PocGateData};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tracing::{info, warn};
-use crate::api::client::ApiClient;
-use crate::config::store::ConfigStore;
 
 fn deploy_dir() -> PathBuf {
     dirs::data_local_dir()
@@ -30,10 +27,7 @@ fn tail_lines(s: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
-pub struct FilecoinCheckerIntegration {
-    pub api_client: Arc<ApiClient>,
-    pub config: Arc<ConfigStore>,
-}
+pub struct FilecoinCheckerIntegration;
 
 #[async_trait]
 impl Integration for FilecoinCheckerIntegration {
@@ -147,7 +141,9 @@ impl Integration for FilecoinCheckerIntegration {
             .output()
         {
             Ok(o) => o,
-            Err(_) => return HealthStatus::Healthy, // can't check logs, assume running
+            // Container is confirmed running but logs are unreadable — health is
+            // unverified, so report Starting (poa stays false) rather than Healthy.
+            Err(_) => return HealthStatus::Starting,
         };
 
         let logs = String::from_utf8_lossy(&logs_output.stdout);
