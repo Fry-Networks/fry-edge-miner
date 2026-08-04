@@ -115,6 +115,14 @@ fn main() {
                 supervisor: supervisor.clone(),
                 log_dir: log_dir.clone(),
             }));
+            registry.register(Arc::new(integrations::filecoin_checker::FilecoinCheckerIntegration {
+                api_client: api_client.clone(),
+                config: config_store.clone(),
+            }));
+            registry.register(Arc::new(integrations::iagon::IagonIntegration {
+                supervisor: supervisor.clone(),
+            }));
+            registry.register(Arc::new(integrations::pawns::PawnsIntegration));
 
             // Restore enabled states from config. Skip ids no longer registered
             // (e.g. the removed Presearch) — a stale key would otherwise inflate
