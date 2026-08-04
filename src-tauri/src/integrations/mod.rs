@@ -5,8 +5,10 @@ pub mod download;
 pub mod fryvpn;
 pub mod mysterium;
 pub mod mysterium_lan_check;
+pub mod sentinel;
 pub mod space_acres;
 pub mod storj;
+pub mod titan;
 
 use std::collections::HashMap;
 use std::sync::Arc;

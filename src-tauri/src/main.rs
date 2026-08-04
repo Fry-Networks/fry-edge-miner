@@ -110,6 +110,11 @@ fn main() {
                 config: config_store.clone(),
                 supervisor: supervisor.clone(),
             }));
+            registry.register(Arc::new(integrations::sentinel::SentinelIntegration));
+            registry.register(Arc::new(integrations::titan::TitanIntegration {
+                supervisor: supervisor.clone(),
+                log_dir: log_dir.clone(),
+            }));
 
             // Restore enabled states from config. Skip ids no longer registered
             // (e.g. the removed Presearch) — a stale key would otherwise inflate
