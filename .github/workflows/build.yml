@@ -104,7 +104,7 @@ jobs:
             'platforms': {
               'windows-x86_64': {
                 'signature': '''${NSIS_SIG}'''.strip(),
-                'url': 'https://github.com/Fry-Foundation/fry-edge-miner/releases/download/v${VERSION}/${NSIS_EXE_URL}'
+                'url': 'https://github.com/fry-networks/fry-edge-miner/releases/download/v${VERSION}/${NSIS_EXE_URL}'
               }
             }
           }, indent=2))
