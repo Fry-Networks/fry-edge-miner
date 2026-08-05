@@ -28,6 +28,120 @@ fn tail_lines(s: &str, n: usize) -> String {
 
 pub struct SentinelIntegration;
 
+impl SentinelIntegration {
+    /// Public address the node advertises. Falls back to the image default
+    /// (127.0.0.1) when lookup fails — the node still boots, it is simply not
+    /// reachable from the network until the operator forwards a port.
+    async fn public_addr() -> String {
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return "127.0.0.1".to_string(),
+        };
+        match client.get("https://api.ipify.org").send().await {
+            Ok(r) => r
+                .text()
+                .await
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && s.len() < 64)
+                .unwrap_or_else(|| "127.0.0.1".to_string()),
+            Err(_) => "127.0.0.1".to_string(),
+        }
+    }
+
+    fn compose_run(compose: &std::path::Path, extra: &[&str], stdin_lines: Option<&str>) -> Result<std::process::Output> {
+        let compose_str = compose.to_string_lossy().to_string();
+        let mut args: Vec<&str> = vec!["compose", "-f", &compose_str, "run", "--rm", "--no-deps"];
+        args.push("sentinel-dvpnx");
+        args.extend_from_slice(extra);
+
+        let mut child = crate::supervisor::platform::command("docker")
+            .args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+
+        if let Some(input) = stdin_lines {
+            use std::io::Write;
+            if let Some(mut sin) = child.stdin.take() {
+                let _ = sin.write_all(input.as_bytes());
+            }
+        } else {
+            drop(child.stdin.take());
+        }
+        Ok(child.wait_with_output()?)
+    }
+
+    /// Idempotent: `init` aborts if config exists, `keys add` fails if the key
+    /// exists — both are treated as "already provisioned".
+    async fn init_node_config(compose: &std::path::Path) -> Result<()> {
+        let addr = Self::public_addr().await;
+        info!(remote_addr = %addr, "Initializing Sentinel node config");
+
+        let out = Self::compose_run(
+            compose,
+            &[
+                "init",
+                "--keyring.backend",
+                "test",
+                "--node.service-type",
+                "wireguard",
+                "--node.remote-addrs",
+                &addr,
+            ],
+            None,
+        )?;
+        let init_err = String::from_utf8_lossy(&out.stderr).to_string();
+        if !out.status.success() && !init_err.contains("already exists") {
+            warn!(stderr = %tail_lines(&init_err, 5), "Sentinel init reported an error");
+        }
+
+        // Empty mnemonic line → generate a fresh key; empty passphrase line.
+        let keys = Self::compose_run(
+            compose,
+            &["keys", "add", "main", "--keyring.backend", "test"],
+            Some("\n\n"),
+        )?;
+        let keys_out = format!(
+            "{}{}",
+            String::from_utf8_lossy(&keys.stdout),
+            String::from_utf8_lossy(&keys.stderr)
+        );
+        if keys.status.success() {
+            if let Some(line) = keys_out.lines().find(|l| l.trim_start().starts_with("address:")) {
+                info!(node_account = %line.trim(), "Sentinel node key created");
+            }
+        } else if !keys_out.contains("already exists") {
+            warn!(detail = %tail_lines(&keys_out, 5), "Sentinel key creation reported an error");
+        }
+        Ok(())
+    }
+
+    /// Node account address, read back from the keyring for the fund-me hint.
+    fn node_address(compose: &std::path::Path) -> Option<String> {
+        let out = Self::compose_run(
+            compose,
+            &["keys", "show", "main", "--keyring.backend", "test"],
+            None,
+        )
+        .ok()?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        text.lines()
+            .find(|l| l.trim_start().starts_with("address:"))
+            .and_then(|l| l.split(':').nth(1))
+            .map(|s| s.trim().to_string())
+            .filter(|s| s.starts_with("sent1"))
+    }
+}
+
 #[async_trait]
 impl Integration for SentinelIntegration {
     fn id(&self) -> &str {
@@ -63,11 +177,9 @@ impl Integration for SentinelIntegration {
             anyhow::bail!("Failed to pull Sentinel dVPN image: {}", tail_lines(&stderr, 15));
         }
 
-        // TODO: First-run node config initialization. The Sentinel dVPN image
-        // (`sentinel-dvpnx` binary) requires initial configuration. Run one-shot:
-        // docker compose run --rm sentinel-dvpnx <config init command>
-        // Exact CLI syntax must be determined from image inspection or docs.
-        // For now, the image pull succeeds and startup can proceed.
+        // First run: generate config.toml + a per-device `main` key inside the
+        // named volume. `dvpnx start` refuses to boot without both.
+        Self::init_node_config(&compose_file()).await?;
 
         info!("Sentinel dVPN install complete");
         Ok(())
@@ -176,7 +288,22 @@ impl Integration for SentinelIntegration {
                             ])
                             .output()
                         {
-                            let logs = String::from_utf8_lossy(&log_output.stderr);
+                            let logs = format!(
+                                "{}{}",
+                                String::from_utf8_lossy(&log_output.stdout),
+                                String::from_utf8_lossy(&log_output.stderr)
+                            );
+                            // Sentinel Hub refuses to start a node whose account
+                            // has never received DVPN — surface the address to
+                            // fund instead of a raw stack line.
+                            if logs.contains("does not exist") && logs.contains("account") {
+                                let addr = Self::node_address(&compose)
+                                    .unwrap_or_else(|| "the node account".to_string());
+                                return HealthStatus::Unhealthy(format!(
+                                    "Sentinel node account not funded — send DVPN to {} to activate this node",
+                                    addr
+                                ));
+                            }
                             return HealthStatus::Unhealthy(format!(
                                 "Container exited: {}",
                                 tail_lines(&logs, 5)

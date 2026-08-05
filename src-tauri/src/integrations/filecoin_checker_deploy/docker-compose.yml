@@ -7,6 +7,9 @@ services:
     restart: unless-stopped
     environment:
       FIL_WALLET_ADDRESS: 0x6266b4eCEf7ac00B595F3eB701c42B2594DC8d97
+      # /home/node/.local is root-owned in the image; the checker writes its
+      # instance id under $XDG_STATE_HOME, so point that inside the volume.
+      XDG_STATE_HOME: /home/node/.local/share/checker-state
     volumes:
       - checker_node_data:/home/node/.local/share/checker-network-node
     labels:
