@@ -5,17 +5,18 @@ services:
     image: ghcr.io/checkernetwork/node:latest@sha256:451f47322df725d1ef5aa0aed3e0e2e56fb3e5461ffd5eecfbfd70cfc609e63c
     container_name: filecoin_checker_node
     restart: unless-stopped
+    # The image has no /home/node/.local, so Docker creates the mount point
+    # root-owned and the default `node` user cannot write its state there.
+    # Running as root keeps the state dir writable inside the container.
+    user: "0:0"
     environment:
       FIL_WALLET_ADDRESS: 0x6266b4eCEf7ac00B595F3eB701c42B2594DC8d97
-      # /home/node/.local is root-owned in the image, so the checker cannot
-      # mkdir its state dir there. Mount the whole node-owned share dir and
-      # keep both the node state and the checker id inside it.
-      XDG_STATE_HOME: /home/node/.local/share/checker-state
+      XDG_STATE_HOME: /home/node/.local/state
     volumes:
-      - checker_share:/home/node/.local/share
+      - checker_local:/home/node/.local
     labels:
       com.docker.compose.project: filecoin_checker
 
 volumes:
-  checker_share:
+  checker_local:
     driver: local

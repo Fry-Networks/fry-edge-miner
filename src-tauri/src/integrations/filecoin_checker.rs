@@ -155,7 +155,21 @@ impl Integration for FilecoinCheckerIntegration {
             Err(_) => return HealthStatus::Starting,
         };
 
-        let logs = String::from_utf8_lossy(&logs_output.stdout);
+        let logs = format!(
+            "{}{}",
+            String::from_utf8_lossy(&logs_output.stdout),
+            String::from_utf8_lossy(&logs_output.stderr)
+        );
+
+        // The Checker retries forever when the reward wallet is not a live
+        // on-chain account, so say that plainly instead of "running".
+        if logs.contains("Failed to validate FIL_WALLET_ADDRESS") {
+            return HealthStatus::Unhealthy(
+                "Filecoin reward wallet not accepted — the f410 account for the configured \
+                 0x address must exist on-chain before the Checker can run"
+                    .to_string(),
+            );
+        }
 
         // Check for error or exit markers
         if logs.contains("error") || logs.contains("ERROR") || logs.contains("panic") {
