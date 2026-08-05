@@ -195,6 +195,15 @@ impl Integration for SentinelIntegration {
             );
         }
 
+        // install() only runs when installed_version() is None, so an existing
+        // deploy dir would otherwise pin a stale compose file forever. Refresh
+        // it from the shipped content, then make sure the volume really holds a
+        // config + `main` key (both are required for `dvpnx start`).
+        tokio::fs::write(&compose, include_str!("sentinel_deploy/docker-compose.yml")).await?;
+        if Self::node_address(&compose).is_none() {
+            Self::init_node_config(&compose).await?;
+        }
+
         info!("Starting Sentinel dVPN containers");
         let output = crate::supervisor::platform::command("docker")
             .args(["compose", "-f", &compose.to_string_lossy(), "up", "-d"])

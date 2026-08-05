@@ -81,6 +81,15 @@ impl Integration for FilecoinCheckerIntegration {
             );
         }
 
+        // install() only runs when installed_version() is None, so an existing
+        // deploy dir would otherwise pin a stale compose file forever. Refresh
+        // it from the shipped content on every start.
+        tokio::fs::write(
+            &compose,
+            include_str!("filecoin_checker_deploy/docker-compose.yml"),
+        )
+        .await?;
+
         info!("Starting Filecoin Checker containers");
         let output = crate::supervisor::platform::command("docker")
             .args(["compose", "-f", &compose.to_string_lossy(), "up", "-d"])
