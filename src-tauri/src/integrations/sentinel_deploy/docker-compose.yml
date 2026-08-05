@@ -3,12 +3,18 @@ version: '3.8'
 services:
   sentinel-dvpnx:
     image: ghcr.io/sentinel-official/sentinel-dvpnx:v9.0.0@sha256:49f7a11ae56baaa2c43de4384b56beff787e8d408bc37196cf63e3f6c10beca5
+    container_name: sentinel_dvpnx_node
     restart: unless-stopped
+    # dvpnx is the image entrypoint; `start` needs the node config + `main` key
+    # that install() creates in the volume below.
+    command: ["start", "--keyring.backend", "test"]
+    cap_add:
+      - NET_ADMIN
     ports:
-      - "8585:8585"
-      - "51647:51647/udp"
+      - "37729:37729"
+      - "51820:51820/udp"
     volumes:
-      - sentinel_config:/root/.sentinel
+      - sentinel_config:/root/.sentinel-dvpnx
     environment:
       - TZ=UTC
 
