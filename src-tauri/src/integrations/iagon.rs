@@ -27,8 +27,35 @@ impl IagonIntegration {
         return Self::partner_dir().join("iag-cli");
     }
 
+    /// Path users drop their Iagon authorization key into:
+    /// `<partners>/iagon/config.json` -> `{"node_token": "..."}`.
+    fn config_path() -> PathBuf {
+        Self::partner_dir().join("config.json")
+    }
+
+    /// Token lookup, in precedence order:
+    /// 1. `IAGON_NODE_TOKEN` env var (existing behaviour, useful for CI/testing)
+    /// 2. `node_token` in the per-integration config.json
+    /// 3. none — start() then fails closed with instructions
+    ///
+    /// Read fresh on every call so a user can paste their key and toggle the
+    /// integration without restarting the whole app.
     fn node_token() -> Option<String> {
-        std::env::var("IAGON_NODE_TOKEN").ok().filter(|s| !s.is_empty())
+        if let Some(t) = std::env::var("IAGON_NODE_TOKEN").ok().filter(|s| !s.is_empty()) {
+            return Some(t);
+        }
+        Self::token_from_config(&Self::config_path())
+    }
+
+    /// Split out from `node_token` so it can be tested without touching the
+    /// process environment.
+    fn token_from_config(path: &std::path::Path) -> Option<String> {
+        let raw = std::fs::read_to_string(path).ok()?;
+        let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        json.get("node_token")?
+            .as_str()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     }
 
     /// Verify SHA256 of downloaded binary if sha2 is available.
@@ -124,8 +151,10 @@ impl Integration for IagonIntegration {
         // Check for provisioned Iagon node token (fail-closed if missing)
         let _token = Self::node_token().ok_or_else(|| {
             anyhow::anyhow!(
-                "Iagon node token not provisioned — pending Iagon account setup. \
-                 Set the environment variable IAGON_NODE_TOKEN before enabling Iagon."
+                "Iagon node token not provisioned. Register a node at https://app.iagon.com, \
+                 then save the authorization key as {{\"node_token\": \"<key>\"}} in {} \
+                 (or set the IAGON_NODE_TOKEN environment variable).",
+                Self::config_path().display()
             )
         })?;
 
@@ -161,9 +190,11 @@ impl Integration for IagonIntegration {
 
         let token = Self::node_token();
         if token.is_none() {
-            return HealthStatus::Unhealthy(
-                "Iagon node token not provisioned — pending Iagon account setup".to_string(),
-            );
+            return HealthStatus::Unhealthy(format!(
+                "Iagon node token not provisioned — register a node at app.iagon.com and save \
+                 the key as {{\"node_token\": \"<key>\"}} in {}",
+                Self::config_path().display()
+            ));
         }
 
         // Check process status via supervisor
@@ -199,5 +230,51 @@ impl Integration for IagonIntegration {
             poa: binary_exists && token_set,
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::IagonIntegration;
+    use std::io::Write;
+
+    fn temp_config(contents: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("fem_iagon_cfg_{}_{}.json", std::process::id(), contents.len()));
+        let mut f = std::fs::File::create(&p).expect("create temp config");
+        f.write_all(contents.as_bytes()).expect("write temp config");
+        p
+    }
+
+    #[test]
+    fn reads_token_from_config_file() {
+        let p = temp_config(r#"{"node_token":"abc123"}"#);
+        assert_eq!(
+            IagonIntegration::token_from_config(&p),
+            Some("abc123".to_string())
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn ignores_blank_or_missing_token() {
+        let blank = temp_config(r#"{"node_token":"   "}"#);
+        assert_eq!(IagonIntegration::token_from_config(&blank), None);
+        let _ = std::fs::remove_file(&blank);
+
+        let absent = temp_config(r#"{"something_else":"x"}"#);
+        assert_eq!(IagonIntegration::token_from_config(&absent), None);
+        let _ = std::fs::remove_file(&absent);
+    }
+
+    #[test]
+    fn missing_or_malformed_file_is_none_not_panic() {
+        let missing = std::env::temp_dir().join("fem_iagon_definitely_absent.json");
+        let _ = std::fs::remove_file(&missing);
+        assert_eq!(IagonIntegration::token_from_config(&missing), None);
+
+        let bad = temp_config("not json at all");
+        assert_eq!(IagonIntegration::token_from_config(&bad), None);
+        let _ = std::fs::remove_file(&bad);
     }
 }
