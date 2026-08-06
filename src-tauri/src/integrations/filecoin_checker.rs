@@ -161,12 +161,16 @@ impl Integration for FilecoinCheckerIntegration {
             String::from_utf8_lossy(&logs_output.stderr)
         );
 
-        // The Checker retries forever when the reward wallet is not a live
-        // on-chain account, so say that plainly instead of "running".
+        // The Checker validates its reward wallet by calling
+        // station-wallet-screening.fly.dev, which no longer resolves (the
+        // service was decommissioned and the upstream repo is unmaintained).
+        // Every published version still calls it, so this is not something a
+        // funded wallet or a config change can fix.
         if logs.contains("Failed to validate FIL_WALLET_ADDRESS") {
             return HealthStatus::Unhealthy(
-                "Filecoin reward wallet not accepted — the f410 account for the configured \
-                 0x address must exist on-chain before the Checker can run"
+                "Checker cannot start — its upstream wallet-screening service \
+                 (station-wallet-screening.fly.dev) has been decommissioned, so wallet \
+                 validation can never succeed. Waiting on an upstream fix."
                     .to_string(),
             );
         }
