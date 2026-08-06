@@ -1,9 +1,16 @@
-import { AlertTriangle, Loader2 } from 'lucide-react'
+import { AlertTriangle, Cpu, HardDrive, Loader2, Radio, type LucideIcon } from 'lucide-react'
+import CategorySection from '../components/CategorySection'
 import IntCard from '../components/IntCard'
 import EmptyState from '../components/primitives/EmptyState'
-import Lbl from '../components/primitives/Lbl'
 import type { FrontendIntegration } from '../hooks/useIntegrations'
+import { CATEGORIES, type IntegrationCategory } from '../lib/integrationMeta'
 import type { DockerProgress, SystemStatus } from '../lib/types'
+
+const CATEGORY_ICONS: Record<IntegrationCategory, LucideIcon> = {
+  'VPN & Bandwidth': Radio,
+  'Storage & Farming': HardDrive,
+  'AI & Data': Cpu
+}
 
 interface IntegrationsProps {
   intgs: FrontendIntegration[]
@@ -99,19 +106,38 @@ export default function Integrations({ intgs, onToggle, system, dockerProgress, 
           <span>{system?.docker_message}</span>
         </div>
       )}
-      <Lbl sx={{ marginBottom: 0 }}>Integrations</Lbl>
       {intgs.length === 0 ? (
         <EmptyState message="No integrations available" sub="Connect to the backend to manage partner integrations" />
       ) : (
-        intgs.map((intg) => (
-          <IntCard
-            key={intg.id}
-            intg={intg}
-            onToggle={onToggle}
-            dockerNote={intg.requires_docker && dockerNotReady ? system?.docker_message : null}
-            onForceReinstall={intg.id === 'aem' ? onForceReinstall : undefined}
-          />
-        ))
+        CATEGORIES.map((cat) => {
+          const members = intgs.filter((i) => i.category === cat)
+          if (members.length === 0) return null
+          const activeCount = members.filter((i) => i.enabled).length
+          return (
+            <CategorySection
+              key={cat}
+              title={cat}
+              Icon={CATEGORY_ICONS[cat]}
+              activeCount={activeCount}
+              totalCount={members.length}
+              onToggleAll={(next) => {
+                // Only flip the ones that are not already in the target state,
+                // so toggle-all never bounces an integration off and on again.
+                members.filter((i) => i.enabled !== next).forEach((i) => onToggle(i.id))
+              }}
+            >
+              {members.map((intg) => (
+                <IntCard
+                  key={intg.id}
+                  intg={intg}
+                  onToggle={onToggle}
+                  dockerNote={intg.requires_docker && dockerNotReady ? system?.docker_message : null}
+                  onForceReinstall={intg.id === 'aem' ? onForceReinstall : undefined}
+                />
+              ))}
+            </CategorySection>
+          )
+        })
       )}
     </div>
   )
