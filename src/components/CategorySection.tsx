@@ -44,7 +44,10 @@ export default function CategorySection({
     })
   }
 
-  const allOn = totalCount > 0 && activeCount === totalCount
+  // The switch reflects "anything on", not "everything on": if a member fails
+  // to start, an all-on-only rule would leave the switch stuck off and every
+  // click would re-request enable instead of turning the category off.
+  const anyOn = activeCount > 0
 
   return (
     <section style={{ display: 'flex', flexDirection: 'column', gap: 10, flexShrink: 0 }}>
@@ -118,8 +121,8 @@ export default function CategorySection({
           </span>
         </button>
         <Tog
-          checked={allOn}
-          onChange={onToggleAll}
+          checked={anyOn}
+          onChange={() => onToggleAll(!anyOn)}
           aria-label={`Toggle all ${title} integrations`}
         />
       </header>
