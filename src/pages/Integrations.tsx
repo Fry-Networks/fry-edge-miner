@@ -121,9 +121,12 @@ export default function Integrations({ intgs, onToggle, system, dockerProgress, 
               activeCount={activeCount}
               totalCount={members.length}
               onToggleAll={(next) => {
-                // Only flip the ones that are not already in the target state,
-                // so toggle-all never bounces an integration off and on again.
-                members.filter((i) => i.enabled !== next).forEach((i) => onToggle(i.id))
+                // Only flip the ones not already in the target state, and stagger
+                // them: firing every toggle in one tick raced the backend and
+                // silently dropped all but the first.
+                members
+                  .filter((i) => i.enabled !== next)
+                  .forEach((i, idx) => setTimeout(() => onToggle(i.id), idx * 450))
               }}
             >
               {members.map((intg) => (
