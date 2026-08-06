@@ -39,6 +39,9 @@ function toFrontend(integrations: IntegrationStatus[]): FrontendIntegration[] {
       Icon: base?.Icon || INTEGRATION_META[0].Icon,
       col: base?.col || '#00c49a',
       uptime: base?.uptime ?? 0,
+      // Unknown ids fall into "AI & Data" so a backend-only integration still
+      // renders somewhere instead of vanishing from the grouped view.
+      category: base?.category ?? 'AI & Data',
       enabled,
       health,
       healthy: health === 'Healthy',

@@ -90,7 +90,10 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
         border: '1px solid var(--b0)',
         borderRadius: 'var(--rad)',
         borderLeft: `3px solid ${inst && enabled ? col : 'var(--b1)'}`,
-        overflow: 'hidden'
+        overflow: 'hidden',
+        // Cards sit in a flex column; without this they shrink under pressure
+        // from sibling cards and clip their own description text.
+        flexShrink: 0
       }}
     >
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, padding: '16px 16px 12px' }}>
