@@ -115,7 +115,7 @@ fn main() {
                 supervisor: supervisor.clone(),
                 log_dir: log_dir.clone(),
             }));
-            registry.register(Arc::new(integrations::filecoin_checker::FilecoinCheckerIntegration));
+            // filecoin_checker retired — see integrations/mod.rs for why.
             registry.register(Arc::new(integrations::iagon::IagonIntegration {
                 supervisor: supervisor.clone(),
             }));

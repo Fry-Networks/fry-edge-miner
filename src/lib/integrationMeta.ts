@@ -6,7 +6,6 @@ import {
   Shield,
   Cloud,
   Network,
-  Database,
   Lock,
   Server,
   Wifi,
@@ -85,15 +84,6 @@ export const INTEGRATION_META: IntegrationMeta[] = [
     desc: 'Storage, bandwidth & IP contribution via Titan edge nodes',
     Icon: Network,
     col: '#e8452c',
-    uptime: 0
-  },
-  {
-    id: 'filecoin_checker',
-    name: 'Filecoin / Checker',
-    tag: 'CHECKER NODE',
-    desc: 'Filecoin network verification and CDN retrieval',
-    Icon: Database,
-    col: '#0090ff',
     uptime: 0
   },
   {
