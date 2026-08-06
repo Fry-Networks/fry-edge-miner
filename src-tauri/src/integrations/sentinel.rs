@@ -263,8 +263,22 @@ impl Integration for SentinelIntegration {
                 }
 
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                // Parse JSON array of container states
-                if let Ok(containers) = serde_json::from_str::<Vec<serde_json::Value>>(&stdout) {
+                // `docker compose ps --format json` emits NDJSON (one object per
+                // line), not a JSON array — parse both so a running node is not
+                // reported unhealthy just because the shape changed.
+                let parsed: Option<Vec<serde_json::Value>> =
+                    serde_json::from_str::<Vec<serde_json::Value>>(&stdout)
+                        .ok()
+                        .or_else(|| {
+                            let rows: Vec<serde_json::Value> = stdout
+                                .lines()
+                                .map(str::trim)
+                                .filter(|l| l.starts_with('{'))
+                                .filter_map(|l| serde_json::from_str(l).ok())
+                                .collect();
+                            if rows.is_empty() { None } else { Some(rows) }
+                        });
+                if let Some(containers) = parsed {
                     // If any container is running, health is Healthy
                     let has_running = containers.iter().any(|c| {
                         c.get("State")
