@@ -51,7 +51,11 @@ impl IagonIntegration {
     /// process environment.
     fn token_from_config(path: &std::path::Path) -> Option<String> {
         let raw = std::fs::read_to_string(path).ok()?;
-        let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        // PowerShell's Set-Content -Encoding utf8 and older Notepad prepend a
+        // UTF-8 BOM, which serde_json rejects — strip it so a hand-saved config
+        // does not silently read as "no token".
+        let raw = raw.trim_start_matches('\u{feff}');
+        let json: serde_json::Value = serde_json::from_str(raw).ok()?;
         json.get("node_token")?
             .as_str()
             .map(|s| s.trim().to_string())
@@ -276,5 +280,22 @@ mod tests {
         let bad = temp_config("not json at all");
         assert_eq!(IagonIntegration::token_from_config(&bad), None);
         let _ = std::fs::remove_file(&bad);
+    }
+    #[test]
+    fn tolerates_utf8_bom_from_windows_editors() {
+        // PowerShell Set-Content -Encoding utf8 and older Notepad both prepend
+        // a UTF-8 BOM; without stripping it serde_json refuses the file and the
+        // user sees 'token not provisioned' with no hint why.
+        let mut p = std::env::temp_dir();
+        p.push(format!("fem_iagon_bom_{}.json", std::process::id()));
+        let mut f = std::fs::File::create(&p).expect("create");
+        f.write_all(&[0xEF, 0xBB, 0xBF]).expect("bom");
+        f.write_all(br#"{"node_token":"bom-token"}"#).expect("body");
+        drop(f);
+        assert_eq!(
+            IagonIntegration::token_from_config(&p),
+            Some("bom-token".to_string())
+        );
+        let _ = std::fs::remove_file(&p);
     }
 }
