@@ -23,6 +23,10 @@ interface IntegrationsProps {
 
 export default function Integrations({ intgs, onToggle, system, dockerProgress, onForceReinstall }: IntegrationsProps) {
   const active = intgs.filter((i) => i.enabled).length
+  // Divide by what this machine can run, matching the denominator the PoC
+  // reporter actually submits — otherwise the banner and each card's reward
+  // contribution disagree.
+  const available = categoryCounts(intgs).availableTotal
   const dockerNotReady = !!system && system.docker !== 'ready'
   const anyNeedsDocker = intgs.some((i) => i.requires_docker)
 
@@ -50,7 +54,7 @@ export default function Integrations({ intgs, onToggle, system, dockerProgress, 
         }}
       >
         <span style={{ fontFamily: 'var(--fb)', fontSize: 13, color: 'var(--t1)' }}>
-          Each <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>running</span> integration contributes {intgs.length > 0 ? Math.round(100 / intgs.length) : 0}% to your daily
+          Each <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>running</span> integration contributes {available > 0 ? Math.round(100 / available) : 0}% to your daily
           reward.
         </span>
         <div
@@ -65,7 +69,7 @@ export default function Integrations({ intgs, onToggle, system, dockerProgress, 
             marginLeft: 12
           }}
         >
-          {active}/{intgs.length} · {intgs.length > 0 ? Math.round((active / intgs.length) * 100) : 0}%
+          {active}/{available} · {available > 0 ? Math.round((active / available) * 100) : 0}%
         </div>
       </div>
       {dockerProgress && (

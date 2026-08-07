@@ -9,6 +9,7 @@ import SettingsPage from './pages/SettingsPage'
 import Updates from './pages/Updates'
 import Wizard from './wizard/Wizard'
 import { useIntegrations } from './hooks/useIntegrations'
+import { categoryCounts } from './lib/availability'
 import { useDevice } from './hooks/useDevice'
 import { makeName } from './lib/names'
 import { isTauri } from './lib/tauri'
@@ -155,7 +156,7 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
         fontFamily: 'var(--fb)'
       }}
     >
-      <Sidebar page={page} onNav={setPage} activeCount={activeCount} totalCount={integrations.length} hasUnhealthy={hasUnhealthy} deviceName={deviceName} minerKey={minerKey} />
+      <Sidebar page={page} onNav={setPage} activeCount={activeCount} totalCount={categoryCounts(integrations).availableTotal} hasUnhealthy={hasUnhealthy} deviceName={deviceName} minerKey={minerKey} />
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <TopBar page={page} connectivity={connectivity} />
         {error && <ErrorBanner error={error} />}
