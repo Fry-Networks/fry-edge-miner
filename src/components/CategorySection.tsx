@@ -7,7 +7,10 @@ interface CategorySectionProps {
   Icon: LucideIcon
   /** Integrations in this category that are currently enabled. */
   activeCount: number
+  /** Members this machine can actually run — unavailable ones are excluded. */
   totalCount: number
+  /** Members this machine cannot run, reported alongside the total. */
+  unavailableCount?: number
   /** Enable/disable every integration in the category at once. */
   onToggleAll: (next: boolean) => void
   children: ReactNode
@@ -20,6 +23,7 @@ export default function CategorySection({
   Icon,
   activeCount,
   totalCount,
+  unavailableCount = 0,
   onToggleAll,
   children
 }: CategorySectionProps) {
@@ -118,6 +122,7 @@ export default function CategorySection({
             }}
           >
             {activeCount}/{totalCount} active
+            {unavailableCount > 0 && ` (${unavailableCount} unavailable)`}
           </span>
         </button>
         <Tog

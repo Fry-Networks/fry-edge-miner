@@ -96,10 +96,15 @@ pub fn build_poc_doc(
         .filter(|s| matches!(s, HealthStatus::Healthy))
         .count() as u32;
     let total_count = registry.total_count();
-    let proportion = if total_count == 0 {
+    // Denominator is what this machine can actually run, not everything in the
+    // registry. Dividing by total_count docks users for integrations their
+    // hardware rules out, so shipping one nobody can run would quietly cut
+    // every user's multiplier.
+    let available_count = registry.available_count();
+    let proportion = if available_count == 0 {
         0.0
     } else {
-        healthy_count as f64 / total_count as f64
+        healthy_count as f64 / available_count as f64
     };
 
     // Display fields — enabled-based (unchanged)
@@ -171,5 +176,119 @@ pub async fn submit_poc(
             warn!(miner_key = miner_key, error = %e, "PoC submission failed");
             Err(e)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::integrations::{Integration, PocGateData};
+    use anyhow::Result;
+    use async_trait::async_trait;
+
+    /// Minimal integration whose availability we control, so the denominator
+    /// can be tested without touching real disks or partner binaries.
+    struct FakeIntegration {
+        id: &'static str,
+        blocked: Option<&'static str>,
+    }
+
+    #[async_trait]
+    impl Integration for FakeIntegration {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn display_name(&self) -> &str {
+            self.id
+        }
+        async fn install(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn start(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn stop(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn health_check(&self) -> HealthStatus {
+            HealthStatus::Healthy
+        }
+        async fn check_update(&self) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn collect_poc_data(&self) -> PocGateData {
+            PocGateData::default()
+        }
+        fn check_requirements(&self) -> Result<(), String> {
+            match self.blocked {
+                Some(reason) => Err(reason.to_string()),
+                None => Ok(()),
+            }
+        }
+    }
+
+    fn registry_with(specs: &[(&'static str, Option<&'static str>)]) -> IntegrationRegistry {
+        let mut reg = IntegrationRegistry::new();
+        for (id, blocked) in specs {
+            reg.register(Arc::new(FakeIntegration {
+                id,
+                blocked: *blocked,
+            }));
+        }
+        reg
+    }
+
+    fn healthy_map(ids: &[&str]) -> HashMap<String, HealthStatus> {
+        ids.iter()
+            .map(|id| (id.to_string(), HealthStatus::Healthy))
+            .collect()
+    }
+
+    #[test]
+    fn available_count_excludes_integrations_this_machine_cannot_run() {
+        let reg = registry_with(&[
+            ("a", None),
+            ("b", None),
+            ("c", Some("needs 900 GB")),
+        ]);
+        assert_eq!(reg.total_count(), 3);
+        assert_eq!(reg.available_count(), 2);
+    }
+
+    #[test]
+    fn proportion_divides_by_available_not_total() {
+        // Two healthy out of three registered, one of which this machine can
+        // never run. Dividing by total would report 0.667 and quietly dock the
+        // user for hardware they do not have; the honest figure is 1.0.
+        let reg = registry_with(&[
+            ("a", None),
+            ("b", None),
+            ("c", Some("needs 900 GB")),
+        ]);
+        let doc = build_poc_doc("FEM-TEST", &reg, &healthy_map(&["a", "b"]));
+        assert_eq!(doc.proportion, 1.0, "got {}", doc.proportion);
+        assert_eq!(doc.slots[0].multiplier, 1.0);
+    }
+
+    #[test]
+    fn proportion_is_unchanged_when_everything_is_runnable() {
+        let reg = registry_with(&[("a", None), ("b", None), ("c", None), ("d", None)]);
+        let doc = build_poc_doc("FEM-TEST", &reg, &healthy_map(&["a"]));
+        assert_eq!(doc.proportion, 0.25);
+    }
+
+    #[test]
+    fn all_unavailable_yields_zero_not_a_divide_by_zero() {
+        let reg = registry_with(&[("a", Some("dead")), ("b", Some("dead"))]);
+        let doc = build_poc_doc("FEM-TEST", &reg, &HashMap::new());
+        assert_eq!(doc.proportion, 0.0);
+    }
+
+    #[test]
+    fn total_count_still_reports_the_whole_registry() {
+        // total_count remains the registry size — only the denominator moved.
+        let reg = registry_with(&[("a", None), ("b", Some("needs 900 GB"))]);
+        let doc = build_poc_doc("FEM-TEST", &reg, &healthy_map(&["a"]));
+        assert_eq!(doc.total_count, 2);
     }
 }

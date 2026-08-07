@@ -64,6 +64,10 @@ pub struct IntegrationStatus {
     pub requires_docker: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Set when `check_requirements()` fails: why this machine cannot run the
+    /// integration. Presence is what marks a card auto-disabled in the UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 // --- PoC Gate Data ---
@@ -115,6 +119,18 @@ pub trait Integration: Send + Sync {
     /// availability display and prevents Docker auto-install at app boot.
     fn requires_docker(&self) -> bool {
         false
+    }
+    /// Whether this machine meets the partner network's published minimum
+    /// specs. `Err(reason)` marks the integration unavailable: it is shown
+    /// greyed out with `reason`, cannot be toggled on, and is excluded from
+    /// the PoC proportion denominator so the user is not penalised for
+    /// hardware they cannot run.
+    ///
+    /// Synchronous on purpose — `poc::reporter::build_poc_doc` is sync and
+    /// needs the available count. Implementations must stay cheap; probe
+    /// results are memoised in `crate::system_info`.
+    fn check_requirements(&self) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -185,6 +201,7 @@ impl IntegrationRegistry {
                     },
                     requires_docker: i.requires_docker(),
                     error: None,
+                    unavailable_reason: i.check_requirements().err(),
                 }
             })
             .collect()
@@ -196,6 +213,17 @@ impl IntegrationRegistry {
 
     pub fn total_count(&self) -> u32 {
         self.integrations.len() as u32
+    }
+
+    /// Registered integrations this machine can actually run. This is the
+    /// denominator for the PoC proportion: dividing by `total_count()` would
+    /// dock every user for integrations their hardware rules out, so adding an
+    /// integration nobody can run would silently cut everyone's rewards.
+    pub fn available_count(&self) -> u32 {
+        self.integrations
+            .values()
+            .filter(|i| i.check_requirements().is_ok())
+            .count() as u32
     }
 
     /// Proportion of enabled integrations (0.0 to 1.0)

@@ -5,10 +5,12 @@ pub async fn get_integrations(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<Vec<IntegrationStatus>, String> {
     // Snapshot registry metadata without holding the lock across any await point.
-    let (entries, total) = {
+    let (entries, available) = {
         let reg = state.registry.lock().map_err(|e| e.to_string())?;
-        let total = reg.total_count();
-        let entries: Vec<(String, String, bool, Option<String>, bool)> = reg
+        // Share the reporter's denominator so the per-integration contribution
+        // the UI shows matches what actually gets submitted.
+        let available = reg.available_count();
+        let entries: Vec<(String, String, bool, Option<String>, bool, Option<String>)> = reg
             .list()
             .iter()
             .map(|i| {
@@ -18,10 +20,11 @@ pub async fn get_integrations(
                     reg.is_enabled(i.id()),
                     i.installed_version(),
                     i.requires_docker(),
+                    i.check_requirements().err(),
                 )
             })
             .collect();
-        (entries, total)
+        (entries, available)
     };
 
     // Read the most recent health check results written by the health loop in main.rs.
@@ -30,7 +33,7 @@ pub async fn get_integrations(
 
     let statuses = entries
         .into_iter()
-        .map(|(id, display_name, enabled, version, requires_docker)| {
+        .map(|(id, display_name, enabled, version, requires_docker, unavailable_reason)| {
             let health = if enabled {
                 last.get(&id)
                     .cloned()
@@ -63,9 +66,14 @@ pub async fn get_integrations(
                 health,
                 lifecycle,
                 version,
-                poc_contribution: if enabled && healthy { 1.0 / total as f64 } else { 0.0 },
+                poc_contribution: if enabled && healthy && available > 0 {
+                    1.0 / available as f64
+                } else {
+                    0.0
+                },
                 requires_docker,
                 error: last_errors.get(&id).and_then(|e| e.clone()),
+                unavailable_reason,
             }
         })
         .collect();
@@ -154,6 +162,15 @@ pub async fn toggle_integration(
     };
 
     if enabled {
+        // Hardware gate first: installing or starting an integration whose
+        // minimums this machine cannot meet only produces a confusing partner
+        // error later, so refuse up front with the specific reason.
+        if let Err(reason) = integration.check_requirements() {
+            if let Ok(mut errs) = state.last_integration_error.write() {
+                errs.insert(id.clone(), Some(reason.clone()));
+            }
+            return Err(reason);
+        }
         // Auto-install integrations that have not been deployed yet (e.g., Diiisco).
         if integration.installed_version().is_none() {
             if let Err(e) = integration.install().await {

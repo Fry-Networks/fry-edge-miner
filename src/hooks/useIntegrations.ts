@@ -22,6 +22,8 @@ export interface FrontendIntegration extends IntegrationMeta {
   version: string | null
   poc_contribution: number
   requires_docker: boolean
+  /** Why this machine cannot run it, or null when it can. */
+  unavailable_reason: string | null
 }
 
 function toFrontend(integrations: IntegrationStatus[]): FrontendIntegration[] {
@@ -51,7 +53,8 @@ function toFrontend(integrations: IntegrationStatus[]): FrontendIntegration[] {
       // actually submits); the equal-split fallback only covers browser
       // preview mode without IPC.
       poc_contribution: i.poc_contribution ?? (integrations.length > 0 ? 1 / integrations.length : 0),
-      requires_docker: i.requires_docker ?? false
+      requires_docker: i.requires_docker ?? false,
+      unavailable_reason: i.unavailable_reason ?? null
     }
   })
 }

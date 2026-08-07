@@ -11,6 +11,13 @@ const IAGON_RELEASE_URL: &str = "https://github.com/Iagonorg/mainnet-node-CLI/re
 const IAGON_SHA256: &str = "0a13a6426f7b3cc5f0ba852b206bcfbd1b03074c87b1c61ba67fc451a9f5915d";
 const USER_AGENT: &str = concat!("FryEdgeMiner/", env!("CARGO_PKG_VERSION"));
 
+/// Iagon's published storage-node minimums (docs.iagon.com ->
+/// provide-resources/storage-nodes/minimum-requirements). A node that commits
+/// less than 900 GB is rejected at registration, which is why the CLI's
+/// self-registration returns HTTP 400 on a typical desktop.
+const MIN_DISK_GB: f64 = 900.0;
+const MIN_RAM_GB: f64 = 4.0;
+
 pub struct IagonIntegration {
     pub supervisor: Arc<Mutex<Supervisor>>,
 }
@@ -31,6 +38,32 @@ impl IagonIntegration {
     /// `<partners>/iagon/config.json` -> `{"node_token": "..."}`.
     fn config_path() -> PathBuf {
         Self::partner_dir().join("config.json")
+    }
+
+    /// Decide availability from already-measured specs. Split out from
+    /// `check_requirements` so the thresholds are testable without shelling
+    /// out to PowerShell.
+    ///
+    /// An unmeasurable spec (`None`) passes: a failed probe must not disable
+    /// an integration that might be perfectly runnable.
+    fn evaluate_requirements(disk_gb: Option<f64>, ram_gb: Option<f64>) -> Result<(), String> {
+        if let Some(disk) = disk_gb {
+            if disk < MIN_DISK_GB {
+                return Err(format!(
+                    "Iagon requires at least {:.0} GB of free storage — this device has {:.0} GB available.",
+                    MIN_DISK_GB, disk
+                ));
+            }
+        }
+        if let Some(ram) = ram_gb {
+            if ram < MIN_RAM_GB {
+                return Err(format!(
+                    "Iagon requires at least {:.0} GB of RAM — this device has {:.1} GB.",
+                    MIN_RAM_GB, ram
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Token lookup, in precedence order:
@@ -99,6 +132,13 @@ impl IagonIntegration {
 impl Integration for IagonIntegration {
     fn id(&self) -> &str {
         "iagon"
+    }
+
+    fn check_requirements(&self) -> Result<(), String> {
+        Self::evaluate_requirements(
+            crate::system_info::available_disk_gb(&partners_base_dir()),
+            crate::system_info::total_ram_gb(),
+        )
     }
 
     fn display_name(&self) -> &str {
@@ -297,5 +337,37 @@ mod tests {
             Some("bom-token".to_string())
         );
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn rejects_a_machine_below_iagons_900gb_minimum() {
+        let err = IagonIntegration::evaluate_requirements(Some(128.0), Some(32.0))
+            .expect_err("128 GB is far below the 900 GB minimum");
+        assert!(err.contains("900 GB"), "{err}");
+        assert!(err.contains("128 GB"), "message must name what the device has: {err}");
+    }
+
+    #[test]
+    fn rejects_a_machine_below_the_ram_minimum() {
+        let err = IagonIntegration::evaluate_requirements(Some(2000.0), Some(2.0))
+            .expect_err("2 GB RAM is below the 4 GB minimum");
+        assert!(err.contains("RAM"), "{err}");
+    }
+
+    #[test]
+    fn accepts_a_machine_that_meets_both_minimums() {
+        assert!(IagonIntegration::evaluate_requirements(Some(1518.0), Some(16.0)).is_ok());
+    }
+
+    #[test]
+    fn exactly_at_the_threshold_is_accepted() {
+        assert!(IagonIntegration::evaluate_requirements(Some(900.0), Some(4.0)).is_ok());
+    }
+
+    #[test]
+    fn unmeasurable_specs_fail_open() {
+        // A PowerShell probe that errors must not disable a runnable node.
+        assert!(IagonIntegration::evaluate_requirements(None, None).is_ok());
+        assert!(IagonIntegration::evaluate_requirements(None, Some(16.0)).is_ok());
     }
 }

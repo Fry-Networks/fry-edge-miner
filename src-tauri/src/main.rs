@@ -10,6 +10,7 @@ mod logging;
 mod migration;
 mod poc;
 mod supervisor;
+mod system_info;
 mod updater_auto;
 
 use std::collections::HashMap;
@@ -125,9 +126,23 @@ fn main() {
             // (e.g. the removed Presearch) — a stale key would otherwise inflate
             // enabled_count()/proportion() with a ghost entry.
             for (id, enabled) in &cfg.integrations_enabled {
-                if registry.get(id).is_none() {
+                let Some(integration) = registry.get(id) else {
                     tracing::info!(id = id.as_str(), "Config references a removed integration — ignoring");
                     continue;
+                };
+                // A machine can stop meeting an integration's minimums between
+                // runs (disk filled up). Restoring it enabled would auto-start
+                // something that cannot work and count it against the user.
+                if *enabled {
+                    if let Err(reason) = integration.check_requirements() {
+                        tracing::info!(
+                            id = id.as_str(),
+                            reason = reason.as_str(),
+                            "Integration no longer meets its minimum requirements — leaving disabled"
+                        );
+                        registry.set_enabled(id, false);
+                        continue;
+                    }
                 }
                 registry.set_enabled(id, *enabled);
             }

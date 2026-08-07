@@ -9,6 +9,8 @@ export interface IntegrationStatus {
   version: string | null
   poc_contribution: number
   requires_docker?: boolean
+  /** Present when this machine cannot meet the integration's minimum specs. */
+  unavailable_reason?: string | null
 }
 
 export type DockerStatusKind = 'ready' | 'daemon_stopped' | 'not_installed' | 'virtualization_disabled'
