@@ -39,7 +39,11 @@ jobs:
         run: npm ci
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2"
+        # --locked uses tauri-cli's own Cargo.lock. Without it every run
+        # re-resolves transitive deps against latest, and on 2026-08-07 a fresh
+        # zune-jpeg failed to compile on the runner ("macro expansion ends with
+        # an incomplete expression"), breaking a build whose app code was fine.
+        run: cargo install tauri-cli --version "^2" --locked
 
       - name: Invalidate cached option_env! artifacts
         run: |
