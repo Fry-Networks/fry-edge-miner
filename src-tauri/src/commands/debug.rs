@@ -8,17 +8,18 @@ use std::path::PathBuf;
 #[tauri::command]
 pub async fn export_debug_bundle(
     destination: String,
+    app: tauri::AppHandle,
     _state: tauri::State<'_, crate::AppState>,
 ) -> Result<String, String> {
     use std::io::Write;
+    use tauri::Manager;
     use zip::ZipWriter;
 
-    let log_dir = {
-        // Find log directory from config
-        std::env::var("APPDATA")
-            .ok()
-            .map(|a| PathBuf::from(a).join("FryEdgeMiner").join("logs"))
-    };
+    // Ask Tauri for the same directory init_logging writes to. This used to be
+    // hardcoded to %APPDATA%\FryEdgeMiner\logs — wrong root and wrong name, so
+    // the bundle silently shipped without a single log file. The real location
+    // is %LOCALAPPDATA%\com.frynetworks.fem\logs.
+    let log_dir: Option<PathBuf> = app.path().app_log_dir().ok();
 
     let dest_path = PathBuf::from(&destination);
     if let Some(parent) = dest_path.parent() {
