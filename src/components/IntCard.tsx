@@ -26,11 +26,16 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
     healthy,
     health,
     lifecycle,
-    version
+    version,
+    unavailable_reason: unavailableReason
   } = intg
   const inst = version !== null
   const reason = unhealthyReason(health)
   const dockerBlocked = !!dockerNote
+  // This machine cannot meet the partner's published minimums. Distinct from
+  // "unhealthy": nothing is wrong, it simply can never run here — so the card
+  // is inert rather than alarming.
+  const unavailable = !!unavailableReason
 
   let st: 'run' | 'err' | 'stopped' | 'info' = 'stopped'
   let stLbl = 'Not installed'
@@ -45,6 +50,9 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
         {stLbl}
       </span>
     )
+  } else if (unavailable) {
+    st = 'stopped'
+    stLbl = 'Unavailable'
   } else if (!inst && dockerBlocked) {
     st = 'stopped'
     stLbl = 'Unavailable'
@@ -110,11 +118,20 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
             justifyContent: 'center'
           }}
         >
-          <Icon size={20} color={inst && enabled ? col : `${col}60`} />
+          <Icon size={20} color={unavailable ? `${col}40` : inst && enabled ? col : `${col}60`} />
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 3, flexWrap: 'wrap' }}>
-            <span style={{ fontFamily: 'var(--fh)', fontWeight: 700, fontSize: 14, color: 'var(--txt)' }}>{name}</span>
+            <span
+              style={{
+                fontFamily: 'var(--fh)',
+                fontWeight: 700,
+                fontSize: 14,
+                color: unavailable ? 'var(--t1)' : 'var(--txt)'
+              }}
+            >
+              {name}
+            </span>
             <span
               style={{
                 fontFamily: 'var(--fh)',
@@ -199,7 +216,29 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
                 <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {dockerNote}
               </span>
             )}
-            {!inst && !dockerNote && lifecycle !== 'Installing' && (
+            {unavailable && (
+              <span
+                data-testid={`unavailable-${id}`}
+                role="note"
+                style={{
+                  fontFamily: 'var(--fb)',
+                  fontSize: 11,
+                  color: 'var(--amb)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  minWidth: 0,
+                  maxWidth: 420,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap'
+                }}
+                title={unavailableReason ?? undefined}
+              >
+                <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {unavailableReason}
+              </span>
+            )}
+            {!unavailable && !inst && !dockerNote && lifecycle !== 'Installing' && (
               <span
                 style={{
                   fontFamily: 'var(--fb)',
@@ -242,6 +281,7 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
         <Tog
           checked={enabled}
           onChange={() => onToggle(id)}
+          disabled={unavailable}
           label={`Toggle ${name} integration`}
           data-testid={`toggle-${id}`}
           aria-label={`Toggle ${name} integration`}

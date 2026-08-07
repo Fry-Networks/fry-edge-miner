@@ -3,6 +3,7 @@ import CategorySection from '../components/CategorySection'
 import IntCard from '../components/IntCard'
 import EmptyState from '../components/primitives/EmptyState'
 import type { FrontendIntegration } from '../hooks/useIntegrations'
+import { categoryCounts, toggleAllTargets } from '../lib/availability'
 import { CATEGORIES, type IntegrationCategory } from '../lib/integrationMeta'
 import type { DockerProgress, SystemStatus } from '../lib/types'
 
@@ -112,21 +113,21 @@ export default function Integrations({ intgs, onToggle, system, dockerProgress, 
         CATEGORIES.map((cat) => {
           const members = intgs.filter((i) => i.category === cat)
           if (members.length === 0) return null
-          const activeCount = members.filter((i) => i.enabled).length
+          const { activeCount, availableTotal, unavailableCount } = categoryCounts(members)
           return (
             <CategorySection
               key={cat}
               title={cat}
               Icon={CATEGORY_ICONS[cat]}
               activeCount={activeCount}
-              totalCount={members.length}
+              totalCount={availableTotal}
+              unavailableCount={unavailableCount}
               onToggleAll={(next) => {
-                // Only flip the ones not already in the target state, and stagger
-                // them: firing every toggle in one tick raced the backend and
-                // silently dropped all but the first.
-                members
-                  .filter((i) => i.enabled !== next)
-                  .forEach((i, idx) => setTimeout(() => onToggle(i.id), idx * 450))
+                // Stagger the flips: firing every toggle in one tick raced the
+                // backend and silently dropped all but the first.
+                toggleAllTargets(members, next).forEach((i, idx) =>
+                  setTimeout(() => onToggle(i.id), idx * 450)
+                )
               }}
             >
               {members.map((intg) => (
