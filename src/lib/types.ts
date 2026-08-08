@@ -11,6 +11,12 @@ export interface IntegrationStatus {
   requires_docker?: boolean
   /** Present when this machine cannot meet the integration's minimum specs. */
   unavailable_reason?: string | null
+  /**
+   * Why the last enable attempt failed, straight from the backend
+   * (`last_integration_error`). Without this the toggle silently springs back
+   * to off and the user is told nothing.
+   */
+  error?: string | null
 }
 
 export type DockerStatusKind = 'ready' | 'daemon_stopped' | 'not_installed' | 'virtualization_disabled'

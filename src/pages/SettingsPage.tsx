@@ -8,6 +8,7 @@ import Lbl from '../components/primitives/Lbl'
 import SettingRow from '../components/SettingRow'
 import Tog from '../components/primitives/Tog'
 import type { FemConfig } from '../lib/types'
+import { extractErrorMessage } from '../lib/error'
 import { invokeWithFallback, safeInvoke } from '../lib/tauri'
 import { useDevice } from '../hooks/useDevice'
 import { useRewards } from '../hooks/useRewards'
@@ -66,6 +67,8 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
   const [regWallet, setRegWallet] = useState('')
   const [regError, setRegError] = useState('')
   const [regLoading, setRegLoading] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [exportResult, setExportResult] = useState<{ ok: boolean; text: string } | null>(null)
   const { rewards } = useRewards()
   const summary = rewards.summary
 
@@ -82,6 +85,22 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
       })
       .catch(() => setConfig(null))
   }, [])
+
+  // No file-picker plugin is installed, so the backend picks a Downloads path
+  // when we send none and returns where it actually wrote — show that, because
+  // a bundle the user can't find is no better than no bundle.
+  const handleExportBundle = async () => {
+    setExportResult(null)
+    setExporting(true)
+    try {
+      const path = await safeInvoke<string>('export_debug_bundle', {})
+      setExportResult({ ok: true, text: path })
+    } catch (err) {
+      setExportResult({ ok: false, text: extractErrorMessage(err) })
+    } finally {
+      setExporting(false)
+    }
+  }
 
   const handleRegister = async () => {
     setRegError('')
@@ -309,10 +328,25 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
             Deregister
           </Btn>
         )}
-        <Btn v="g" data-testid="export-debug-bundle" onClick={() => console.log('Export debug bundle TODO')}>
-          Export Debug Bundle
+        <Btn v="g" data-testid="export-debug-bundle" disabled={exporting} onClick={handleExportBundle}>
+          {exporting ? 'Exporting…' : 'Export Debug Bundle'}
         </Btn>
       </div>
+      {exportResult && (
+        <div
+          data-testid="export-debug-result"
+          style={{
+            marginTop: 8,
+            fontFamily: 'var(--fm)',
+            fontSize: 11,
+            lineHeight: 1.5,
+            color: exportResult.ok ? 'var(--teal)' : 'var(--amb)',
+            wordBreak: 'break-all'
+          }}
+        >
+          {exportResult.ok ? `Saved to ${exportResult.text}` : exportResult.text}
+        </div>
+      )}
     </div>
   )
 }
