@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { AlertTriangle, Download, Loader2, RefreshCw } from 'lucide-react'
 import type { FrontendIntegration } from '../hooks/useIntegrations'
+import { condenseError } from '../lib/error'
 import { unhealthyReason } from '../lib/types'
 import Tag from './primitives/Tag'
 import Tog from './primitives/Tog'
@@ -41,7 +42,8 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
   // fundamental condition, so it wins; otherwise this is the most actionable
   // thing we can tell the user, and without it the toggle just springs back
   // to off with no explanation at all.
-  const startError = !unavailable ? (lastError ?? null) : null
+  // Condensed for the one-line card slot; the full text stays in the tooltip.
+  const startError = !unavailable && lastError ? condenseError(lastError) : null
 
   let st: 'run' | 'err' | 'stopped' | 'info' = 'stopped'
   let stLbl = 'Not installed'
@@ -197,7 +199,7 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap'
                 }}
-                title={startError}
+                title={lastError ?? undefined}
               >
                 <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {startError}
               </span>
