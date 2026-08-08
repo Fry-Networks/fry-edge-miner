@@ -20,8 +20,10 @@ services:
       OLLAMA_CPU_ONLY: "1"
     volumes:
       - ollama_models:/root/.ollama
-    ports:
-      - "11434:11434"
+    # No host port published on purpose. Nothing outside the compose network
+    # talks to Ollama — ollama-init uses http://ollama:11434 and the diiisco
+    # node resolves it the same way — and publishing 11434 collided with any
+    # Ollama the user already runs, which is the default on a dev machine.
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s

@@ -46,6 +46,16 @@ impl StorjIntegration {
             .expect("failed to build GitHub HTTP client")
     }
 
+    /// The storagenode release ships several Windows amd64 zips —
+    /// `storagenode_windows_amd64.zip`, `storagenode_msi_windows_amd64.zip` and
+    /// `storagenode-updater_windows_amd64.zip`. A contains()-based match accepted
+    /// all three and took whichever GitHub listed first, which is how the partner
+    /// directory ended up holding only `storagenode-updater.exe` and start()
+    /// failing with "storagenode binary not found". Match the one asset we want.
+    fn is_storagenode_windows_asset(name: &str) -> bool {
+        name == "storagenode_windows_amd64.zip"
+    }
+
     async fn fetch_latest_release() -> Result<(String, String)> {
         let client = Self::build_client();
         let max_attempts = 3u32;
@@ -73,16 +83,11 @@ impl StorjIntegration {
                         let download_url = assets
                             .iter()
                             .find_map(|asset| {
-                                if let Some(name) = asset["name"].as_str() {
-                                    if name.contains("storagenode")
-                                        && name.contains("windows")
-                                        && name.contains("amd64")
-                                        && name.ends_with(".zip")
-                                    {
-                                        return asset["browser_download_url"]
-                                            .as_str()
-                                            .map(|s| s.to_string());
-                                    }
+                                let name = asset["name"].as_str()?;
+                                if Self::is_storagenode_windows_asset(name) {
+                                    return asset["browser_download_url"]
+                                        .as_str()
+                                        .map(|s| s.to_string());
                                 }
                                 None
                             })
@@ -197,6 +202,35 @@ impl Integration for StorjIntegration {
         // Clean up ZIP
         let _ = std::fs::remove_file(&zip_path);
 
+        // Some releases nest the payload one level down. Titan hits the same
+        // shape and relocates; do it defensively here so a future layout change
+        // does not resurrect the "binary not found" failure.
+        if !binary.exists() {
+            if let Ok(entries) = std::fs::read_dir(&extract_dir) {
+                for entry in entries.flatten() {
+                    let nested = entry.path().join(
+                        binary.file_name().and_then(|n| n.to_str()).unwrap_or("storagenode.exe"),
+                    );
+                    if entry.path().is_dir() && nested.exists() {
+                        std::fs::rename(&nested, &binary)?;
+                        info!(from = ?nested, to = ?binary, "Relocated storagenode binary out of nested dir");
+                        let _ = std::fs::remove_dir_all(entry.path());
+                        break;
+                    }
+                }
+            }
+        }
+
+        // install() used to return Ok even when nothing usable landed on disk,
+        // so the real failure only surfaced later at start().
+        if !binary.exists() {
+            anyhow::bail!(
+                "storagenode binary missing after extracting {} — expected it at {}",
+                download_url,
+                binary.display()
+            );
+        }
+
         info!(binary = ?binary, version = %version, "Storj storagenode installed successfully");
         Ok(())
     }
@@ -276,5 +310,67 @@ impl Integration for StorjIntegration {
             poa: false,
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verbatim Windows-amd64 zip names from storj/storj v1.161.7.
+    const RELEASE_ASSETS: &[&str] = &[
+        "identity_windows_amd64.zip",
+        "multinode_windows_amd64.zip",
+        "storagenode-updater_windows_amd64.zip",
+        "storagenode_msi_windows_amd64.zip",
+        "storagenode_windows_amd64.zip",
+    ];
+
+    fn picked<'a>(names: &[&'a str]) -> Option<&'a str> {
+        names
+            .iter()
+            .copied()
+            .find(|n| StorjIntegration::is_storagenode_windows_asset(n))
+    }
+
+    #[test]
+    fn picks_the_storagenode_zip_and_nothing_else() {
+        assert_eq!(picked(RELEASE_ASSETS), Some("storagenode_windows_amd64.zip"));
+    }
+
+    #[test]
+    fn never_picks_the_updater() {
+        // This is the shipped bug: the updater sorted first and won, so the
+        // partner directory ended up with storagenode-updater.exe only.
+        assert!(!StorjIntegration::is_storagenode_windows_asset(
+            "storagenode-updater_windows_amd64.zip"
+        ));
+    }
+
+    #[test]
+    fn never_picks_the_msi_bundle() {
+        assert!(!StorjIntegration::is_storagenode_windows_asset(
+            "storagenode_msi_windows_amd64.zip"
+        ));
+    }
+
+    #[test]
+    fn ignores_other_platforms_and_components() {
+        for name in [
+            "storagenode_linux_amd64.zip",
+            "storagenode-modular_linux_amd64.zip",
+            "identity_windows_amd64.zip",
+            "multinode_windows_amd64.zip",
+        ] {
+            assert!(
+                !StorjIntegration::is_storagenode_windows_asset(name),
+                "should not have matched {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn none_when_only_an_updater_is_published() {
+        assert_eq!(picked(&["storagenode-updater_windows_amd64.zip"]), None);
     }
 }

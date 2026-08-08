@@ -2,6 +2,7 @@ use super::{HealthStatus, Integration, PocGateData};
 use crate::config::store::ConfigStore;
 use anyhow::Result;
 use async_trait::async_trait;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, warn};
@@ -14,27 +15,49 @@ pub struct FryVpnIntegration {
 }
 
 impl FryVpnIntegration {
-    /// Resolve frynode binary path: FRYNODE_BIN env var → bundled resource (via PATH) → fallback.
-    /// Note: Bundled frynode.exe is included in bundle.resources and unpacked to AppCache,
-    /// making it available on PATH during app runtime.
-    fn binary_path() -> Result<String> {
-        // Try FRYNODE_BIN env var first (allows override)
-        if let Ok(bin_path) = std::env::var("FRYNODE_BIN") {
-            if !bin_path.is_empty() {
-                return Ok(bin_path);
-            }
-        }
-
-        // Fall back to binary on PATH (includes bundled resource from AppCache)
-        let binary_name = if cfg!(target_os = "windows") {
+    fn binary_name() -> &'static str {
+        if cfg!(target_os = "windows") {
             "frynode.exe"
         } else {
             "frynode"
-        };
-
-        Ok(binary_name.to_string())
+        }
     }
 
+    /// Where the bundled resource actually lands: alongside the running
+    /// executable, under `resources/`. True for the installed layout
+    /// (`…\Fry Edge Miner\resources\frynode.exe`) and for `cargo run`
+    /// (`target/<profile>/resources/frynode.exe`).
+    fn bundled_candidate() -> Option<PathBuf> {
+        let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+        Some(dir.join("resources").join(Self::binary_name()))
+    }
+
+    /// Pure precedence, so the ordering is testable without touching the disk.
+    /// `resource` is passed only when it exists.
+    fn resolve_binary(env_override: Option<String>, resource: Option<PathBuf>) -> String {
+        if let Some(o) = env_override.filter(|s| !s.trim().is_empty()) {
+            return o;
+        }
+        match resource {
+            Some(p) => p.to_string_lossy().to_string(),
+            // Last resort: a bare name, so a frynode installed on PATH still runs.
+            None => Self::binary_name().to_string(),
+        }
+    }
+
+    /// Resolve the frynode binary: `FRYNODE_BIN` → the bundled resource next to
+    /// the executable → the bare name on PATH.
+    ///
+    /// This used to return the bare name unconditionally, so `Command::new`
+    /// searched `%PATH%`, found nothing, and every start failed with
+    /// "program not found" — even though the binary ships with the app.
+    fn binary_path() -> Result<String> {
+        let resource = Self::bundled_candidate().filter(|p| p.exists());
+        Ok(Self::resolve_binary(
+            std::env::var("FRYNODE_BIN").ok(),
+            resource,
+        ))
+    }
 }
 
 #[async_trait]
@@ -48,9 +71,14 @@ impl Integration for FryVpnIntegration {
     }
 
     async fn install(&self) -> Result<()> {
-        // Verify binary is present (no download)
-        Self::binary_path()?;
-        info!("Fry dVPN binary found");
+        // Nothing to download — frynode ships with the app. Verify it is really
+        // there rather than reporting success and failing later at start().
+        let binary = Self::binary_path()?;
+        let path = std::path::Path::new(&binary);
+        if path.is_absolute() && !path.exists() {
+            anyhow::bail!("frynode not found at {}", path.display());
+        }
+        info!(binary = %binary, "Fry dVPN binary found");
         Ok(())
     }
 
@@ -218,5 +246,43 @@ mod tests {
         let _ = FryVpnIntegration::binary_path();
         // We can't easily assert the error without a more complex setup,
         // so we just verify the function runs
+    }
+
+    #[test]
+    fn env_override_wins_over_the_bundled_resource() {
+        let resolved = FryVpnIntegration::resolve_binary(
+            Some("D:/custom/frynode.exe".to_string()),
+            Some(PathBuf::from("C:/app/resources/frynode.exe")),
+        );
+        assert_eq!(resolved, "D:/custom/frynode.exe");
+    }
+
+    #[test]
+    fn resolves_to_the_bundled_resource_when_no_override() {
+        // The shipped bug: this returned the bare name, so Command::new searched
+        // %PATH%, found nothing, and start() failed with "program not found"
+        // even though the binary sits next to the executable.
+        let resolved = FryVpnIntegration::resolve_binary(
+            None,
+            Some(PathBuf::from("C:/app/resources/frynode.exe")),
+        );
+        assert!(resolved.ends_with("frynode.exe"), "{resolved}");
+        assert!(resolved.contains("resources"), "must be the full resource path: {resolved}");
+    }
+
+    #[test]
+    fn blank_override_is_ignored() {
+        let resolved = FryVpnIntegration::resolve_binary(
+            Some("   ".to_string()),
+            Some(PathBuf::from("C:/app/resources/frynode.exe")),
+        );
+        assert!(resolved.contains("resources"), "{resolved}");
+    }
+
+    #[test]
+    fn falls_back_to_the_bare_name_when_no_resource_is_present() {
+        // Keeps a PATH-installed frynode working.
+        let resolved = FryVpnIntegration::resolve_binary(None, None);
+        assert_eq!(resolved, FryVpnIntegration::binary_name());
     }
 }

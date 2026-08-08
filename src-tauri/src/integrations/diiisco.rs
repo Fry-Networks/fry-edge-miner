@@ -161,6 +161,17 @@ impl Integration for DiiiscoIntegration {
             );
         }
 
+        // Refresh the compose from the embedded copy on every start. Only
+        // install() used to write it, and installed_version() reports installed
+        // whenever the file exists — so a machine that installed an older build
+        // would keep its stale compose forever and never pick up fixes like
+        // dropping the conflicting 11434 publish.
+        tokio::fs::write(
+            &compose,
+            include_str!("diiisco_deploy/docker-compose.yml"),
+        )
+        .await?;
+
         // The compose file interpolates ${ALGO_ADDRESS}/${ALGO_MNEMONIC}/
         // ${DIIISCO_API_KEY} on EVERY invocation, `up` included — without
         // them compose warns "variable is not set" and passes blank build
@@ -320,5 +331,40 @@ impl Integration for DiiiscoIntegration {
 
     fn requires_docker(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    const COMPOSE: &str = include_str!("diiisco_deploy/docker-compose.yml");
+
+    #[test]
+    fn ollama_publishes_no_host_port() {
+        // Publishing 11434 collided with any Ollama the user already runs and
+        // killed `docker compose up` with a bind error. Nothing outside the
+        // compose network needs it.
+        assert!(
+            !COMPOSE.contains("11434:11434"),
+            "the ollama host port publish must stay removed"
+        );
+    }
+
+    #[test]
+    fn ollama_is_still_reachable_inside_the_compose_network() {
+        // Removing the publish is only safe while consumers use service DNS.
+        assert!(COMPOSE.contains("http://ollama:11434"));
+    }
+
+    #[test]
+    fn diiisco_still_publishes_its_api_port() {
+        // health_check() hits http://localhost:8181/health from the host, so
+        // this publish is required.
+        assert!(COMPOSE.contains("8181:8181"));
+    }
+
+    #[test]
+    fn ollama_service_and_healthcheck_survived_the_edit() {
+        assert!(COMPOSE.contains("container_name: diiisco-ollama"));
+        assert!(COMPOSE.contains(r#"["CMD", "ollama", "list"]"#));
     }
 }
