@@ -27,7 +27,8 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
     health,
     lifecycle,
     version,
-    unavailable_reason: unavailableReason
+    unavailable_reason: unavailableReason,
+    error: lastError
   } = intg
   const inst = version !== null
   const reason = unhealthyReason(health)
@@ -36,6 +37,11 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
   // "unhealthy": nothing is wrong, it simply can never run here — so the card
   // is inert rather than alarming.
   const unavailable = !!unavailableReason
+  // Why the last enable attempt failed. Hardware-unavailable is the more
+  // fundamental condition, so it wins; otherwise this is the most actionable
+  // thing we can tell the user, and without it the toggle just springs back
+  // to off with no explanation at all.
+  const startError = !unavailable ? (lastError ?? null) : null
 
   let st: 'run' | 'err' | 'stopped' | 'info' = 'stopped'
   let stLbl = 'Not installed'
@@ -174,7 +180,29 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
                 {/^\d/.test(version) ? `v${version}` : 'Installed'}
               </span>
             )}
-            {reason && st === 'err' && (
+            {startError && (
+              <span
+                data-testid={`starterror-${id}`}
+                role="alert"
+                style={{
+                  fontFamily: 'var(--fb)',
+                  fontSize: 11,
+                  color: 'var(--amb)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  minWidth: 0,
+                  maxWidth: 420,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap'
+                }}
+                title={startError}
+              >
+                <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {startError}
+              </span>
+            )}
+            {reason && st === 'err' && !startError && (
               <span
                 data-testid={`error-${id}`}
                 role="alert"
@@ -196,7 +224,7 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
                 <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {reason}
               </span>
             )}
-            {dockerNote && (
+            {dockerNote && !startError && (
               <span
                 style={{
                   fontFamily: 'var(--fb)',
@@ -238,7 +266,7 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
                 <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {unavailableReason}
               </span>
             )}
-            {!unavailable && !inst && !dockerNote && lifecycle !== 'Installing' && (
+            {!unavailable && !startError && !inst && !dockerNote && lifecycle !== 'Installing' && (
               <span
                 style={{
                   fontFamily: 'var(--fb)',
