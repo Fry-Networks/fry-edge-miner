@@ -45,6 +45,17 @@ impl FryVpnIntegration {
         }
     }
 
+    /// frynode refuses to start without a region ("failed to load config:
+    /// REGION is required") and FEM has no region concept of its own, so this
+    /// supplies a default that `FRYNODE_REGION` can override.
+    fn region() -> String {
+        std::env::var("FRYNODE_REGION")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "us".to_string())
+    }
+
     /// Resolve the frynode binary: `FRYNODE_BIN` → the bundled resource next to
     /// the executable → the bare name on PATH.
     ///
@@ -101,6 +112,8 @@ impl Integration for FryVpnIntegration {
             "8088".to_string(),
             "-wg-port".to_string(),
             "51820".to_string(),
+            "-region".to_string(),
+            Self::region(),
         ];
 
         {
@@ -277,6 +290,23 @@ mod tests {
             Some(PathBuf::from("C:/app/resources/frynode.exe")),
         );
         assert!(resolved.contains("resources"), "{resolved}");
+    }
+
+    #[test]
+    fn region_defaults_when_unset_and_is_never_empty() {
+        // frynode exits with "failed to load config: REGION is required" if this
+        // is missing, which is what kept the binary from staying up.
+        std::env::remove_var("FRYNODE_REGION");
+        assert_eq!(FryVpnIntegration::region(), "us");
+    }
+
+    #[test]
+    fn region_honours_the_env_override() {
+        std::env::set_var("FRYNODE_REGION", "eu-west");
+        assert_eq!(FryVpnIntegration::region(), "eu-west");
+        std::env::set_var("FRYNODE_REGION", "   ");
+        assert_eq!(FryVpnIntegration::region(), "us", "blank override must fall back");
+        std::env::remove_var("FRYNODE_REGION");
     }
 
     #[test]
