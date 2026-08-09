@@ -56,6 +56,18 @@ impl FryVpnIntegration {
             .unwrap_or_else(|| "us".to_string())
     }
 
+    /// The other config frynode insists on: "CAPACITY_MBPS is required
+    /// (must be > 0)". Probing the binary directly showed region plus a
+    /// non-zero capacity is the complete required set — price-per-gb is
+    /// optional. Overridable via `FRYNODE_CAPACITY_MBPS`.
+    fn capacity_mbps() -> u32 {
+        std::env::var("FRYNODE_CAPACITY_MBPS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(100)
+    }
+
     /// Resolve the frynode binary: `FRYNODE_BIN` → the bundled resource next to
     /// the executable → the bare name on PATH.
     ///
@@ -114,6 +126,8 @@ impl Integration for FryVpnIntegration {
             "51820".to_string(),
             "-region".to_string(),
             Self::region(),
+            "-capacity-mbps".to_string(),
+            Self::capacity_mbps().to_string(),
         ];
 
         {
@@ -307,6 +321,25 @@ mod tests {
         std::env::set_var("FRYNODE_REGION", "   ");
         assert_eq!(FryVpnIntegration::region(), "us", "blank override must fall back");
         std::env::remove_var("FRYNODE_REGION");
+    }
+
+    #[test]
+    fn capacity_is_always_positive() {
+        // frynode rejects 0 outright: "CAPACITY_MBPS is required (must be > 0)".
+        std::env::remove_var("FRYNODE_CAPACITY_MBPS");
+        assert!(FryVpnIntegration::capacity_mbps() > 0);
+
+        std::env::set_var("FRYNODE_CAPACITY_MBPS", "250");
+        assert_eq!(FryVpnIntegration::capacity_mbps(), 250);
+
+        for bad in ["0", "-5", "abc", ""] {
+            std::env::set_var("FRYNODE_CAPACITY_MBPS", bad);
+            assert!(
+                FryVpnIntegration::capacity_mbps() > 0,
+                "override {bad:?} must not produce a zero capacity"
+            );
+        }
+        std::env::remove_var("FRYNODE_CAPACITY_MBPS");
     }
 
     #[test]
