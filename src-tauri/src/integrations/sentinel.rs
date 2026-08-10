@@ -15,6 +15,40 @@ fn compose_file() -> PathBuf {
     deploy_dir().join("docker-compose.yml")
 }
 
+/// Verdict derived from the `docker compose ps` container states.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ComposeVerdict {
+    Running,
+    /// At least one container finished (exited/dead) — fetch logs for detail.
+    Exited,
+    /// A container exists but cannot progress without intervention.
+    Stuck(String),
+    /// Containers are transitioning (created/restarting) — genuinely starting.
+    Starting,
+    /// The compose project has no containers at all.
+    NoContainers,
+}
+
+pub(crate) fn classify_compose_states(states: &[String]) -> ComposeVerdict {
+    if states.iter().any(|s| s == "running") {
+        return ComposeVerdict::Running;
+    }
+    // "dead" is as final as "exited" — both need the log-detail path, and
+    // both must NOT report Starting (the v0.4.7 stuck-STARTING bug: a
+    // stopped container never became Unhealthy, so the supervisor never
+    // restarted it).
+    if states.iter().any(|s| s.starts_with("exited") || s == "dead") {
+        return ComposeVerdict::Exited;
+    }
+    if states.is_empty() {
+        return ComposeVerdict::NoContainers;
+    }
+    if let Some(stuck) = states.iter().find(|s| *s == "paused" || *s == "removing") {
+        return ComposeVerdict::Stuck(stuck.clone());
+    }
+    ComposeVerdict::Starting
+}
+
 fn docker_available() -> bool {
     super::docker_manager::docker_cli_probe_bounded() == Some(true)
 }
@@ -283,27 +317,33 @@ impl Integration for SentinelIntegration {
                             if rows.is_empty() { None } else { Some(rows) }
                         });
                 if let Some(containers) = parsed {
-                    // If any container is running, health is Healthy
-                    let has_running = containers.iter().any(|c| {
-                        c.get("State")
-                            .and_then(|s| s.as_str())
-                            .map(|s| s == "running")
-                            .unwrap_or(false)
-                    });
+                    let states: Vec<String> = containers
+                        .iter()
+                        .filter_map(|c| c.get("State").and_then(|s| s.as_str()))
+                        .map(|s| s.to_string())
+                        .collect();
 
-                    if has_running {
-                        return HealthStatus::Healthy;
+                    match classify_compose_states(&states) {
+                        ComposeVerdict::Running => return HealthStatus::Healthy,
+                        ComposeVerdict::NoContainers => {
+                            // Compose project exists but its containers were
+                            // removed — Unhealthy so the supervisor restart
+                            // path re-runs `compose up -d` and recreates them.
+                            return HealthStatus::Unhealthy(
+                                "No Sentinel containers exist — restarting to recreate them"
+                                    .to_string(),
+                            );
+                        }
+                        ComposeVerdict::Stuck(state) => {
+                            return HealthStatus::Unhealthy(format!(
+                                "Sentinel container is {state} and cannot progress — restarting"
+                            ));
+                        }
+                        ComposeVerdict::Starting => return HealthStatus::Starting,
+                        ComposeVerdict::Exited => { /* fall through to log fetch below */ }
                     }
 
-                    // Check if any are exited (error state)
-                    let has_exited = containers.iter().any(|c| {
-                        c.get("State")
-                            .and_then(|s| s.as_str())
-                            .map(|s| s.starts_with("exited"))
-                            .unwrap_or(false)
-                    });
-
-                    if has_exited {
+                    {
                         // Try to get logs for more detail
                         if let Ok(log_output) = crate::supervisor::platform::command("docker")
                             .args([
@@ -339,8 +379,6 @@ impl Integration for SentinelIntegration {
                             return HealthStatus::Unhealthy("Container exited".to_string());
                         }
                     }
-
-                    return HealthStatus::Starting;
                 } else {
                     return HealthStatus::Unhealthy("Failed to parse docker ps output".to_string());
                 }
@@ -380,5 +418,63 @@ impl Integration for SentinelIntegration {
 
     fn requires_docker(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // v0.4.8 stuck-STARTING repro: a container that exists but is stopped
+    // ("exited"/"dead"), paused, or wholly removed left the card on
+    // "Starting" forever — the supervisor never restarted it because
+    // Starting is not Unhealthy.
+    #[test]
+    fn dead_container_is_exited_not_starting() {
+        assert_eq!(
+            classify_compose_states(&["dead".to_string()]),
+            ComposeVerdict::Exited
+        );
+    }
+
+    #[test]
+    fn no_containers_is_its_own_verdict_not_starting() {
+        assert_eq!(classify_compose_states(&[]), ComposeVerdict::NoContainers);
+    }
+
+    #[test]
+    fn paused_container_is_stuck_not_starting() {
+        assert_eq!(
+            classify_compose_states(&["paused".to_string()]),
+            ComposeVerdict::Stuck("paused".to_string())
+        );
+    }
+
+    #[test]
+    fn exited_container_is_exited() {
+        assert_eq!(
+            classify_compose_states(&["exited (1)".to_string()]),
+            ComposeVerdict::Exited
+        );
+    }
+
+    #[test]
+    fn running_wins_over_everything() {
+        assert_eq!(
+            classify_compose_states(&["exited".to_string(), "running".to_string()]),
+            ComposeVerdict::Running
+        );
+    }
+
+    #[test]
+    fn created_and_restarting_are_genuinely_starting() {
+        assert_eq!(
+            classify_compose_states(&["created".to_string()]),
+            ComposeVerdict::Starting
+        );
+        assert_eq!(
+            classify_compose_states(&["restarting".to_string()]),
+            ComposeVerdict::Starting
+        );
     }
 }
