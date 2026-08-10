@@ -352,7 +352,10 @@ impl Integration for AemIntegration {
             // consuming all RAM / ~100% CPU. A breach reports Unhealthy so
             // the supervisor restart path (stop → taskkill → start) bounces
             // the process; the reason lands on the card.
-            if let Some(reason) = Self::resource_breach() {
+            // block_in_place: the probe shells out to PowerShell (~<1s, but
+            // it must not pin a tokio worker if PowerShell ever hangs).
+            let breach = tokio::task::block_in_place(Self::resource_breach);
+            if let Some(reason) = breach {
                 warn!(reason = %reason, "OlostepBrowser resource cap breached — restarting");
                 return HealthStatus::Unhealthy(reason);
             }

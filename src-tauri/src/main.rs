@@ -530,6 +530,10 @@ fn main() {
                             commands::device::TOKEN_RECOVERY_COOLDOWN,
                         ) {
                             *poc_recovery_at.write().unwrap() = Some(std::time::Instant::now());
+                            // An attempt consumes the 401-run evidence — the
+                            // stranded path must re-earn 3 consecutive 401s
+                            // before the next attempt (cooldown also applies).
+                            consecutive_401s = 0;
                             if commands::device::attempt_token_recovery(&poc_config, &poc_client)
                                 .await
                             {
@@ -542,7 +546,6 @@ fn main() {
                                         st.last_poc_ok_at = Some(chrono::Utc::now().to_rfc3339());
                                         st.last_poc_error = None;
                                         st.consecutive_poc_failures = 0;
-                                        consecutive_401s = 0;
                                         tracing::info!("PoC submission recovered after token refresh");
                                     }
                                     Err(e) => {

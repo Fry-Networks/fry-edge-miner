@@ -80,9 +80,24 @@ pub fn ensure_program_rules(rule_name: &str, program: &Path) -> Result<()> {
         info!(rule = rule_name, program = %program_str, "Firewall rule missing — creating");
     }
 
+    // PowerShell single-quoted strings escape ' by doubling it — required for
+    // paths containing quotes (e.g. C:\Users\O'Brien\…).
+    let ps_quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
     let netsh_script = reconcile_commands(rule_name, &program_str)
         .into_iter()
-        .map(|argv| format!("netsh {}", argv.join(" ")))
+        .map(|argv| {
+            let quoted: Vec<String> = argv
+                .iter()
+                .map(|a| {
+                    if a.starts_with("program=") {
+                        format!("{}={}", "program", ps_quote(a.trim_start_matches("program=")))
+                    } else {
+                        a.clone()
+                    }
+                })
+                .collect();
+            format!("netsh {}", quoted.join(" "))
+        })
         .collect::<Vec<_>>()
         .join("; ");
 
@@ -99,8 +114,8 @@ pub fn ensure_program_rules(rule_name: &str, program: &Path) -> Result<()> {
     // Inner elevated command; Start-Process -Wait keeps the outer (unelevated)
     // powershell blocking until the elevated one exits.
     let inner = format!(
-        "Start-Transcript -Path '{}' | Out-Null; {}; Stop-Transcript | Out-Null",
-        transcript.display(),
+        "Start-Transcript -Path {} | Out-Null; {}; Stop-Transcript | Out-Null",
+        ps_quote(&transcript.display().to_string()),
         netsh_script
     );
     let outer = format!(
