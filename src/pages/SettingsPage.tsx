@@ -13,6 +13,7 @@ import { invokeWithFallback, safeInvoke } from '../lib/tauri'
 import { useDevice } from '../hooks/useDevice'
 import { useRewards } from '../hooks/useRewards'
 import { APP_VERSION } from '../lib/version'
+import { shouldShowSavedMinerKey } from '../lib/settingsView'
 
 interface SettingSectionProps {
   Icon: LucideIcon
@@ -178,6 +179,24 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
           </>
         ) : (
           <>
+            {shouldShowSavedMinerKey(isRegistered, config?.miner_key) && (
+              <>
+                <Lbl sx={{ marginBottom: 5 }}>Saved Miner Key</Lbl>
+                <CopyField val={config?.miner_key ?? ''} />
+                <div
+                  data-testid="unregistered-key-hint"
+                  style={{
+                    fontFamily: 'var(--fb)',
+                    fontSize: 11,
+                    color: 'var(--amb)',
+                    margin: '6px 0 12px'
+                  }}
+                >
+                  Not registered — this device has a saved miner key but the server does not
+                  currently recognize its registration. Register below to start earning again.
+                </div>
+              </>
+            )}
             <Lbl sx={{ marginBottom: 5 }}>Miner Key (optional)</Lbl>
             <input
               className="inp"
