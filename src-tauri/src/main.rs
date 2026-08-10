@@ -458,6 +458,10 @@ fn main() {
                 // Failed slot submissions retained for retry once the API is
                 // reachable again (in-memory, bounded — see retry_queue.rs).
                 let mut retry_queue = poc::retry_queue::PocRetryQueue::new();
+                // Consecutive hardware-PUT 401s — feeds the stranded-token
+                // recovery path (device with no local device token whose
+                // miner_key has a server-side token bound to another install).
+                let mut consecutive_401s: u32 = 0;
                 loop {
                     interval.tick().await;
                     let cfg = poc_config.get();
@@ -502,12 +506,25 @@ fn main() {
                         // --- 401 recovery: the server no longer recognises this
                         // device token. Clear it, re-register on the shared token,
                         // and retry this tick's submission once.
+                        let poc_err_status = poc_result
+                            .as_ref()
+                            .err()
+                            .and_then(commands::device::api_error_status);
+                        if poc_err_status == Some(401) {
+                            consecutive_401s = consecutive_401s.saturating_add(1);
+                        } else {
+                            consecutive_401s = 0;
+                        }
                         if commands::device::should_attempt_recovery(
-                            poc_result
-                                .as_ref()
-                                .err()
-                                .and_then(commands::device::api_error_status),
+                            poc_err_status,
                             cfg.device_token.is_some(),
+                            *poc_recovery_at.read().unwrap(),
+                            std::time::Instant::now(),
+                            commands::device::TOKEN_RECOVERY_COOLDOWN,
+                        ) || commands::device::should_attempt_stranded_recovery(
+                            poc_err_status,
+                            cfg.device_token.is_some(),
+                            consecutive_401s,
                             *poc_recovery_at.read().unwrap(),
                             std::time::Instant::now(),
                             commands::device::TOKEN_RECOVERY_COOLDOWN,
@@ -525,6 +542,7 @@ fn main() {
                                         st.last_poc_ok_at = Some(chrono::Utc::now().to_rfc3339());
                                         st.last_poc_error = None;
                                         st.consecutive_poc_failures = 0;
+                                        consecutive_401s = 0;
                                         tracing::info!("PoC submission recovered after token refresh");
                                     }
                                     Err(e) => {

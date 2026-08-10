@@ -414,6 +414,41 @@ pub fn should_attempt_recovery(
     }
 }
 
+/// Consecutive PoC hardware-PUT 401s required before a shared-token device is
+/// treated as stranded. A single 401 can be by-design (see
+/// should_attempt_recovery); a persistent run of them on the hardware PUT is
+/// not.
+pub const STRANDED_401_THRESHOLD: u32 = 3;
+
+/// Whether a device holding NO per-device token should recover via
+/// re-registration.
+///
+/// Field case (v0.4.7): the server holds a per-device token binding this
+/// miner_key (minted by another/older install), so every shared-token
+/// hardware PUT 401s forever — one device logged 48/48 failed PUTs in 24h
+/// with no way out. Re-registering mints a fresh device token and unsticks
+/// it. Requires a RUN of consecutive 401s so the by-design single-401
+/// endpoints never trigger it, plus the same cooldown as normal recovery.
+pub fn should_attempt_stranded_recovery(
+    status: Option<u16>,
+    has_device_token: bool,
+    consecutive_401s: u32,
+    last_attempt: Option<std::time::Instant>,
+    now: std::time::Instant,
+    cooldown: std::time::Duration,
+) -> bool {
+    if status != Some(401) || has_device_token {
+        return false;
+    }
+    if consecutive_401s < STRANDED_401_THRESHOLD {
+        return false;
+    }
+    match last_attempt {
+        Some(prev) => now.saturating_duration_since(prev) >= cooldown,
+        None => true,
+    }
+}
+
 /// Drop the stored per-device token. Returns true when one was actually held.
 pub fn clear_device_token_in(cfg: &mut crate::config::FemConfig) -> bool {
     if cfg.device_token.is_none() {
@@ -596,6 +631,77 @@ mod recovery_tests {
         let mut cfg = cfg_with(None);
         assert!(!clear_device_token_in(&mut cfg));
         assert_eq!(cfg.effective_api_token(), "bootstrap-token");
+    }
+
+    // --- stranded recovery (v0.4.8): shared-token device stuck on 401s ---
+
+    #[test]
+    fn stranded_device_recovers_after_a_run_of_401s() {
+        // Repro of the field case: no device token, hardware PUT 401s every
+        // tick — before this path existed the device stayed stuck forever
+        // (should_attempt_recovery correctly refuses no-token devices).
+        assert!(should_attempt_stranded_recovery(
+            Some(401),
+            false,
+            STRANDED_401_THRESHOLD,
+            None,
+            Instant::now(),
+            COOLDOWN
+        ));
+    }
+
+    #[test]
+    fn a_single_401_without_a_token_stays_excluded() {
+        // Guards the by-design case documented on should_attempt_recovery.
+        assert!(!should_attempt_stranded_recovery(
+            Some(401),
+            false,
+            1,
+            None,
+            Instant::now(),
+            COOLDOWN
+        ));
+    }
+
+    #[test]
+    fn stranded_path_never_fires_while_holding_a_device_token() {
+        assert!(!should_attempt_stranded_recovery(
+            Some(401),
+            true,
+            STRANDED_401_THRESHOLD + 5,
+            None,
+            Instant::now(),
+            COOLDOWN
+        ));
+    }
+
+    #[test]
+    fn stranded_recovery_respects_the_cooldown() {
+        let base = Instant::now();
+        let now = base + Duration::from_secs(600);
+        assert!(!should_attempt_stranded_recovery(
+            Some(401),
+            false,
+            STRANDED_401_THRESHOLD,
+            Some(base + Duration::from_secs(540)),
+            now,
+            COOLDOWN
+        ));
+        assert!(should_attempt_stranded_recovery(
+            Some(401),
+            false,
+            STRANDED_401_THRESHOLD,
+            Some(base),
+            now,
+            COOLDOWN
+        ));
+    }
+
+    #[test]
+    fn non_401_failures_never_trigger_stranded_recovery() {
+        let now = Instant::now();
+        assert!(!should_attempt_stranded_recovery(Some(500), false, 10, None, now, COOLDOWN));
+        assert!(!should_attempt_stranded_recovery(None, false, 10, None, now, COOLDOWN));
     }
 
     #[test]
