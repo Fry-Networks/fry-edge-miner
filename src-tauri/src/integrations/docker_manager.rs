@@ -120,6 +120,46 @@ pub fn virtualization_supported() -> bool {
     })
 }
 
+/// Whether this Windows install is itself a VM guest (Proxmox/KVM, VMware,
+/// VirtualBox, Hyper-V, Xen). Matters for the VirtualizationDisabled
+/// guidance: inside a guest the fix is nested virtualization on the VM HOST,
+/// not a BIOS setting — telling a VM user to "enable VT-x in your BIOS" sends
+/// them somewhere the switch does not exist (v0.4.7 Proxmox field reports).
+/// Cached; fail-closed to false (bare-metal guidance) on probe errors.
+pub fn is_virtual_machine() -> bool {
+    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        #[cfg(target_os = "windows")]
+        {
+            let out = crate::supervisor::platform::command("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "$c=Get-CimInstance Win32_ComputerSystem; Write-Output \"$($c.Manufacturer)|$($c.Model)\"",
+                ])
+                .output();
+            match out {
+                Ok(o) => {
+                    let s = String::from_utf8_lossy(&o.stdout).trim().to_lowercase();
+                    let vm = ["qemu", "kvm", "proxmox", "vmware", "virtualbox", "vbox", "xen", "virtual machine", "hyper-v"]
+                        .iter()
+                        .any(|m| s.contains(m));
+                    info!(raw = %s, vm, "VM guest probe");
+                    vm
+                }
+                Err(e) => {
+                    warn!(error = %e, "VM guest probe failed — assuming bare metal");
+                    false
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            false
+        }
+    })
+}
+
 /// Resolve the current Docker state, including whether virtualization makes
 /// Docker viable at all on this machine.
 pub fn docker_status() -> DockerStatus {
@@ -150,6 +190,12 @@ pub fn docker_status() -> DockerStatus {
 /// User-facing guidance per Docker state. Non-Docker integrations
 /// (MystNodes, SpaceAcres, Olostep) are unaffected by any of these states.
 pub fn status_user_message(status: DockerStatus) -> String {
+    status_user_message_for(status, is_virtual_machine())
+}
+
+/// Testable core of status_user_message — `vm_guest` selects the right
+/// VirtualizationDisabled guidance (VM host setting vs BIOS setting).
+pub fn status_user_message_for(status: DockerStatus, vm_guest: bool) -> String {
     match status {
         DockerStatus::Ready => "Docker is running.".to_string(),
         DockerStatus::DaemonStopped => {
@@ -158,6 +204,10 @@ pub fn status_user_message(status: DockerStatus) -> String {
         DockerStatus::NotInstalled => {
             "Docker Desktop is not installed. Enabling a Docker-based integration (Diiisco) will download and install it automatically (administrator approval required), or install it manually from https://www.docker.com/products/docker-desktop/.".to_string()
         }
+        DockerStatus::VirtualizationDisabled if vm_guest => format!(
+            "This Windows install is a virtual machine and nested virtualization is not exposed to it, so Docker cannot run here. Enable nested virtualization on the VM host (Proxmox/KVM: CPU type 'host'; VMware: 'Virtualize Intel VT-x/EPT'; Hyper-V: Set-VMProcessor -ExposeVirtualizationExtensions $true), then restart this VM. Guide: {} — Other integrations (MystNodes, SpaceAcres, Olostep) do not need Docker and keep working.",
+            VIRTUALIZATION_HELP_URL
+        ),
         DockerStatus::VirtualizationDisabled => format!(
             "Hardware virtualization is disabled on this PC, so Docker (required by Diiisco) cannot run. Enable virtualization (Intel VT-x / AMD-V / SVM) in your BIOS/UEFI settings, then try again. Guide: {} — Other integrations (MystNodes, SpaceAcres, Olostep) do not need Docker and keep working.",
             VIRTUALIZATION_HELP_URL
@@ -385,6 +435,44 @@ pub async fn ensure_docker() -> Result<()> {
             })?;
             info!("Docker Desktop installation and startup complete");
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // v0.4.8: VirtualizationDisabled guidance must point VM guests at the
+    // hypervisor host, not a BIOS switch the guest does not have (Proxmox
+    // field reports: users were told to enable VT-x in a VM's "BIOS").
+    #[test]
+    fn vm_guest_gets_nested_virtualization_guidance() {
+        let msg = status_user_message_for(DockerStatus::VirtualizationDisabled, true);
+        assert!(msg.contains("virtual machine"), "got: {msg}");
+        assert!(msg.contains("nested virtualization"), "got: {msg}");
+        assert!(msg.to_lowercase().contains("proxmox"), "got: {msg}");
+        assert!(!msg.contains("BIOS/UEFI settings"), "VM guests must not get the BIOS path: {msg}");
+    }
+
+    #[test]
+    fn bare_metal_keeps_the_bios_guidance() {
+        let msg = status_user_message_for(DockerStatus::VirtualizationDisabled, false);
+        assert!(msg.contains("BIOS/UEFI"), "got: {msg}");
+        assert!(!msg.contains("nested virtualization"), "got: {msg}");
+    }
+
+    #[test]
+    fn non_virtualization_states_ignore_the_vm_flag() {
+        for vm in [true, false] {
+            assert_eq!(
+                status_user_message_for(DockerStatus::DaemonStopped, vm),
+                status_user_message_for(DockerStatus::DaemonStopped, !vm)
+            );
+            assert_eq!(
+                status_user_message_for(DockerStatus::NotInstalled, vm),
+                status_user_message_for(DockerStatus::NotInstalled, !vm)
+            );
         }
     }
 }

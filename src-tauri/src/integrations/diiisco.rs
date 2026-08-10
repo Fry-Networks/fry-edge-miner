@@ -274,7 +274,11 @@ impl Integration for DiiiscoIntegration {
 
     async fn health_check(&self) -> HealthStatus {
         if !docker_available() {
-            return HealthStatus::Unhealthy("Docker not available".to_string());
+            // State-aware guidance ("not installed" vs "not running" vs
+            // VM/BIOS virtualization) instead of a generic string.
+            return HealthStatus::Unhealthy(super::docker_manager::status_user_message(
+                super::docker_manager::docker_status(),
+            ));
         }
         let token = diiisco_bearer_token();
         if token.is_empty() {
