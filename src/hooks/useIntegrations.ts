@@ -125,7 +125,19 @@ export function useIntegrations() {
   }, [])
 
   const fetchSystem = useCallback(async () => {
-    if (!isTauri()) return
+    if (!isTauri()) {
+      // Browser preview/e2e hint (mirrors useDevice's ?wizard=1 pattern):
+      // ?docker=<kind> simulates a system status without IPC.
+      const hint = new URLSearchParams(window.location.search).get('docker')
+      if (hint) {
+        setSystem({
+          docker: hint as SystemStatus['docker'],
+          docker_message: '',
+          virtualization_supported: true
+        })
+      }
+      return
+    }
     try {
       const status = await invoke<SystemStatus>('get_system_status')
       setSystem(status)

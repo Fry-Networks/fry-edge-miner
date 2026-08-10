@@ -10,6 +10,7 @@ import Updates from './pages/Updates'
 import Wizard from './wizard/Wizard'
 import { useIntegrations } from './hooks/useIntegrations'
 import { categoryCounts } from './lib/availability'
+import { deriveConnectivity } from './lib/connectivity'
 import { useDevice } from './hooks/useDevice'
 import { makeName } from './lib/names'
 import { isTauri } from './lib/tauri'
@@ -137,14 +138,15 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
   const { integrations, toggle, forceReinstall, error, system, dockerProgress, refetch } = useIntegrations()
   const activeCount = integrations.filter((i) => i.enabled).length
   const hasUnhealthy = integrations.some((i) => i.enabled && !i.healthy)
-  // Only device/API-level failures mean the backend is unreachable; a failed
-  // integration toggle or a non-ready Docker is a local problem → degraded.
-  const connectivity: 'connected' | 'degraded' | 'disconnected' =
-    deviceError
-      ? 'disconnected'
-      : (error || (system && system.docker !== 'ready'))
-        ? 'degraded'
-        : 'connected'
+  // Badge reflects reachability of the Fry backend only. Docker state is a
+  // local prerequisite surfaced via the TopBar Docker chip + per-card errors,
+  // never via the connectivity badge (users read "Degraded" as "offline").
+  const connectivity = deriveConnectivity({
+    deviceError,
+    integrationsError: error,
+    dockerStatus: system?.docker ?? null
+  })
+  const dockerChip = system && system.docker !== 'ready' ? system.docker : null
 
   return (
     <div
@@ -158,7 +160,7 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
     >
       <Sidebar page={page} onNav={setPage} activeCount={activeCount} totalCount={categoryCounts(integrations).availableTotal} hasUnhealthy={hasUnhealthy} deviceName={deviceName} minerKey={minerKey} />
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <TopBar page={page} connectivity={connectivity} />
+        <TopBar page={page} connectivity={connectivity} docker={dockerChip} />
         {error && <ErrorBanner error={error} />}
         <div style={{ flex: 1, overflow: 'hidden' }}>
           {page === 'dashboard' && <Dashboard intgs={integrations} />}

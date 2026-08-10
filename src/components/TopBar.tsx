@@ -5,6 +5,14 @@ import { APP_VERSION } from '../lib/version'
 interface TopBarProps {
   page: NavPage
   connectivity: 'connected' | 'degraded' | 'disconnected'
+  /** Non-ready docker state to surface as a chip, or null/undefined to hide. */
+  docker?: string | null
+}
+
+const DOCKER_CHIP_LABEL: Record<string, string> = {
+  daemon_stopped: 'Docker stopped',
+  not_installed: 'Docker not installed',
+  virtualization_disabled: 'Docker unavailable',
 }
 
 const CONNECTIVITY_STYLE = {
@@ -29,7 +37,7 @@ const S: Record<NavPage, string> = {
   updates: 'Software version management'
 }
 
-export default function TopBar({ page, connectivity }: TopBarProps) {
+export default function TopBar({ page, connectivity, docker }: TopBarProps) {
   const cs = CONNECTIVITY_STYLE[connectivity]
   return (
     <div
@@ -58,6 +66,23 @@ export default function TopBar({ page, connectivity }: TopBarProps) {
         <div style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t2)', marginTop: 1 }}>{S[page]}</div>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+        {docker && (
+          <span
+            data-testid="docker-chip"
+            title="Docker affects only Docker-based integrations — your connection to Fry is unaffected."
+            style={{
+              fontFamily: 'var(--fm)',
+              fontSize: 10,
+              color: 'var(--amb)',
+              border: '1px solid var(--amb)',
+              borderRadius: 'var(--radsm)',
+              padding: '1px 6px',
+              marginRight: 5
+            }}
+          >
+            {DOCKER_CHIP_LABEL[docker] ?? `Docker: ${docker}`}
+          </span>
+        )}
         <Dot status={cs.dot} size={5} />
         <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: cs.col }}>{cs.label}</span>
         <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--t2)', marginLeft: 3 }}>v{APP_VERSION}</span>
