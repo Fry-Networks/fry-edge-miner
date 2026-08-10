@@ -2,6 +2,7 @@ pub mod aem;
 pub mod diiisco;
 pub mod docker_manager;
 pub mod download;
+pub mod firewall;
 // filecoin_checker is retired: the Checker/Filecoin Station network is gone
 // (repo archived 2025-06; checker.network, filstation.app, api.filspark.com and
 // station-wallet-screening.fly.dev all NXDOMAIN). The module is kept on disk,

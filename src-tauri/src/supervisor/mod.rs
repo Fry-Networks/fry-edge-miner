@@ -1,6 +1,7 @@
 pub mod health;
 pub mod platform;
 pub mod process;
+pub mod resource_guard;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

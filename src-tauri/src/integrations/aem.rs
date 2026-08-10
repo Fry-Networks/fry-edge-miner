@@ -66,6 +66,90 @@ impl AemIntegration {
         dirs::config_dir().map(|d| d.join("Olostep-Browser").join("config.json"))
     }
 
+    /// Physical RAM, cached (0 = probe failed → memory check disabled).
+    fn total_ram_bytes() -> u64 {
+        static CACHE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        *CACHE.get_or_init(|| {
+            #[cfg(target_os = "windows")]
+            {
+                crate::supervisor::platform::command("powershell")
+                    .args([
+                        "-NoProfile",
+                        "-Command",
+                        "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory",
+                    ])
+                    .output()
+                    .ok()
+                    .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok())
+                    .unwrap_or(0)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                0
+            }
+        })
+    }
+
+    /// Summed WorkingSet + CPU-seconds of all OlostepBrowser processes.
+    fn resource_sample() -> Option<crate::supervisor::resource_guard::Sample> {
+        #[cfg(target_os = "windows")]
+        {
+            let out = crate::supervisor::platform::command("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "$p = Get-Process OlostepBrowser -ErrorAction SilentlyContinue; \
+                     if ($p) { $ws = ($p | Measure-Object WorkingSet64 -Sum).Sum; \
+                     $cpu = ($p | Measure-Object CPU -Sum).Sum; Write-Output \"$ws|$cpu\" }",
+                ])
+                .output()
+                .ok()?;
+            let text = String::from_utf8_lossy(&out.stdout);
+            let mut parts = text.trim().split('|');
+            let mem = parts.next()?.trim().parse::<u64>().ok()?;
+            let cpu = parts.next()?.trim().replace(',', ".").parse::<f64>().unwrap_or(0.0);
+            Some(crate::supervisor::resource_guard::Sample {
+                mem_bytes: mem,
+                cpu_seconds: cpu,
+                at: std::time::Instant::now(),
+            })
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            None
+        }
+    }
+
+    /// Resource-cap check run from the 30s health tick. Some(reason) = the
+    /// process must be restarted (supervisor handles it via Unhealthy).
+    fn resource_breach() -> Option<String> {
+        use crate::supervisor::resource_guard::{self, ResourceGuard, TripReason};
+        static GUARD: std::sync::OnceLock<std::sync::Mutex<ResourceGuard>> =
+            std::sync::OnceLock::new();
+        let sample = Self::resource_sample()?;
+        let mem_cap =
+            (Self::total_ram_bytes() as f64 * resource_guard::MEM_CAP_FRACTION) as u64;
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get() as u32)
+            .unwrap_or(1);
+        let mut guard = GUARD
+            .get_or_init(|| std::sync::Mutex::new(ResourceGuard::new()))
+            .lock()
+            .ok()?;
+        match guard.evaluate(sample, mem_cap, resource_guard::CPU_CAP_FRACTION, cores)? {
+            TripReason::Memory { used_bytes, cap_bytes } => Some(format!(
+                "restarted: resource limit — OlostepBrowser held {:.1} GB of RAM (cap {:.1} GB)",
+                used_bytes as f64 / 1e9,
+                cap_bytes as f64 / 1e9
+            )),
+            TripReason::Cpu { fraction, cap_fraction } => Some(format!(
+                "restarted: resource limit — OlostepBrowser sustained {:.0}% CPU (cap {:.0}%)",
+                fraction * 100.0,
+                cap_fraction * 100.0
+            )),
+        }
+    }
+
     /// Last few lines of Squirrel's own install log — the only place the real
     /// install-failure reason (AV block, lock, disk) is recorded.
     fn squirrel_log_tail() -> Option<String> {
@@ -95,6 +179,9 @@ impl AemIntegration {
                 .args(["/IM", "OlostepBrowser.exe", "/F"])
                 .output();
         }
+        // Rules are keyed to the install path being wiped below; deleting
+        // them here (not on every disable) avoids a UAC prompt per toggle.
+        super::firewall::delete_rules(super::firewall::OLOSTEP_RULE_NAME);
         let dirs_to_remove = [
             dirs::data_local_dir().map(|d| d.join("Olostep-Browser")),
             dirs::data_local_dir().map(|d| d.join("SquirrelTemp")),
@@ -232,6 +319,16 @@ impl Integration for AemIntegration {
         if let Err(e) = Self::stage_config() {
             warn!(error = %e, "Could not re-stage OlostepBrowser config before start");
         }
+        // Pre-create firewall rules for this exact binary path so Windows
+        // never shows the firewall prompt (the path changes on every Olostep
+        // Squirrel self-update, which re-triggered the prompt each time).
+        // Non-fatal: a declined UAC just means Windows prompts as before.
+        if let Err(e) = super::firewall::ensure_program_rules(
+            super::firewall::OLOSTEP_RULE_NAME,
+            &binary,
+        ) {
+            warn!(error = %e, "Olostep firewall rule setup failed — continuing");
+        }
         info!(binary = ?binary, "Starting OlostepBrowser");
         crate::supervisor::platform::command(&binary).spawn()?;
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
@@ -251,6 +348,14 @@ impl Integration for AemIntegration {
 
     async fn health_check(&self) -> HealthStatus {
         if Self::is_running() {
+            // Resource caps (v0.4.8): field reports of OlostepBrowser
+            // consuming all RAM / ~100% CPU. A breach reports Unhealthy so
+            // the supervisor restart path (stop → taskkill → start) bounces
+            // the process; the reason lands on the card.
+            if let Some(reason) = Self::resource_breach() {
+                warn!(reason = %reason, "OlostepBrowser resource cap breached — restarting");
+                return HealthStatus::Unhealthy(reason);
+            }
             HealthStatus::Healthy
         } else if Self::olostep_binary().is_some() {
             HealthStatus::Stopped
