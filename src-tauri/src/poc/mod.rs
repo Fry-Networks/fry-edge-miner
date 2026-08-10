@@ -2,6 +2,7 @@ pub mod cache;
 pub mod gates;
 pub mod hardware;
 pub mod reporter;
+pub mod retry_queue;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

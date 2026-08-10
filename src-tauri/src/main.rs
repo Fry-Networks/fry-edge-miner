@@ -455,6 +455,9 @@ fn main() {
                 tokio::task::block_in_place(|| {});
 
                 let mut interval = tokio::time::interval(Duration::from_secs(60));
+                // Failed slot submissions retained for retry once the API is
+                // reachable again (in-memory, bounded — see retry_queue.rs).
+                let mut retry_queue = poc::retry_queue::PocRetryQueue::new();
                 loop {
                     interval.tick().await;
                     let cfg = poc_config.get();
@@ -535,6 +538,56 @@ fn main() {
                         if let Some(slot) = wrapped.document.slots.first() {
                             if let Err(e) = poc_cache_loop.append(slot) {
                                 tracing::warn!(error = %e, "PoC slot cache append failed");
+                            }
+                        }
+
+                        // --- Retry queue: keep failed slots, backfill on recovery ---
+                        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                        match &poc_result {
+                            Err(_) => {
+                                let slot_number = wrapped
+                                    .document
+                                    .slots
+                                    .first()
+                                    .map(|s| s.slot_number)
+                                    .unwrap_or_else(poc::reporter::current_slot_number);
+                                retry_queue.push(&today, slot_number, wrapped.document.clone());
+                                tracing::info!(
+                                    queued = retry_queue.len(),
+                                    slot = slot_number,
+                                    "PoC slot queued for retry"
+                                );
+                            }
+                            Ok(_) => {
+                                // Current slot first (heartbeat freshness), then a
+                                // bounded backlog drain; stop at the first failure.
+                                if !retry_queue.is_empty() {
+                                    let batch = retry_queue.take_batch(&today, 12);
+                                    let mut resubmitted = 0usize;
+                                    for entry in batch {
+                                        let rewrapped = api::types::PocDocumentWrapper {
+                                            document: entry.doc.clone(),
+                                        };
+                                        match poc_client
+                                            .put_json(&format!("/PoC/{}/hardware", key), &rewrapped)
+                                            .await
+                                        {
+                                            Ok(()) => resubmitted += 1,
+                                            Err(e) => {
+                                                tracing::warn!(error = %e, slot = entry.slot_number, "Backlog resubmit failed — keeping for next tick");
+                                                retry_queue.requeue(entry);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if resubmitted > 0 {
+                                        tracing::info!(
+                                            resubmitted,
+                                            remaining = retry_queue.len(),
+                                            "PoC backlog slots resubmitted"
+                                        );
+                                    }
+                                }
                             }
                         }
 
