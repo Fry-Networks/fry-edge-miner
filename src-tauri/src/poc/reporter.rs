@@ -75,10 +75,13 @@ pub fn compute_health_map_with_timeout(
         }
     }
 
-    // Second line of defence behind platform::output_bounded: a health check
-    // that stalls must degrade ITS integration, never wedge the reporting tick
-    // (v0.4.8 froze for 4.5h this way). Checks run CONCURRENTLY so the tick's
-    // worst case is one timeout, not N of them serially.
+    // Two guards cover two different stalls, and they are not interchangeable:
+    // this tokio timeout only fires while the check is AWAITING (network, sleep),
+    // because a synchronous child-process wait never yields to the runtime —
+    // that case is bounded by platform::output_bounded's own wall clock.
+    // Together they mean a stalled check degrades ITS integration instead of
+    // wedging the reporting tick (v0.4.8 froze for 4.5h this way). Checks run
+    // CONCURRENTLY so the tick's worst case is one timeout, not N serially.
     let results = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async {
             let mut tasks = Vec::with_capacity(to_check.len());
@@ -408,7 +411,7 @@ mod health_timeout_tests {
         .await
         .expect("compute_health_map must return, not hang");
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(20),
+            started.elapsed() < std::time::Duration::from_secs(3),
             "took {:?} — stall guard did not fire",
             started.elapsed()
         );

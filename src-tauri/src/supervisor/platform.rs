@@ -116,8 +116,8 @@ mod tests {
         let err = output_bounded(&mut cmd, Duration::from_secs(2)).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut, "got {err:?}");
         assert!(
-            started.elapsed() < Duration::from_secs(30),
-            "returned after {:?} — deadline not enforced",
+            started.elapsed() < Duration::from_secs(6),
+            "returned after {:?} — deadline not enforced (2s cap)",
             started.elapsed()
         );
     }
