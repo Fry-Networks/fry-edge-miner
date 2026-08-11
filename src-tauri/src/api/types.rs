@@ -175,6 +175,17 @@ pub struct ApiPocHardwareDoc {
     pub total_count: u32,
     pub proportion: f64,
     pub slots: Vec<ApiPocSlot>,
+    // hardwareapi's eligibility gate fail-closes without software.poc_version_installed;
+    // Option + default keeps old persisted retry-queue entries deserializable.
+    #[serde(default)]
+    pub software: Option<ApiSoftwareInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiSoftwareInfo {
+    pub os: String,
+    pub poc_version_installed: String,
+    pub software_version_installed: String,
 }
 
 // --- Miner Profile ---

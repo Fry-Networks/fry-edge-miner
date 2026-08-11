@@ -88,6 +88,7 @@ mod tests {
             total_count: 0,
             proportion: slot as f64, // marker so tests can tell docs apart
             slots: vec![],
+            software: None,
         }
     }
 

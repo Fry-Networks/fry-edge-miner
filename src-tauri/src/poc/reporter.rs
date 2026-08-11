@@ -5,7 +5,7 @@ use chrono::Utc;
 use tracing::{info, warn};
 
 use crate::api::client::{ApiClient, ApiError};
-use crate::api::types::{ApiIntegrationStatus, ApiPocHardwareDoc, ApiPocSlot, PocDocumentWrapper};
+use crate::api::types::{ApiIntegrationStatus, ApiPocHardwareDoc, ApiPocSlot, ApiSoftwareInfo, PocDocumentWrapper};
 use crate::integrations::{HealthStatus, IntegrationRegistry};
 use crate::poc::gates::check_gates;
 
@@ -137,6 +137,12 @@ pub fn build_poc_doc(
         total_count,
         proportion,
         slots: vec![slot],
+        // Same constants the installation heartbeat reports (commands/device.rs).
+        software: Some(ApiSoftwareInfo {
+            os: std::env::consts::OS.to_string(),
+            poc_version_installed: "1.0.0".to_string(),
+            software_version_installed: env!("CARGO_PKG_VERSION").to_string(),
+        }),
     }
 }
 
@@ -282,6 +288,18 @@ mod tests {
         let reg = registry_with(&[("a", Some("dead")), ("b", Some("dead"))]);
         let doc = build_poc_doc("FEM-TEST", &reg, &HashMap::new());
         assert_eq!(doc.proportion, 0.0);
+    }
+
+    #[test]
+    fn poc_doc_reports_the_software_version_block() {
+        // The server eligibility gate fail-closes without software.poc_version_installed;
+        // v0.2.19..v0.4.8 omitted the block and zeroed FEM rewards fleet-wide.
+        let reg = registry_with(&[("a", None)]);
+        let doc = build_poc_doc("FEM-TEST", &reg, &healthy_map(&["a"]));
+        let software = doc.software.expect("software block must be present");
+        assert_eq!(software.poc_version_installed, "1.0.0");
+        assert_eq!(software.software_version_installed, env!("CARGO_PKG_VERSION"));
+        assert!(!software.os.is_empty());
     }
 
     #[test]
