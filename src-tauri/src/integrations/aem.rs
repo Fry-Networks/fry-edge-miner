@@ -1,3 +1,4 @@
+use crate::supervisor::platform::BoundedOutput;
 use super::download::{download_file, partners_base_dir};
 use super::{HealthStatus, Integration, PocGateData};
 use anyhow::Result;
@@ -48,7 +49,7 @@ impl AemIntegration {
         #[cfg(target_os = "windows")]
         {
             crate::supervisor::platform::command("tasklist")
-                .output()
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
                 .map(|o| {
                     String::from_utf8_lossy(&o.stdout)
                         .to_lowercase()
@@ -78,7 +79,7 @@ impl AemIntegration {
                         "-Command",
                         "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory",
                     ])
-                    .output()
+                    .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
                     .ok()
                     .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok())
                     .unwrap_or(0)
@@ -102,7 +103,7 @@ impl AemIntegration {
                      if ($p) { $ws = ($p | Measure-Object WorkingSet64 -Sum).Sum; \
                      $cpu = ($p | Measure-Object CPU -Sum).Sum; Write-Output \"$ws|$cpu\" }",
                 ])
-                .output()
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
                 .ok()?;
             let text = String::from_utf8_lossy(&out.stdout);
             let mut parts = text.trim().split('|');
@@ -177,7 +178,7 @@ impl AemIntegration {
         {
             let _ = crate::supervisor::platform::command("taskkill")
                 .args(["/IM", "OlostepBrowser.exe", "/F"])
-                .output();
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
         }
         // Rules are keyed to the install path being wiped below; deleting
         // them here (not on every disable) avoids a UAC prompt per toggle.
@@ -269,7 +270,7 @@ impl Integration for AemIntegration {
         info!("Running OlostepBrowser installer (Squirrel silent install)");
         let output = crate::supervisor::platform::command(&installer_path)
             .args(["--silent"])
-            .output()?;
+            .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
         if !output.status.success() {
             warn!(
                 code = output.status.code(),
@@ -340,7 +341,7 @@ impl Integration for AemIntegration {
         {
             let _ = crate::supervisor::platform::command("taskkill")
                 .args(["/IM", "OlostepBrowser.exe", "/F"])
-                .output();
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
         }
         info!("Stopped OlostepBrowser");
         Ok(())

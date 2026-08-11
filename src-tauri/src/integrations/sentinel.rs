@@ -1,3 +1,4 @@
+use crate::supervisor::platform::BoundedOutput;
 use super::{HealthStatus, Integration, PocGateData};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -203,7 +204,7 @@ impl Integration for SentinelIntegration {
         info!("Pulling Sentinel dVPN image");
         let output = crate::supervisor::platform::command("docker")
             .args(["compose", "-f", &compose_file().to_string_lossy(), "pull"])
-            .output()?;
+            .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -243,7 +244,7 @@ impl Integration for SentinelIntegration {
             .args(["compose", "-f", &compose.to_string_lossy(), "up", "-d"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .output()?;
+            .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -259,7 +260,7 @@ impl Integration for SentinelIntegration {
         if compose.exists() {
             crate::supervisor::platform::command("docker")
                 .args(["compose", "-f", &compose.to_string_lossy(), "stop"])
-                .output()?;
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
             info!("Stopped Sentinel dVPN containers");
         }
         Ok(())
@@ -289,7 +290,7 @@ impl Integration for SentinelIntegration {
                 "--format",
                 "json",
             ])
-            .output()
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
         {
             Ok(output) => {
                 if !output.status.success() {
@@ -353,7 +354,7 @@ impl Integration for SentinelIntegration {
                                 "logs",
                                 "sentinel-dvpnx",
                             ])
-                            .output()
+                            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
                         {
                             let logs = format!(
                                 "{}{}",

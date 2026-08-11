@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+use crate::supervisor::platform::BoundedOutput;
 
 mod api;
 mod commands;
@@ -169,11 +170,11 @@ fn main() {
                         for name in names {
                             let _ = supervisor::platform::command("docker")
                                 .args(["rm", "-f", &name])
-                                .output();
+                                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
                         }
                         let _ = supervisor::platform::command("docker")
                             .args(["volume", "rm", "presearch-node-storage"])
-                            .output();
+                            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
                     });
                     if let Err(e) = cleanup_config.update(|c| {
                         c.integrations_enabled.remove("presearch");

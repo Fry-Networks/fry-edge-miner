@@ -1,3 +1,4 @@
+use crate::supervisor::platform::BoundedOutput;
 use super::download::{download_file_with_options, partners_base_dir};
 use super::{HealthStatus, Integration, PocGateData};
 use anyhow::Result;
@@ -158,7 +159,7 @@ impl SpaceAcresIntegration {
         #[cfg(target_os = "windows")]
         {
             crate::supervisor::platform::command("tasklist")
-                .output()
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
                 .map(|o| {
                     String::from_utf8_lossy(&o.stdout)
                         .to_lowercase()
@@ -284,13 +285,13 @@ impl Integration for SpaceAcresIntegration {
         {
             let _ = crate::supervisor::platform::command("taskkill")
                 .args(["/IM", "space-acres.exe", "/F"])
-                .output();
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
         }
         #[cfg(not(target_os = "windows"))]
         {
             let _ = crate::supervisor::platform::command("killall")
                 .arg("space-acres")
-                .output();
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
         }
 
         info!("Stopped SpaceAcres");
@@ -377,7 +378,7 @@ async fn check_free_space() -> anyhow::Result<u64> {
                     drive
                 ),
             ])
-            .output()?;
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
 
         String::from_utf8_lossy(&output.stdout)
             .trim()
@@ -389,7 +390,7 @@ async fn check_free_space() -> anyhow::Result<u64> {
         let output = crate::supervisor::platform::command("df")
             .arg("-BG")
             .arg(&base_dir)
-            .output()?;
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
 
         // df output format: Filesystem 1G-blocks Used Available Use% Mounted on
         let lines: Vec<&str> = String::from_utf8_lossy(&output.stdout).lines().collect();
@@ -424,7 +425,7 @@ fn has_ssd() -> bool {
                 "-Command",
                 "Get-PhysicalDisk | Where MediaType -eq 'SSD' | Measure-Object | Select -Expand Count",
             ])
-            .output()
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
             .map(|o| {
                 String::from_utf8_lossy(&o.stdout)
                     .trim()
@@ -445,7 +446,7 @@ fn has_ssd() -> bool {
                 "-Command",
                 "(Get-WmiObject -Namespace \"root/Microsoft/Windows/Storage\" -Class MSFT_PhysicalDisk | Where-Object SeekPenalty -EQ $false | Measure-Object).Count -gt 0",
             ])
-            .output()
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
             .map(|o| {
                 String::from_utf8_lossy(&o.stdout)
                     .trim()

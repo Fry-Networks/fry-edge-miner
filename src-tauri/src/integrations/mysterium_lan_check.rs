@@ -1,3 +1,4 @@
+use crate::supervisor::platform::BoundedOutput;
 use anyhow::Result;
 use std::net::IpAddr;
 use std::time::Duration;
@@ -41,7 +42,7 @@ fn check_local_myst_process() -> Option<String> {
     #[cfg(target_os = "windows")]
     {
         crate::supervisor::platform::command("tasklist")
-            .output()
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
             .ok()
             .and_then(|o| {
                 let output = String::from_utf8_lossy(&o.stdout);
@@ -58,7 +59,7 @@ fn check_local_myst_process() -> Option<String> {
         crate::supervisor::platform::command("pgrep")
             .arg("-l")
             .arg("myst")
-            .output()
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
             .ok()
             .and_then(|o| {
                 let output = String::from_utf8_lossy(&o.stdout);

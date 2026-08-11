@@ -1,3 +1,4 @@
+use crate::supervisor::platform::BoundedOutput;
 use super::download::{download_file_with_options, partners_base_dir};
 use super::{HealthStatus, Integration, PocGateData};
 use anyhow::Result;
@@ -195,7 +196,7 @@ impl Integration for StorjIntegration {
                         extract_dir.display()
                     ),
                 ])
-                .output()
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
                 .map_err(|e| anyhow::anyhow!("Failed to extract ZIP: {}", e))?;
         }
 
@@ -251,13 +252,13 @@ impl Integration for StorjIntegration {
         {
             let _ = crate::supervisor::platform::command("taskkill")
                 .args(["/IM", "storagenode.exe", "/F"])
-                .output();
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
         }
         #[cfg(not(target_os = "windows"))]
         {
             let _ = crate::supervisor::platform::command("killall")
                 .arg("storagenode")
-                .output();
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
         }
 
         info!("Storj storagenode stopped");

@@ -4,6 +4,7 @@
 //! every self-update (`app-X.Y.Z`), so Windows re-prompts the firewall dialog
 //! at every launch. FEM pre-creates allow rules for the exact binary path at
 //! integration start, refreshing them when the path changes.
+use crate::supervisor::platform::BoundedOutput;
 
 use std::path::Path;
 
@@ -55,7 +56,7 @@ fn current_rule_program(rule_name: &str) -> Option<String> {
             "advfirewall", "firewall", "show", "rule",
             &format!("name={rule_name}"), "verbose",
         ])
-        .output()
+        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
         .ok()?;
     if !out.status.success() {
         return None;
@@ -125,7 +126,7 @@ pub fn ensure_program_rules(rule_name: &str, program: &Path) -> Result<()> {
 
     let out = crate::supervisor::platform::command("powershell")
         .args(["-NoProfile", "-Command", &outer])
-        .output()?;
+        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
     if out.status.success() {
         info!(rule = rule_name, transcript = %transcript.display(), "Firewall rules reconciled");
         Ok(())
@@ -153,7 +154,7 @@ pub fn delete_rules(rule_name: &str) {
     );
     match crate::supervisor::platform::command("powershell")
         .args(["-NoProfile", "-Command", &outer])
-        .output()
+        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
     {
         Ok(o) if o.status.success() => info!(rule = rule_name, "Firewall rules deleted"),
         Ok(o) => warn!(rule = rule_name, code = o.status.code(), "Firewall rule delete failed"),

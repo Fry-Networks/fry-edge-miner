@@ -9,6 +9,7 @@
 //! treat `None` as "cannot prove the machine is unfit" and allow the
 //! integration through. Failing open matters — a transient PowerShell error
 //! must never silently disable a working integration.
+use crate::supervisor::platform::BoundedOutput;
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -64,7 +65,7 @@ fn probe_disk_gb(path: &Path) -> Option<f64> {
                 drive
             ),
         ])
-        .output()
+        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
         .ok()?;
     parse_float(&String::from_utf8_lossy(&output.stdout))
 }
@@ -74,7 +75,7 @@ fn probe_disk_gb(path: &Path) -> Option<f64> {
     let output = crate::supervisor::platform::command("df")
         .arg("-BG")
         .arg(path)
-        .output()
+        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
         .ok()?;
     parse_df_gb(&String::from_utf8_lossy(&output.stdout))
 }
@@ -87,7 +88,7 @@ fn probe_ram_gb() -> Option<f64> {
             "-Command",
             "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB",
         ])
-        .output()
+        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
         .ok()?;
     parse_float(&String::from_utf8_lossy(&output.stdout))
 }

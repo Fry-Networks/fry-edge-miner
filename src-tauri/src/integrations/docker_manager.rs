@@ -1,3 +1,4 @@
+use crate::supervisor::platform::BoundedOutput;
 use super::download::{download_file_with_options, partners_base_dir};
 use anyhow::Result;
 use serde::Serialize;
@@ -91,7 +92,7 @@ pub fn virtualization_supported() -> bool {
                      $f=(Get-CimInstance Win32_Processor | Select-Object -First 1).VirtualizationFirmwareEnabled; \
                      Write-Output \"$h|$f\"",
                 ])
-                .output();
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
             match out {
                 Ok(o) => {
                     let s = String::from_utf8_lossy(&o.stdout).trim().to_lowercase();
@@ -137,7 +138,7 @@ pub fn is_virtual_machine() -> bool {
                     "-Command",
                     "$c=Get-CimInstance Win32_ComputerSystem; Write-Output \"$($c.Manufacturer)|$($c.Model)\"",
                 ])
-                .output();
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
             match out {
                 Ok(o) => {
                     let s = String::from_utf8_lossy(&o.stdout).trim().to_lowercase();
@@ -350,7 +351,7 @@ Exit $LASTEXITCODE
         .arg("-NoProfile")
         .arg("-Command")
         .arg(&ps_script)
-        .output()?;
+        .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

@@ -1,3 +1,4 @@
+use crate::supervisor::platform::BoundedOutput;
 use super::{HealthStatus, Integration, PocGateData};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -66,7 +67,7 @@ fn compose_file() -> PathBuf {
 fn image_built() -> bool {
     crate::supervisor::platform::command("docker")
         .args(["images", "-q", "diiisco-node:latest"])
-        .output()
+        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
         .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
         .unwrap_or(false)
 }
@@ -140,7 +141,7 @@ impl Integration for DiiiscoIntegration {
             .current_dir(&deploy_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .output()?;
+            .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -208,7 +209,7 @@ impl Integration for DiiiscoIntegration {
                 .current_dir(&deploy)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
-                .output()?;
+                .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 warn!(stderr = %stderr, "Diiisco pre-start image build failed (full output)");
@@ -228,7 +229,7 @@ impl Integration for DiiiscoIntegration {
             .current_dir(&deploy)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .output()
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
         {
             Ok(o) if !o.status.success() => {
                 warn!(
@@ -251,7 +252,7 @@ impl Integration for DiiiscoIntegration {
             .current_dir(&deploy)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .output()?;
+            .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             warn!(stderr = %stderr, "Failed to start Diiisco (full output)");
@@ -266,7 +267,7 @@ impl Integration for DiiiscoIntegration {
         if compose.exists() {
             crate::supervisor::platform::command("docker")
                 .args(["compose", "-f", &compose.to_string_lossy(), "stop"])
-                .output()?;
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
             info!("Stopped Diiisco containers");
         }
         Ok(())

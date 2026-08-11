@@ -12,6 +12,10 @@ use crate::poc::gates::check_gates;
 const SLOTS_PER_DAY: u32 = 144;
 const SLOT_INTERVAL_MINUTES: u32 = 10;
 
+/// Per-integration ceiling for one health check inside a reporting tick.
+/// Must stay below the 60s tick so a slow check delays one report at most.
+const HEALTH_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
 /// Calculate the current slot number (0-143)
 pub fn current_slot_number() -> u32 {
     let now = Utc::now();
@@ -30,6 +34,15 @@ use chrono::Timelike;
 /// Requires multi-threaded tokio runtime (Tauri 2 default).
 pub fn compute_health_map(
     registry: &Arc<Mutex<IntegrationRegistry>>,
+) -> HashMap<String, HealthStatus> {
+    compute_health_map_with_timeout(registry, HEALTH_CHECK_TIMEOUT)
+}
+
+/// Timeout-parameterised core of [`compute_health_map`] so the stall guard is
+/// testable without waiting the production ceiling.
+pub fn compute_health_map_with_timeout(
+    registry: &Arc<Mutex<IntegrationRegistry>>,
+    health_timeout: std::time::Duration,
 ) -> HashMap<String, HealthStatus> {
     let ids_and_enabled: Vec<(String, bool)> = {
         let reg = registry.lock().unwrap();
@@ -52,8 +65,22 @@ pub fn compute_health_map(
         let health = tokio::task::block_in_place(|| {
             let reg = registry.lock().unwrap();
             match reg.get(id) {
-                Some(integration) => tokio::runtime::Handle::current()
-                    .block_on(integration.health_check()),
+                // Second line of defence behind platform::output_bounded: a
+                // health check that stalls must degrade ITS integration, never
+                // wedge the reporting tick (v0.4.8 froze for 4.5h this way).
+                Some(integration) => tokio::runtime::Handle::current().block_on(async {
+                    match tokio::time::timeout(health_timeout, integration.health_check()).await {
+                        Ok(status) => status,
+                        Err(_) => {
+                            warn!(
+                                integration = id.as_str(),
+                                secs = health_timeout.as_secs(),
+                                "health check timed out"
+                            );
+                            HealthStatus::Unhealthy("health check timed out".to_string())
+                        }
+                    }
+                }),
                 None => HealthStatus::Unknown,
             }
         });
@@ -308,5 +335,59 @@ mod tests {
         let reg = registry_with(&[("a", None), ("b", Some("needs 900 GB"))]);
         let doc = build_poc_doc("FEM-TEST", &reg, &healthy_map(&["a"]));
         assert_eq!(doc.total_count, 2);
+    }
+}
+
+#[cfg(test)]
+mod health_timeout_tests {
+    use super::*;
+    use crate::integrations::{Integration, PocGateData};
+    use anyhow::Result;
+    use async_trait::async_trait;
+
+    /// Integration whose health check never returns — models a docker CLI call
+    /// wedged on a dead daemon (v0.4.8 froze the reporting tick for 4.5h).
+    struct HangingIntegration;
+
+    #[async_trait]
+    impl Integration for HangingIntegration {
+        fn id(&self) -> &str { "hanger" }
+        fn display_name(&self) -> &str { "hanger" }
+        async fn install(&self) -> Result<()> { Ok(()) }
+        async fn start(&self) -> Result<()> { Ok(()) }
+        async fn stop(&self) -> Result<()> { Ok(()) }
+        async fn health_check(&self) -> HealthStatus {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            HealthStatus::Healthy
+        }
+        async fn check_update(&self) -> Result<Option<String>> { Ok(None) }
+        fn collect_poc_data(&self) -> PocGateData { PocGateData::default() }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hanging_health_check_degrades_that_integration_only() {
+        let mut reg = IntegrationRegistry::new();
+        reg.register(Arc::new(HangingIntegration));
+        reg.set_enabled("hanger", true);
+        let registry = Arc::new(Mutex::new(reg));
+
+        let started = std::time::Instant::now();
+        let map = tokio::task::spawn_blocking(move || {
+            compute_health_map_with_timeout(&registry, std::time::Duration::from_millis(200))
+        })
+        .await
+        .expect("compute_health_map must return, not hang");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "took {:?} — stall guard did not fire",
+            started.elapsed()
+        );
+
+        match map.get("hanger") {
+            Some(HealthStatus::Unhealthy(reason)) => {
+                assert!(reason.contains("timed out"), "got {reason}")
+            }
+            other => panic!("expected Unhealthy(timed out), got {other:?}"),
+        }
     }
 }

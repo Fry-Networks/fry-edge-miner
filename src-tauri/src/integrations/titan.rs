@@ -1,3 +1,4 @@
+use crate::supervisor::platform::BoundedOutput;
 use super::download::{download_file_with_options, partners_base_dir};
 use super::{HealthStatus, Integration, PocGateData};
 use anyhow::Result;
@@ -94,7 +95,7 @@ impl Integration for TitanIntegration {
         // Extract using tar command (Windows 10+ includes bsdtar)
         let output = crate::supervisor::platform::command("tar")
             .args(["-xzf", &archive_path.to_string_lossy(), "-C", &partner_dir.to_string_lossy()])
-            .output()?;
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
