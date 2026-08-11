@@ -22,8 +22,10 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
 pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Deadline for commands that legitimately take a while (`docker compose up`,
-/// image pulls, installers).
-pub const LONG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// image pulls, installers). Generous on purpose: a multi-layer pull over a
+/// slow uplink can run many minutes, and a false timeout here fails a real
+/// install — the point is only that it cannot hang forever.
+pub const LONG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
 
 /// Run a command to completion with a hard deadline.
 ///
@@ -32,6 +34,9 @@ pub const LONG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300
 /// health checks run inside the PoC reporting tick, one such call froze the
 /// whole app for hours (v0.4.8 field incident). This spawns, polls, and kills
 /// the child at the deadline instead, returning a TimedOut error.
+///
+/// NOTE: like `Command::output()`, this forces piped stdout/stderr — any
+/// stdio the caller configured is overwritten.
 pub fn output_bounded(
     cmd: &mut std::process::Command,
     timeout: std::time::Duration,

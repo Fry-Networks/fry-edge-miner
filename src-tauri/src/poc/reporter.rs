@@ -57,19 +57,39 @@ pub fn compute_health_map_with_timeout(
     };
 
     let mut map = HashMap::new();
-    for (id, enabled) in &ids_and_enabled {
-        if !*enabled {
-            map.insert(id.clone(), HealthStatus::Stopped);
-            continue;
-        }
-        let health = tokio::task::block_in_place(|| {
-            let reg = registry.lock().unwrap();
+    let mut to_check: Vec<(String, std::sync::Arc<dyn crate::integrations::Integration>)> =
+        Vec::new();
+    {
+        let reg = registry.lock().unwrap();
+        for (id, enabled) in &ids_and_enabled {
+            if !*enabled {
+                map.insert(id.clone(), HealthStatus::Stopped);
+                continue;
+            }
             match reg.get(id) {
-                // Second line of defence behind platform::output_bounded: a
-                // health check that stalls must degrade ITS integration, never
-                // wedge the reporting tick (v0.4.8 froze for 4.5h this way).
-                Some(integration) => tokio::runtime::Handle::current().block_on(async {
-                    match tokio::time::timeout(health_timeout, integration.health_check()).await {
+                Some(integration) => to_check.push((id.clone(), integration)),
+                None => {
+                    map.insert(id.clone(), HealthStatus::Unknown);
+                }
+            }
+        }
+    }
+
+    // Second line of defence behind platform::output_bounded: a health check
+    // that stalls must degrade ITS integration, never wedge the reporting tick
+    // (v0.4.8 froze for 4.5h this way). Checks run CONCURRENTLY so the tick's
+    // worst case is one timeout, not N of them serially.
+    let results = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            let mut tasks = Vec::with_capacity(to_check.len());
+            for (id, integration) in to_check {
+                tasks.push(tokio::spawn(async move {
+                    let status = match tokio::time::timeout(
+                        health_timeout,
+                        integration.health_check(),
+                    )
+                    .await
+                    {
                         Ok(status) => status,
                         Err(_) => {
                             warn!(
@@ -79,12 +99,22 @@ pub fn compute_health_map_with_timeout(
                             );
                             HealthStatus::Unhealthy("health check timed out".to_string())
                         }
-                    }
-                }),
-                None => HealthStatus::Unknown,
+                    };
+                    (id, status)
+                }));
             }
-        });
-        map.insert(id.clone(), health);
+            let mut out = Vec::with_capacity(tasks.len());
+            for task in tasks {
+                match task.await {
+                    Ok(pair) => out.push(pair),
+                    Err(e) => warn!(error = %e, "health check task failed"),
+                }
+            }
+            out
+        })
+    });
+    for (id, status) in results {
+        map.insert(id, status);
     }
     map
 }
@@ -389,5 +419,64 @@ mod health_timeout_tests {
             }
             other => panic!("expected Unhealthy(timed out), got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod health_concurrency_tests {
+    use super::*;
+    use crate::integrations::{Integration, PocGateData};
+    use anyhow::Result;
+    use async_trait::async_trait;
+
+    /// Health check that always outlives the ceiling.
+    struct SlowIntegration(&'static str);
+
+    #[async_trait]
+    impl Integration for SlowIntegration {
+        fn id(&self) -> &str { self.0 }
+        fn display_name(&self) -> &str { self.0 }
+        async fn install(&self) -> Result<()> { Ok(()) }
+        async fn start(&self) -> Result<()> { Ok(()) }
+        async fn stop(&self) -> Result<()> { Ok(()) }
+        async fn health_check(&self) -> HealthStatus {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            HealthStatus::Healthy
+        }
+        async fn check_update(&self) -> Result<Option<String>> { Ok(None) }
+        fn collect_poc_data(&self) -> PocGateData { PocGateData::default() }
+    }
+
+    /// Serial evaluation would cost N × timeout; concurrent costs ~1 × timeout.
+    /// Guards the reviewer's "10 integrations × 45s = 450s still wedges the
+    /// tick" finding.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stalled_checks_do_not_stack_across_integrations() {
+        let mut reg = IntegrationRegistry::new();
+        for id in ["a", "b", "c", "d", "e", "f"] {
+            reg.register(Arc::new(SlowIntegration(id)));
+            reg.set_enabled(id, true);
+        }
+        let registry = Arc::new(Mutex::new(reg));
+        let per_check = std::time::Duration::from_millis(500);
+
+        let started = std::time::Instant::now();
+        let map = tokio::task::spawn_blocking(move || {
+            compute_health_map_with_timeout(&registry, per_check)
+        })
+        .await
+        .expect("must return");
+        let elapsed = started.elapsed();
+
+        assert_eq!(map.len(), 6);
+        assert!(
+            map.values().all(|s| matches!(s, HealthStatus::Unhealthy(r) if r.contains("timed out"))),
+            "all six should time out: {map:?}"
+        );
+        // Serial would be ~3s (6 × 500ms); concurrent stays near one timeout.
+        assert!(
+            elapsed < per_check * 3,
+            "took {elapsed:?} for 6 stalled checks — evaluation is not concurrent"
+        );
     }
 }
