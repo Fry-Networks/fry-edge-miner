@@ -267,6 +267,13 @@ from this device."
     }
 }
 
+/// Whether the device is actually sharing right now, from the container's state
+/// and its own event stream. Proof of activity, not proof of installation: a
+/// running container that the agent reports as `not_running` earns nothing.
+pub fn poa_from(container_state: Option<&str>, logs: &str) -> bool {
+    container_state == Some("running") && classify_events(logs) == PawnsState::Sharing
+}
+
 /// Minimal string-field reader for the agent's flat event JSON.
 fn json_string_field(line: &str, key: &str) -> Option<String> {
     let needle = format!("\"{}\":\"", key);
@@ -454,8 +461,19 @@ impl Integration for PawnsIntegration {
     }
 
     fn collect_poc_data(&self) -> PocGateData {
+        // Runs synchronously inside the PoC tick, outside the health map's
+        // timeout, so it must stay cheap: a filesystem check short-circuits
+        // before any process spawn, and both probes below are bounded.
+        let poa = if Self::install_marker().exists() {
+            poa_from(
+                Self::container_state().as_deref(),
+                &Self::container_logs("50").unwrap_or_default(),
+            )
+        } else {
+            false
+        };
         PocGateData {
-            poa: false,
+            poa,
             ..Default::default()
         }
     }
@@ -472,6 +490,7 @@ mod tests {
     const SHARING: &str = r#"{"happened_at":"2026-08-11T21:48:52Z","name":"balance_ready","parameters":{"balance":"0.000 USD","traffic":"0.0000 GB"}}"#;
     const BLOCKED: &str = r#"{"happened_at":"2026-08-11T21:49:03Z","name":"not_running","parameters":{"error":"ip_used","message":"getting free port failed (ip has alive peer)"}}"#;
     const STARTING: &str = r#"{"happened_at":"2026-08-11T21:48:50Z","name":"starting","parameters":{}}"#;
+    const RUNNING: &str = r#"{"happened_at":"2026-08-12T17:59:40Z","name":"running","parameters":{}}"#;
 
     #[test]
     fn reports_sharing_when_the_agent_last_reported_a_balance() {
@@ -552,10 +571,76 @@ mod tests {
     }
 
     #[test]
+    fn poa_is_true_while_the_agent_reports_sharing() {
+        let logs = format!("{}\n{}\n", STARTING, SHARING);
+        assert!(poa_from(Some("running"), &logs));
+    }
+
+    #[test]
+    fn poa_is_true_on_an_explicit_running_event() {
+        let logs = format!("{}\n{}\n", STARTING, RUNNING);
+        assert!(poa_from(Some("running"), &logs));
+    }
+
+    #[test]
+    fn poa_is_false_while_the_ip_conflict_blocks_sharing() {
+        let logs = format!("{}\n{}\n{}\n", STARTING, SHARING, BLOCKED);
+        assert!(!poa_from(Some("running"), &logs));
+    }
+
+    #[test]
+    fn poa_is_false_when_the_container_is_not_running() {
+        let logs = format!("{}\n{}\n", STARTING, SHARING);
+        assert!(!poa_from(Some("exited"), &logs));
+        assert!(!poa_from(None, &logs));
+    }
+
+    #[test]
+    fn poa_is_false_before_the_agent_has_reported_anything() {
+        assert!(!poa_from(Some("running"), STARTING));
+        assert!(!poa_from(Some("running"), ""));
+    }
+
+    #[test]
     fn civil_dates_match_known_days_since_epoch() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(19_723), (2024, 1, 1)); // leap-year boundary
         assert_eq!(civil_from_days(20_676), (2026, 8, 11));
+    }
+
+    /// Samples the real agent through the same path the PoC tick uses, and
+    /// requires it to report activity while it is sharing. Opt-in for the same
+    /// reasons as the lifecycle test below.
+    #[tokio::test]
+    #[ignore = "needs Docker, network and real Pawns.app credentials"]
+    async fn pawns_live_poa_tracks_the_agent() {
+        let pawns = PawnsIntegration;
+        assert!(
+            PawnsIntegration::install_marker().exists(),
+            "agent not installed — run the lifecycle test first"
+        );
+
+        let mut samples = Vec::new();
+        for _ in 0..15 {
+            let state = PawnsIntegration::container_state();
+            let logs = PawnsIntegration::container_logs("50").unwrap_or_default();
+            let expected = poa_from(state.as_deref(), &logs);
+            let reported = pawns.collect_poc_data().poa;
+            assert_eq!(
+                reported, expected,
+                "collect_poc_data disagreed with the agent's own state"
+            );
+            samples.push((state.unwrap_or_else(|| "absent".into()), reported));
+            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        }
+
+        println!("poa samples: {:?}", samples);
+        assert!(
+            samples.iter().any(|(_, poa)| *poa),
+            "agent never reported activity across {} samples: {:?}",
+            samples.len(),
+            samples
+        );
     }
 
     /// Drives the real lifecycle against the real Docker engine and the real
