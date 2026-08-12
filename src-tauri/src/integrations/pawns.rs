@@ -1,37 +1,279 @@
-/// Pawns.app Integration — Partner-Gated SDK Stub
-///
-/// The Pawns SDK is partner-sales gated and requires explicit user consent before enabling.
-/// Users must opt-in to the bandwidth sharing terms which disclose $0.20/GB residential bandwidth pricing.
-/// This module provides a complete lifecycle implementation with honest fail-closed gates:
-///
-/// 1. **User Consent Gate** (future state): Requires environment variable `PAWNS_USER_CONSENT=accepted`.
-///    Discloses: "Pawns bandwidth sharing requires explicit user consent ($0.20/GB residential bandwidth disclosure)".
-/// 2. **SDK Key Gate** (future state): Requires `PAWNS_SDK_KEY` to be provisioned.
-///    Fails closed if either gate is not satisfied.
-///
-/// Both gates are mandatory per Pawns SDK terms. This module never fakes a healthy state —
-/// until both gates are satisfied, health checks return Unhealthy with a clear reason.
-///
+//! Pawns.app (IPRoyal) residential bandwidth sharing.
+//!
+//! Delivery: the official `iproyal/pawns-cli` container image. IPRoyal publishes the
+//! CLI agent as a Linux binary (`download.iproyal.com/pawns-cli/latest/linux_*`) and as
+//! this image; there is no Windows build of the CLI, so FEM runs the official image
+//! through the Docker engine it already manages for its other container integrations.
+//!
+//! Credentials come from the process environment (`PAWNS_EMAIL` / `PAWNS_PASSWORD`),
+//! matching how the other partner integrations take their secrets, and are passed
+//! straight to `docker run` — nothing is written to disk.
+//!
+//! Consent: the Pawns.app CLI Addendum (§5.2–5.4) requires a separate, explicit consent
+//! action from the person who owns the device *before* the agent starts, disclosing what
+//! sharing does, and (§5.8) a durable record of each consent and withdrawal. `start()`
+//! refuses to run without `PAWNS_USER_CONSENT=accepted` and appends a record of the exact
+//! wording shown to `consent-log.jsonl`; `stop()` records the withdrawal.
 
+use super::download::partners_base_dir;
 use super::{HealthStatus, Integration, PocGateData};
 use anyhow::Result;
 use async_trait::async_trait;
-use tracing::info;
+use std::path::PathBuf;
+use tracing::{info, warn};
+
+use crate::supervisor::platform::{BoundedOutput, LONG_TIMEOUT, PROBE_TIMEOUT};
+
+/// Official Pawns.app CLI agent image.
+const PAWNS_IMAGE: &str = "iproyal/pawns-cli:latest";
+/// Container FEM manages. Fixed name so a restart adopts the same container.
+const PAWNS_CONTAINER: &str = "fem-pawns";
+/// Version of the disclosure wording below; recorded with every consent entry.
+const CONSENT_WORDING_VERSION: &str = "1";
+
+/// Exact wording the device owner must be shown before sharing starts
+/// (CLI Addendum §5.4 (a)–(e)). Surfaced through the integration's health
+/// message until consent is given, and stored with each consent record.
+const CONSENT_DISCLOSURE: &str = "Pawns.app bandwidth sharing: internet traffic from Pawns.app and \
+its customers is routed through this device and its internet connection; the device's public IP \
+address and technical connection data are visible to those customers; sharing uses processor \
+capacity, battery and data allowance and can slow the connection. Only enable it if you are the \
+main user of this device and connection, you have reached the age of majority where you live, and \
+your internet provider's terms allow commercial traffic sharing. Turn the Pawns.app integration \
+off at any time to stop sharing immediately.";
+
+/// What the agent's event stream says it is doing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PawnsState {
+    /// Authenticated and sharing.
+    Sharing,
+    /// Authenticated but the agent reports it is not sharing, with the reason.
+    Blocked(String),
+    /// Started, nothing conclusive yet.
+    Starting,
+    /// No recognised event in the log.
+    Unknown,
+}
 
 pub struct PawnsIntegration;
 
 impl PawnsIntegration {
+    fn partner_dir() -> PathBuf {
+        partners_base_dir().join("pawns")
+    }
+
+    /// Written by `install()`; lets `installed_version()` answer without
+    /// spawning a process (it runs inside the registry lock).
+    fn install_marker() -> PathBuf {
+        Self::partner_dir().join("installed.json")
+    }
+
+    fn consent_log() -> PathBuf {
+        Self::partner_dir().join("consent-log.jsonl")
+    }
+
     fn user_consent() -> bool {
         std::env::var("PAWNS_USER_CONSENT")
-            .map(|v| v.to_lowercase() == "accepted")
+            .map(|v| v.trim().eq_ignore_ascii_case("accepted"))
             .unwrap_or(false)
     }
 
-    fn sdk_key() -> Option<String> {
-        std::env::var("PAWNS_SDK_KEY")
+    fn credentials() -> Option<(String, String)> {
+        let email = std::env::var("PAWNS_EMAIL").ok().filter(|s| !s.is_empty())?;
+        let password = std::env::var("PAWNS_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty())?;
+        Some((email, password))
+    }
+
+    fn host_label() -> String {
+        std::env::var("COMPUTERNAME")
             .ok()
             .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "fem-device".to_string())
     }
+
+    fn device_name() -> String {
+        std::env::var("PAWNS_DEVICE_NAME")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(Self::host_label)
+    }
+
+    fn device_id() -> String {
+        std::env::var("PAWNS_DEVICE_ID")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("fem-{}", sanitize_id(&Self::host_label())))
+    }
+
+    /// Append a consent or withdrawal record (CLI Addendum §5.8).
+    fn record_consent_event(action: &str) {
+        let record = serde_json::json!({
+            "action": action,
+            "happened_at": utc_now_rfc3339(),
+            "device_id": Self::device_id(),
+            "device_name": Self::device_name(),
+            "wording_version": CONSENT_WORDING_VERSION,
+            "wording_language": "en",
+            "wording": CONSENT_DISCLOSURE,
+            "agent_image": PAWNS_IMAGE,
+            "fem_version": env!("CARGO_PKG_VERSION"),
+        });
+        let path = Self::consent_log();
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                warn!(error = %e, "Could not create Pawns partner directory for consent log");
+                return;
+            }
+        }
+        let line = format!("{}\n", record);
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                use std::io::Write;
+                if let Err(e) = f.write_all(line.as_bytes()) {
+                    warn!(error = %e, "Could not append Pawns consent record");
+                }
+            }
+            Err(e) => warn!(error = %e, "Could not open Pawns consent log"),
+        }
+    }
+
+    fn docker_available() -> bool {
+        super::docker_manager::docker_cli_probe_bounded() == Some(true)
+    }
+
+    /// `running` / `exited` / … for the managed container, or None when absent.
+    fn container_state() -> Option<String> {
+        let output = crate::supervisor::platform::command("docker")
+            .args(["inspect", "-f", "{{.State.Status}}", PAWNS_CONTAINER])
+            .output_bounded(PROBE_TIMEOUT)
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if state.is_empty() {
+            None
+        } else {
+            Some(state)
+        }
+    }
+
+    fn container_logs(tail: &str) -> Option<String> {
+        let output = crate::supervisor::platform::command("docker")
+            .args(["logs", "--tail", tail, PAWNS_CONTAINER])
+            .output_bounded(PROBE_TIMEOUT)
+            .ok()?;
+        Some(format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+}
+
+/// Keep a device id to characters the API accepts.
+fn sanitize_id(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// RFC3339 UTC timestamp without pulling in a date crate.
+fn utc_now_rfc3339() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y,
+        m,
+        d,
+        tod / 3600,
+        (tod % 3600) / 60,
+        tod % 60
+    )
+}
+
+/// Howard Hinnant's days-from-civil, inverted (proleptic Gregorian).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// Classify the agent's NDJSON event stream. The last recognised event wins:
+/// `balance_ready` proves the agent authenticated and is live, `not_running`
+/// means it stopped sharing and carries the reason.
+pub fn classify_events(logs: &str) -> PawnsState {
+    let mut state = PawnsState::Unknown;
+    for line in logs.lines() {
+        if !line.contains("\"name\"") {
+            continue;
+        }
+        if line.contains("\"name\":\"not_running\"") {
+            state = PawnsState::Blocked(explain_block(line));
+        } else if line.contains("\"name\":\"balance_ready\"")
+            || line.contains("\"name\":\"running\"")
+        {
+            state = PawnsState::Sharing;
+        } else if line.contains("\"name\":\"starting\"") && state == PawnsState::Unknown {
+            state = PawnsState::Starting;
+        }
+    }
+    state
+}
+
+/// Turn a `not_running` event into something a device owner can act on.
+fn explain_block(line: &str) -> String {
+    let code = json_string_field(line, "error").unwrap_or_default();
+    match code.as_str() {
+        "ip_used" => "Another Pawns.app peer is already sharing this network's public IP address. \
+Pawns.app accepts one peer per IP, so stop the other Pawns.app instance on this network to share \
+from this device."
+            .to_string(),
+        "" => json_string_field(line, "message")
+            .unwrap_or_else(|| "Pawns.app agent reported it is not sharing".to_string()),
+        other => {
+            let detail = json_string_field(line, "message").unwrap_or_default();
+            if detail.is_empty() {
+                format!("Pawns.app agent is not sharing ({})", other)
+            } else {
+                format!("Pawns.app agent is not sharing ({}): {}", other, detail)
+            }
+        }
+    }
+}
+
+/// Minimal string-field reader for the agent's flat event JSON.
+fn json_string_field(line: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{}\":\"", key);
+    let start = line.find(&needle)? + needle.len();
+    let rest = &line[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 #[async_trait]
@@ -45,54 +287,170 @@ impl Integration for PawnsIntegration {
     }
 
     async fn install(&self) -> Result<()> {
-        // No-op install — the Pawns SDK is not yet available.
-        // This placeholder documents the future integration point.
-        info!("Pawns SDK pending partner onboarding — install is a no-op in this release");
+        super::docker_manager::ensure_docker().await?;
+        tokio::fs::create_dir_all(Self::partner_dir()).await?;
+
+        info!(image = PAWNS_IMAGE, "Pulling Pawns.app CLI agent image");
+        let output = crate::supervisor::platform::command("docker")
+            .args(["pull", PAWNS_IMAGE])
+            .output_bounded(LONG_TIMEOUT)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(stderr = %stderr, "docker pull failed for Pawns.app agent");
+            anyhow::bail!(
+                "Could not download the Pawns.app agent image: {}",
+                stderr.lines().last().unwrap_or("unknown error")
+            );
+        }
+
+        let marker = serde_json::json!({
+            "image": PAWNS_IMAGE,
+            "pulled_at": utc_now_rfc3339(),
+        });
+        tokio::fs::write(Self::install_marker(), serde_json::to_vec_pretty(&marker)?).await?;
+        info!("Pawns.app agent image installed");
         Ok(())
     }
 
     async fn start(&self) -> Result<()> {
-        // Gate 1: User consent
         if !Self::user_consent() {
             anyhow::bail!(
-                "Pawns bandwidth sharing requires explicit user consent ($0.20/GB residential bandwidth disclosure). \
-                 Set environment variable PAWNS_USER_CONSENT=accepted to proceed."
+                "{} Enable this integration to consent (sets PAWNS_USER_CONSENT=accepted).",
+                CONSENT_DISCLOSURE
             );
         }
 
-        // Gate 2: SDK key
-        if Self::sdk_key().is_none() {
-            anyhow::bail!(
-                "Pawns SDK key pending partner approval. \
-                 Once approved, set the environment variable PAWNS_SDK_KEY to enable this integration."
-            );
+        let (email, password) = match Self::credentials() {
+            Some(creds) => creds,
+            None => anyhow::bail!(
+                "Pawns.app sign-in details are missing. Set PAWNS_EMAIL and PAWNS_PASSWORD for the \
+                 Pawns.app account this device shares under, then enable the integration again."
+            ),
+        };
+
+        super::docker_manager::ensure_docker().await?;
+        if !Self::install_marker().exists() {
+            self.install().await?;
         }
 
-        // Both gates satisfied, but SDK is not yet available for delivery
-        anyhow::bail!(
-            "Pawns SDK integration pending partner binary delivery. \
-             Please contact Pawns support to obtain the latest SDK."
+        Self::record_consent_event("consent");
+
+        // Drop any container left from a previous run so the fixed name is free
+        // and the agent restarts with current credentials.
+        let _ = crate::supervisor::platform::command("docker")
+            .args(["rm", "-f", PAWNS_CONTAINER])
+            .output_bounded(PROBE_TIMEOUT);
+
+        let device_name = Self::device_name();
+        let device_id = Self::device_id();
+        info!(
+            device_name = %device_name,
+            device_id = %device_id,
+            "Starting Pawns.app agent"
         );
+
+        // Credentials are passed as arguments because the agent takes no other
+        // input; they are never logged and never written to disk.
+        let output = crate::supervisor::platform::command("docker")
+            .args([
+                "run",
+                "-d",
+                "--name",
+                PAWNS_CONTAINER,
+                "--restart",
+                "unless-stopped",
+                PAWNS_IMAGE,
+                &format!("-email={}", email),
+                &format!("-password={}", password),
+                &format!("-device-name={}", device_name),
+                &format!("-device-id={}", device_id),
+                "-accept-tos",
+            ])
+            .output_bounded(LONG_TIMEOUT)?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(stderr = %stderr, "Failed to start Pawns.app agent");
+            anyhow::bail!(
+                "Could not start the Pawns.app agent: {}",
+                stderr.lines().last().unwrap_or("unknown error")
+            );
+        }
+
+        Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
+        let output = crate::supervisor::platform::command("docker")
+            .args(["rm", "-f", PAWNS_CONTAINER])
+            .output_bounded(PROBE_TIMEOUT);
+        match output {
+            Ok(o) if o.status.success() => info!("Pawns.app agent stopped — sharing ended"),
+            Ok(_) => info!("Pawns.app agent was not running"),
+            Err(e) => warn!(error = %e, "Could not stop the Pawns.app agent"),
+        }
+        Self::record_consent_event("withdrawal");
         Ok(())
     }
 
     async fn health_check(&self) -> HealthStatus {
-        // Always report Unhealthy in this release — the SDK is not available yet
-        if Self::sdk_key().is_none() {
-            return HealthStatus::Unhealthy("Pawns SDK key pending partner approval".to_string());
+        if !Self::user_consent() {
+            return HealthStatus::Unhealthy(format!(
+                "{} Enable this integration to consent.",
+                CONSENT_DISCLOSURE
+            ));
         }
-        HealthStatus::Unhealthy("Pawns SDK integration pending partner binary delivery".to_string())
+        if Self::credentials().is_none() {
+            return HealthStatus::Unhealthy(
+                "Pawns.app sign-in details are missing — set PAWNS_EMAIL and PAWNS_PASSWORD."
+                    .to_string(),
+            );
+        }
+        if !Self::docker_available() {
+            return HealthStatus::Unhealthy(super::docker_manager::status_user_message(
+                super::docker_manager::docker_status(),
+            ));
+        }
+
+        let state = match Self::container_state() {
+            Some(s) => s,
+            None => return HealthStatus::Stopped,
+        };
+        if state != "running" {
+            let detail = Self::container_logs("20").unwrap_or_default();
+            return match classify_events(&detail) {
+                PawnsState::Blocked(reason) => HealthStatus::Unhealthy(reason),
+                _ => HealthStatus::Unhealthy(format!("Pawns.app agent is {}", state)),
+            };
+        }
+
+        // Running is not the same as sharing — the agent reports that itself.
+        let logs = match Self::container_logs("50") {
+            Some(l) => l,
+            // Confirmed running but the log is unreadable: unverified, not healthy.
+            None => return HealthStatus::Starting,
+        };
+        match classify_events(&logs) {
+            PawnsState::Sharing => HealthStatus::Healthy,
+            PawnsState::Blocked(reason) => HealthStatus::Unhealthy(reason),
+            PawnsState::Starting | PawnsState::Unknown => HealthStatus::Starting,
+        }
     }
 
     async fn check_update(&self) -> Result<Option<String>> {
-        Ok(None)
+        Ok(None) // the image is pulled by tag; `apply_update` re-pulls it
+    }
+
+    async fn apply_update(&self, _version: &str) -> Result<()> {
+        self.install().await
     }
 
     fn installed_version(&self) -> Option<String> {
-        None
+        if Self::install_marker().exists() {
+            Some("latest".to_string())
+        } else {
+            None
+        }
     }
 
     fn collect_poc_data(&self) -> PocGateData {
@@ -103,6 +461,158 @@ impl Integration for PawnsIntegration {
     }
 
     fn requires_docker(&self) -> bool {
-        false
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SHARING: &str = r#"{"happened_at":"2026-08-11T21:48:52Z","name":"balance_ready","parameters":{"balance":"0.000 USD","traffic":"0.0000 GB"}}"#;
+    const BLOCKED: &str = r#"{"happened_at":"2026-08-11T21:49:03Z","name":"not_running","parameters":{"error":"ip_used","message":"getting free port failed (ip has alive peer)"}}"#;
+    const STARTING: &str = r#"{"happened_at":"2026-08-11T21:48:50Z","name":"starting","parameters":{}}"#;
+
+    #[test]
+    fn reports_sharing_when_the_agent_last_reported_a_balance() {
+        let logs = format!("{}\n{}\n", STARTING, SHARING);
+        assert_eq!(classify_events(&logs), PawnsState::Sharing);
+    }
+
+    #[test]
+    fn a_later_not_running_event_overrides_an_earlier_balance() {
+        let logs = format!("{}\n{}\n{}\n", STARTING, SHARING, BLOCKED);
+        match classify_events(&logs) {
+            PawnsState::Blocked(reason) => {
+                assert!(reason.contains("one peer per IP"), "reason was: {}", reason)
+            }
+            other => panic!("expected Blocked, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn a_recovery_after_a_block_reports_sharing_again() {
+        let logs = format!("{}\n{}\n{}\n", STARTING, BLOCKED, SHARING);
+        assert_eq!(classify_events(&logs), PawnsState::Sharing);
+    }
+
+    #[test]
+    fn only_a_start_event_is_not_yet_sharing() {
+        assert_eq!(classify_events(STARTING), PawnsState::Starting);
+    }
+
+    #[test]
+    fn an_empty_or_unrecognised_log_is_unknown() {
+        assert_eq!(classify_events(""), PawnsState::Unknown);
+        assert_eq!(
+            classify_events("pulling image\nno events here\n"),
+            PawnsState::Unknown
+        );
+    }
+
+    #[test]
+    fn an_unknown_error_code_keeps_the_agents_own_message() {
+        let line = r#"{"name":"not_running","parameters":{"error":"auth_failed","message":"invalid credentials"}}"#;
+        match classify_events(line) {
+            PawnsState::Blocked(reason) => {
+                assert!(reason.contains("auth_failed"), "reason was: {}", reason);
+                assert!(
+                    reason.contains("invalid credentials"),
+                    "reason was: {}",
+                    reason
+                );
+            }
+            other => panic!("expected Blocked, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn the_consent_disclosure_covers_every_point_the_addendum_requires() {
+        let text = CONSENT_DISCLOSURE.to_lowercase();
+        assert!(text.contains("routed through this device")); // (a) traffic routing
+        assert!(text.contains("public ip address")); // (b) IP visibility
+        assert!(text.contains("data allowance")); // (c) resource use
+        assert!(text.contains("age of majority")); // (d) eligibility
+        assert!(text.contains("off at any time")); // (e) how to stop
+    }
+
+    #[test]
+    fn device_ids_stay_within_the_accepted_character_set() {
+        assert_eq!(sanitize_id("FryStation"), "frystation");
+        assert_eq!(sanitize_id("Sam's PC (2)"), "sam-s-pc--2-");
+    }
+
+    #[test]
+    fn timestamps_are_rfc3339_utc() {
+        let ts = utc_now_rfc3339();
+        assert!(ts.ends_with('Z'), "{}", ts);
+        assert_eq!(ts.len(), 20, "{}", ts);
+        assert_eq!(&ts[4..5], "-");
+        assert_eq!(&ts[10..11], "T");
+    }
+
+    #[test]
+    fn civil_dates_match_known_days_since_epoch() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(19_723), (2024, 1, 1)); // leap-year boundary
+        assert_eq!(civil_from_days(20_676), (2026, 8, 11));
+    }
+
+    /// Drives the real lifecycle against the real Docker engine and the real
+    /// Pawns.app account. Opt-in (`cargo test -- --ignored pawns_live`) because
+    /// it needs Docker, network, and `PAWNS_EMAIL`/`PAWNS_PASSWORD` in the
+    /// environment — CI has none of those.
+    #[tokio::test]
+    #[ignore = "needs Docker, network and real Pawns.app credentials"]
+    async fn pawns_live_lifecycle() {
+        let pawns = PawnsIntegration;
+
+        pawns.install().await.expect("install should pull the agent image");
+        assert_eq!(pawns.installed_version().as_deref(), Some("latest"));
+
+        pawns.start().await.expect("start should launch the agent");
+        assert_eq!(
+            PawnsIntegration::container_state().as_deref(),
+            Some("running"),
+            "agent container should be running after start"
+        );
+
+        // The agent authenticates a few seconds after launch; poll until it
+        // reports something conclusive rather than asserting on a race.
+        let mut observed = Vec::new();
+        for _ in 0..12 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let health = pawns.health_check().await;
+            observed.push(health.clone());
+            if !matches!(health, HealthStatus::Starting) {
+                break;
+            }
+        }
+        let last = observed.last().expect("at least one health check");
+        assert!(
+            !matches!(last, HealthStatus::Stopped),
+            "agent stopped unexpectedly; observed: {:?}",
+            observed
+        );
+
+        let logs = PawnsIntegration::container_logs("100").unwrap_or_default();
+        assert!(
+            logs.contains("balance_ready"),
+            "agent never authenticated; logs: {}",
+            logs
+        );
+
+        let consent_log = std::fs::read_to_string(PawnsIntegration::consent_log())
+            .expect("start should have written a consent record");
+        assert!(consent_log.contains("\"action\":\"consent\""));
+
+        pawns.stop().await.expect("stop should remove the agent");
+        assert_eq!(
+            PawnsIntegration::container_state(),
+            None,
+            "container should be gone after stop"
+        );
+        let consent_log = std::fs::read_to_string(PawnsIntegration::consent_log()).unwrap();
+        assert!(consent_log.contains("\"action\":\"withdrawal\""));
     }
 }
