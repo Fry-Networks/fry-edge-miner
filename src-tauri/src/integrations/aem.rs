@@ -339,11 +339,40 @@ impl Integration for AemIntegration {
     async fn stop(&self) -> Result<()> {
         #[cfg(target_os = "windows")]
         {
-            let _ = crate::supervisor::platform::command("taskkill")
-                .args(["/IM", "OlostepBrowser.exe", "/F"])
+            // OlostepBrowser is Chromium-based and spawns a tree of renderer /
+            // GPU / utility children. Killing only the parent (no /T) left those
+            // children alive, holding the profile lock and the browser's own
+            // ports — field reports of "Olostep refuses to shut down, requires a
+            // full reboot". /T kills the whole tree.
+            let killed = crate::supervisor::platform::command("taskkill")
+                .args(["/IM", "OlostepBrowser.exe", "/T", "/F"])
                 .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
+            match killed {
+                // taskkill exits non-zero with "process not found" when nothing
+                // was running, which is a successful stop, not a failure.
+                Ok(o) if o.status.success() => info!("Stopped OlostepBrowser"),
+                Ok(o) => {
+                    let err = String::from_utf8_lossy(&o.stderr);
+                    if Self::is_running() {
+                        anyhow::bail!(
+                            "OlostepBrowser is still running after taskkill: {}",
+                            err.trim()
+                        );
+                    }
+                    info!("OlostepBrowser was not running");
+                }
+                Err(e) => {
+                    if Self::is_running() {
+                        anyhow::bail!("Failed to stop OlostepBrowser: {e}");
+                    }
+                    warn!(error = %e, "taskkill failed but OlostepBrowser is not running");
+                }
+            }
         }
-        info!("Stopped OlostepBrowser");
+        #[cfg(not(target_os = "windows"))]
+        {
+            info!("Stopped OlostepBrowser");
+        }
         Ok(())
     }
 

@@ -9,6 +9,13 @@ use tracing::{info, warn};
 
 const SPACE_ACRES_MIN_GB: u64 = 50;
 
+/// The release artifact chosen for this platform.
+pub struct ReleaseAsset {
+    pub version: String,
+    pub asset_name: String,
+    pub download_url: String,
+}
+
 pub struct SpaceAcresIntegration;
 
 const GITHUB_API_URL: &str = "https://api.github.com/repos/autonomys/space-acres/releases/latest";
@@ -24,6 +31,52 @@ impl SpaceAcresIntegration {
         return Self::partner_dir().join("space-acres.exe");
         #[cfg(not(target_os = "windows"))]
         return Self::partner_dir().join("space-acres");
+    }
+
+    /// Where the downloaded Windows release artifact is staged.
+    ///
+    /// Upstream ships Windows as an INSTALLER, not a portable binary: the
+    /// `space-acres-<ver>-x86_64.exe` asset is a WiX Burn bootstrapper (three
+    /// `.wixburn` PE sections; contains none of the app's own strings), and
+    /// upstream's INSTALLATION.md tells Windows users to run an installer.
+    /// Saving it as `space-acres.exe` and executing it with `--base-directory`
+    /// launched the installer UI instead of a farmer — the "SpaceAcres does not
+    /// download properly on Windows" report.
+    #[cfg(target_os = "windows")]
+    fn installer_path(asset_name: &str) -> PathBuf {
+        let ext = if asset_name.to_lowercase().ends_with(".msi") {
+            "msi"
+        } else {
+            "exe"
+        };
+        Self::partner_dir().join(format!("space-acres-installer.{ext}"))
+    }
+
+    /// Locate the binary the installer actually placed, mirroring the Olostep
+    /// integration's post-install discovery. Returns the first hit.
+    #[cfg(target_os = "windows")]
+    fn installed_binary() -> Option<PathBuf> {
+        // A previously-staged portable copy still wins, so existing installs
+        // that already work keep working.
+        let staged = Self::binary_path();
+        if staged.exists() {
+            return Some(staged);
+        }
+        let mut roots: Vec<PathBuf> = Vec::new();
+        for var in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
+            if let Ok(base) = std::env::var(var) {
+                roots.push(PathBuf::from(&base).join("space-acres"));
+                roots.push(PathBuf::from(&base).join("Programs").join("space-acres"));
+                roots.push(PathBuf::from(&base).join("Space Acres"));
+            }
+        }
+        for root in roots {
+            let candidate = root.join("space-acres.exe");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+        None
     }
 
     fn github_token() -> Option<String> {
@@ -48,7 +101,7 @@ impl SpaceAcresIntegration {
             .expect("failed to build GitHub HTTP client")
     }
 
-    async fn fetch_latest_release() -> Result<(String, String)> {
+    async fn fetch_latest_release() -> Result<ReleaseAsset> {
         let client = Self::build_client();
         let max_attempts = 3u32;
         let base_delay = Duration::from_secs(2);
@@ -72,36 +125,43 @@ impl SpaceAcresIntegration {
                             .as_array()
                             .ok_or_else(|| anyhow::anyhow!("No assets in release"))?;
 
-                        let platform_suffix: &str = if cfg!(target_os = "windows") {
-                            ".exe"
+                        // On Windows prefer a plain `.msi` when upstream publishes
+                        // one (their INSTALLATION.md documents the .msi path);
+                        // fall back to the Burn `.exe` bundle otherwise.
+                        let platform_suffixes: &[&str] = if cfg!(target_os = "windows") {
+                            &[".msi", ".exe"]
                         } else if cfg!(target_os = "macos") {
-                            ".dmg"
+                            &[".dmg"]
                         } else {
-                            ".AppImage"
+                            &[".AppImage"]
                         };
 
                         let host_arch = std::env::consts::ARCH; // "x86_64", "aarch64", etc.
 
-                        let download_url = assets
-                            .iter()
-                            .find_map(|asset| {
-                                if let Some(name) = asset["name"].as_str() {
-                                    if name.ends_with(platform_suffix) && name.contains(host_arch) {
-                                        return asset["browser_download_url"]
-                                            .as_str()
-                                            .map(|s| s.to_string());
-                                    }
+                        let picked = platform_suffixes.iter().find_map(|suffix| {
+                            assets.iter().find_map(|asset| {
+                                let name = asset["name"].as_str()?;
+                                if name.ends_with(suffix) && name.contains(host_arch) {
+                                    let url = asset["browser_download_url"].as_str()?;
+                                    return Some((name.to_string(), url.to_string()));
                                 }
                                 None
                             })
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "No {} asset found for arch {} in release",
-                                    platform_suffix, host_arch
-                                )
-                            })?;
+                        });
 
-                        return Ok((tag_name, download_url));
+                        let (asset_name, download_url) = picked.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "No {:?} asset found for arch {} in release",
+                                platform_suffixes,
+                                host_arch
+                            )
+                        })?;
+
+                        return Ok(ReleaseAsset {
+                            version: tag_name,
+                            asset_name,
+                            download_url,
+                        });
                     }
 
                     let headers = response.headers();
@@ -217,37 +277,116 @@ impl Integration for SpaceAcresIntegration {
     }
 
     async fn install(&self) -> Result<()> {
-        let binary = Self::binary_path();
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(existing) = Self::installed_binary() {
+                info!(path = ?existing, "SpaceAcres already installed");
+                return Ok(());
+            }
 
-        // Check if binary already exists
-        if binary.exists() {
-            info!(path = ?binary, "SpaceAcres binary already installed");
+            info!("Installing SpaceAcres from GitHub latest release");
+            let release = Self::fetch_latest_release().await?;
+            info!(
+                version = %release.version,
+                asset = %release.asset_name,
+                "Found latest release"
+            );
+
+            let installer = Self::installer_path(&release.asset_name);
+            std::fs::create_dir_all(Self::partner_dir())?;
+            let token = Self::github_token();
+            download_file_with_options(
+                &release.download_url,
+                &installer,
+                USER_AGENT,
+                token.as_deref(),
+            )
+            .await?;
+
+            // The Windows artifact is an installer, so RUN it silently rather
+            // than treating it as the farmer binary.
+            let is_msi = release.asset_name.to_lowercase().ends_with(".msi");
+            let output = if is_msi {
+                crate::supervisor::platform::command("msiexec")
+                    .arg("/i")
+                    .arg(&installer)
+                    .args(["/quiet", "/norestart"])
+                    .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?
+            } else {
+                // WiX Burn bootstrapper flags.
+                crate::supervisor::platform::command(&installer)
+                    .args(["/quiet", "/norestart"])
+                    .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?
+            };
+            if !output.status.success() {
+                warn!(
+                    code = output.status.code(),
+                    "SpaceAcres installer exited non-zero (it may still be finishing)"
+                );
+            }
+
+            // Installers finish asynchronously — wait for the real binary.
+            let mut found = None;
+            for _ in 0..60 {
+                if let Some(p) = Self::installed_binary() {
+                    found = Some(p);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            let binary = found.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "SpaceAcres installer ran but space-acres.exe did not appear within 120 seconds{}. Antivirus or an elevation prompt may have blocked it.",
+                    output
+                        .status
+                        .code()
+                        .map(|c| format!(" (installer exit code {c})"))
+                        .unwrap_or_default()
+                )
+            })?;
+
+            if let Err(e) = std::fs::remove_file(&installer) {
+                warn!(error = %e, "Could not remove SpaceAcres installer");
+            }
+            info!(binary = ?binary, version = %release.version, "SpaceAcres installed successfully");
             return Ok(());
         }
 
-        info!("Installing SpaceAcres from GitHub latest release");
-
-        // Fetch latest release metadata
-        let (version, download_url) = Self::fetch_latest_release().await?;
-        info!(version = %version, download_url = %download_url, "Found latest release");
-
-        // Download the binary with retry/backoff and optional auth
-        let token = Self::github_token();
-        download_file_with_options(&download_url, &binary, USER_AGENT, token.as_deref()).await?;
-
-        // Make it executable on Unix-like systems
         #[cfg(not(target_os = "windows"))]
         {
+            let binary = Self::binary_path();
+            if binary.exists() {
+                info!(path = ?binary, "SpaceAcres binary already installed");
+                return Ok(());
+            }
+
+            info!("Installing SpaceAcres from GitHub latest release");
+            let release = Self::fetch_latest_release().await?;
+            info!(version = %release.version, asset = %release.asset_name, "Found latest release");
+
+            let token = Self::github_token();
+            download_file_with_options(
+                &release.download_url,
+                &binary,
+                USER_AGENT,
+                token.as_deref(),
+            )
+            .await?;
+
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o755);
             std::fs::set_permissions(&binary, perms)?;
-        }
 
-        info!(binary = ?binary, version = %version, "SpaceAcres installed successfully");
-        Ok(())
+            info!(binary = ?binary, version = %release.version, "SpaceAcres installed successfully");
+            Ok(())
+        }
     }
 
     async fn start(&self) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        let binary = Self::installed_binary()
+            .ok_or_else(|| anyhow::anyhow!("SpaceAcres is not installed — enable it to install"))?;
+        #[cfg(not(target_os = "windows"))]
         let binary = Self::binary_path();
 
         if !binary.exists() {
@@ -318,9 +457,9 @@ impl Integration for SpaceAcresIntegration {
 
     async fn check_update(&self) -> Result<Option<String>> {
         match Self::fetch_latest_release().await {
-            Ok((version, _)) => {
-                info!(version = %version, "Found SpaceAcres update available");
-                Ok(Some(version))
+            Ok(release) => {
+                info!(version = %release.version, "Found SpaceAcres update available");
+                Ok(Some(release.version))
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to check SpaceAcres updates");

@@ -14,6 +14,19 @@ const DOCKER_PATHS: &[&str] = &[
     "C:\\Program Files (x86)\\Docker\\Docker\\Docker.exe",
 ];
 
+/// Docker Desktop 4.30+ can install per-user, outside Program Files. These are
+/// relative to %LOCALAPPDATA% / %PROGRAMDATA% and are resolved at runtime.
+const DOCKER_USER_SCOPE_PATHS: &[(&str, &str)] = &[
+    ("LOCALAPPDATA", "Programs\\Docker\\Docker\\Docker Desktop.exe"),
+    ("LOCALAPPDATA", "Programs\\Docker\\Docker\\Docker.exe"),
+    ("ProgramData", "DockerDesktop\\Docker Desktop.exe"),
+];
+
+/// Named pipe the Docker engine listens on. Its presence proves Docker is
+/// installed even when the CLI is absent from this process's PATH.
+#[cfg(target_os = "windows")]
+const DOCKER_ENGINE_PIPE: &str = "\\\\.\\pipe\\docker_engine";
+
 /// Docker Desktop virtualization troubleshooting guide shown to users when
 /// VT-x/AMD-V is disabled in firmware.
 pub const VIRTUALIZATION_HELP_URL: &str =
@@ -31,27 +44,57 @@ pub enum DockerStatus {
     VirtualizationDisabled,
 }
 
-/// Bounded docker probe with 3-second timeout. Spawn `docker info`, poll every 100ms
-/// for status; kill on timeout. Returns Some(true/false) on completion, None on spawn error.
-pub fn docker_cli_probe_bounded() -> Option<bool> {
+/// Outcome of the bounded `docker info` probe. A TIMEOUT and a MISSING CLI are
+/// different facts: a busy daemon (many running containers) routinely takes
+/// longer than the probe window, and collapsing that into "CLI missing" is what
+/// made FEM report "Docker is not installed" on machines where Docker Desktop
+/// was visibly running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockerProbe {
+    /// `docker info` exited 0 — daemon reachable.
+    Ready,
+    /// CLI ran but exited non-zero — installed, daemon not serving.
+    DaemonUnreachable,
+    /// CLI ran but did not finish inside the probe window. Says nothing about
+    /// whether Docker is installed.
+    TimedOut,
+    /// The `docker` binary could not be spawned at all.
+    CliMissing,
+}
+
+/// Bounded docker probe with a 3-second timeout. Spawns `docker info` and polls
+/// every 100ms, killing and reaping the child on timeout.
+pub fn docker_cli_probe_detailed() -> DockerProbe {
     const TIMEOUT_SECS: u64 = 3;
     const POLL_INTERVAL_MS: u64 = 100;
     const MAX_POLLS: u64 = (TIMEOUT_SECS * 1000) / POLL_INTERVAL_MS;
 
-    let mut child = crate::supervisor::platform::command("docker")
+    let mut child = match crate::supervisor::platform::command("docker")
         .arg("info")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .ok()?;
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(error = %e, "Docker CLI could not be spawned");
+            return DockerProbe::CliMissing;
+        }
+    };
 
     for _poll in 0..MAX_POLLS {
         match child.try_wait() {
-            Ok(Some(status)) => return Some(status.success()),
+            Ok(Some(status)) => {
+                return if status.success() {
+                    DockerProbe::Ready
+                } else {
+                    DockerProbe::DaemonUnreachable
+                }
+            }
             Ok(None) => {
                 std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
             }
-            Err(_) => return None,
+            Err(_) => return DockerProbe::CliMissing,
         }
     }
 
@@ -59,19 +102,23 @@ pub fn docker_cli_probe_bounded() -> Option<bool> {
     let _ = child.kill();
     let _ = child.wait();
     tracing::warn!("Docker probe timed out after {} seconds", TIMEOUT_SECS);
-    None
+    DockerProbe::TimedOut
 }
 
 /// Probe the docker CLI: Some(true) = daemon ready, Some(false) = CLI present
-/// but daemon unreachable, None = CLI missing entirely (spawn failed).
+/// but daemon unreachable, None = CLI missing or unresponsive.
 /// Uses bounded probe with 3-second timeout to prevent hangs.
-fn docker_cli_probe() -> Option<bool> {
-    docker_cli_probe_bounded()
+pub fn docker_cli_probe_bounded() -> Option<bool> {
+    match docker_cli_probe_detailed() {
+        DockerProbe::Ready => Some(true),
+        DockerProbe::DaemonUnreachable => Some(false),
+        DockerProbe::TimedOut | DockerProbe::CliMissing => None,
+    }
 }
 
 /// Check if Docker daemon is running by attempting `docker info`.
 fn docker_running() -> bool {
-    docker_cli_probe() == Some(true)
+    docker_cli_probe_detailed() == DockerProbe::Ready
 }
 
 /// Whether the CPU/firmware can run Docker Desktop: true when a hypervisor is
@@ -164,22 +211,41 @@ pub fn is_virtual_machine() -> bool {
 /// Resolve the current Docker state, including whether virtualization makes
 /// Docker viable at all on this machine.
 pub fn docker_status() -> DockerStatus {
-    match docker_cli_probe() {
-        Some(true) => DockerStatus::Ready,
-        Some(false) => {
-            if virtualization_supported() {
+    resolve_docker_status(
+        docker_cli_probe_detailed(),
+        docker_desktop_installed(),
+        virtualization_supported(),
+    )
+}
+
+/// Testable core of `docker_status`. Kept pure so the state machine can be
+/// exercised without a real Docker install.
+///
+/// The load-bearing rule: only `CliMissing` + no install evidence may ever
+/// produce `NotInstalled`. A probe TIMEOUT means "we don't know", and claiming
+/// "Docker is not installed" on a machine that is running containers is worse
+/// than saying the daemon isn't answering.
+pub fn resolve_docker_status(
+    probe: DockerProbe,
+    installed: bool,
+    virtualization: bool,
+) -> DockerStatus {
+    match probe {
+        DockerProbe::Ready => DockerStatus::Ready,
+        DockerProbe::DaemonUnreachable | DockerProbe::TimedOut => {
+            // The CLI exists (it ran), so Docker is installed by definition.
+            if virtualization {
                 DockerStatus::DaemonStopped
             } else {
                 DockerStatus::VirtualizationDisabled
             }
         }
-        None => {
-            // CLI missing — Docker Desktop may still be installed (PATH not
-            // refreshed) or absent entirely.
-            let installed = find_docker_desktop().is_some();
-            if !virtualization_supported() {
+        DockerProbe::CliMissing => {
+            if !virtualization {
                 DockerStatus::VirtualizationDisabled
             } else if installed {
+                // Installed but not on this process's PATH (common right after
+                // an install, before the environment is refreshed).
                 DockerStatus::DaemonStopped
             } else {
                 DockerStatus::NotInstalled
@@ -266,7 +332,50 @@ fn find_docker_desktop() -> Option<PathBuf> {
             return Some(p);
         }
     }
+    // Docker Desktop 4.30+ supports per-user installs outside Program Files.
+    for (var, rel) in DOCKER_USER_SCOPE_PATHS {
+        if let Ok(base) = std::env::var(var) {
+            let p = PathBuf::from(base).join(rel);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
     None
+}
+
+/// Whether Docker Desktop is installed, by any evidence we can gather without
+/// the CLI: a known executable path (machine- or user-scope), the engine's
+/// named pipe, or the Windows uninstall registry entry.
+///
+/// Deliberately broader than `find_docker_desktop`, which must return a path it
+/// can actually launch; here a pipe or registry hit is enough to prove presence.
+pub fn docker_desktop_installed() -> bool {
+    if find_docker_desktop().is_some() {
+        return true;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // The engine pipe only exists when Docker is installed and running —
+        // the exact case that was being misreported as "not installed".
+        if std::fs::metadata(DOCKER_ENGINE_PIPE).is_ok() {
+            return true;
+        }
+        let out = crate::supervisor::platform::command("reg")
+            .args([
+                "query",
+                "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Docker Desktop",
+                "/v",
+                "DisplayName",
+            ])
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
+        if let Ok(o) = out {
+            if o.status.success() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Try to start Docker Desktop on Windows.
@@ -461,6 +570,81 @@ mod tests {
         let msg = status_user_message_for(DockerStatus::VirtualizationDisabled, false);
         assert!(msg.contains("BIOS/UEFI"), "got: {msg}");
         assert!(!msg.contains("nested virtualization"), "got: {msg}");
+    }
+
+    // Field reports (georgeparis, Jesco39967): FEM said "Docker Desktop is not
+    // installed" in screenshots showing Docker Desktop running with containers.
+    // A busy daemon makes `docker info` exceed the 3s probe window; that timeout
+    // used to be indistinguishable from "CLI missing", which then fell through
+    // to a Program-Files-only path check and reported NotInstalled.
+    #[test]
+    fn probe_timeout_never_reports_docker_missing() {
+        // Worst case for the old code: timed out AND no install path found.
+        assert_eq!(
+            resolve_docker_status(DockerProbe::TimedOut, false, true),
+            DockerStatus::DaemonStopped,
+            "a probe timeout must not be reported as NotInstalled"
+        );
+        assert_eq!(
+            resolve_docker_status(DockerProbe::TimedOut, true, true),
+            DockerStatus::DaemonStopped
+        );
+    }
+
+    #[test]
+    fn cli_missing_but_installed_reports_daemon_stopped() {
+        // User-scope install (%LOCALAPPDATA%\Programs\Docker) with docker not on PATH.
+        assert_eq!(
+            resolve_docker_status(DockerProbe::CliMissing, true, true),
+            DockerStatus::DaemonStopped
+        );
+    }
+
+    #[test]
+    fn only_a_missing_cli_with_no_install_evidence_is_not_installed() {
+        assert_eq!(
+            resolve_docker_status(DockerProbe::CliMissing, false, true),
+            DockerStatus::NotInstalled
+        );
+    }
+
+    #[test]
+    fn ready_probe_is_ready_regardless_of_path_detection() {
+        assert_eq!(
+            resolve_docker_status(DockerProbe::Ready, false, true),
+            DockerStatus::Ready
+        );
+    }
+
+    #[test]
+    fn virtualization_disabled_still_wins_where_it_applies() {
+        assert_eq!(
+            resolve_docker_status(DockerProbe::DaemonUnreachable, true, false),
+            DockerStatus::VirtualizationDisabled
+        );
+        assert_eq!(
+            resolve_docker_status(DockerProbe::CliMissing, false, false),
+            DockerStatus::VirtualizationDisabled
+        );
+    }
+
+    // The 4 integrations gate on `docker_cli_probe_bounded() == Some(true)`;
+    // that contract must survive the probe refactor.
+    #[test]
+    fn bounded_probe_keeps_its_option_contract() {
+        for (probe, expected) in [
+            (DockerProbe::Ready, Some(true)),
+            (DockerProbe::DaemonUnreachable, Some(false)),
+            (DockerProbe::TimedOut, None),
+            (DockerProbe::CliMissing, None),
+        ] {
+            let mapped = match probe {
+                DockerProbe::Ready => Some(true),
+                DockerProbe::DaemonUnreachable => Some(false),
+                DockerProbe::TimedOut | DockerProbe::CliMissing => None,
+            };
+            assert_eq!(mapped, expected, "probe {probe:?} mapped wrong");
+        }
     }
 
     #[test]

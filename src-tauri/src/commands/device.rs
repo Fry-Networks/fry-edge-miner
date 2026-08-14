@@ -32,6 +32,26 @@ fn generate_install_id() -> String {
     hex::encode(bytes)
 }
 
+/// Decide what `get_device_info` reports for a stored miner key.
+///
+/// Returns `(key_to_report, format_is_valid_by_todays_rules)`.
+///
+/// A stored key is reported even when it fails the current validator: the key
+/// formats accepted by FEM have changed across releases, and dropping an
+/// unrecognised-but-present key made the app treat a registered device as new,
+/// bouncing the user into the onboarding Wizard with their key and wallet
+/// apparently gone. The stored string is also exactly what the server keys the
+/// device document by, so it is the right value to send and display.
+pub fn resolve_stored_miner_key(stored: Option<&str>) -> (Option<String>, bool) {
+    match stored {
+        None => (None, false),
+        Some(raw) => match crate::config::miner_key::validate_fem_key_preserve_case(raw) {
+            Ok(valid) => (Some(valid), true),
+            Err(_) => (Some(raw.to_string()), false),
+        },
+    }
+}
+
 #[tauri::command]
 pub async fn get_device_info(
     state: tauri::State<'_, crate::AppState>,
@@ -41,17 +61,16 @@ pub async fn get_device_info(
     // Validate config-loaded key format before using. Case is preserved:
     // the server-side device doc is keyed by the exact stored string, and a
     // re-cased display key breaks the dashboard's case-sensitive claim (D1).
-    let miner_key = config
-        .miner_key
-        .as_ref()
-        .and_then(|k| crate::config::miner_key::validate_fem_key_preserve_case(k).ok());
-    if config.miner_key.is_some() && miner_key.is_none() {
-        tracing::warn!("Stored miner_key has invalid format; treating as unregistered");
+    let (miner_key, key_format_valid) = resolve_stored_miner_key(config.miner_key.as_deref());
+    if config.miner_key.is_some() && !key_format_valid {
+        tracing::warn!(
+            "Stored miner_key does not match the current format; still reporting the device as registered"
+        );
     }
 
     // Debug diagnostics — no secrets logged
     tracing::debug!(
-        key_format_valid = miner_key.is_some(),
+        key_format_valid,
         device_token_present = config.device_token.is_some() && !config.device_token.as_ref().unwrap().is_empty(),
         auth_source = if config.device_token.as_ref().filter(|s| !s.is_empty()).is_some() { "device_token" } else { "fallback" },
         "get_device_info diagnostics"
@@ -561,6 +580,43 @@ mod recovery_tests {
         cfg.api_token = "bootstrap-token".to_string();
         cfg.device_token = device_token.map(|s| s.to_string());
         cfg
+    }
+
+    // Field reports (georgeparis, tickler): "keys and wallet go missing after
+    // FEM runs for a few minutes" / "settings not holding credentials".
+    // fem_config.json was intact; get_device_info reported registered:false
+    // because the STORED key failed today's validator, and App.tsx routes the
+    // whole UI back to the onboarding Wizard on that flag.
+    #[test]
+    fn a_stored_key_that_fails_todays_validator_still_reports_registered() {
+        // Wrong key-part length — the shape an older release could have stored.
+        let legacy = "FEM-SHORTKEY123";
+        let (reported, valid) = resolve_stored_miner_key(Some(legacy));
+        assert!(!valid, "fixture must actually fail the current validator");
+        assert_eq!(
+            reported.as_deref(),
+            Some(legacy),
+            "the stored key must still be reported, verbatim"
+        );
+        assert!(
+            reported.is_some(),
+            "registered is derived from this being Some — a stored key must never read as unregistered"
+        );
+    }
+
+    #[test]
+    fn a_valid_stored_key_is_reported_unchanged_and_marked_valid() {
+        let good = "FEM-15CCB0C7A857E62200373CCF72EAA7D4";
+        let (reported, valid) = resolve_stored_miner_key(Some(good));
+        assert!(valid);
+        assert_eq!(reported.as_deref(), Some(good), "case must be preserved");
+    }
+
+    #[test]
+    fn no_stored_key_is_genuinely_unregistered() {
+        let (reported, valid) = resolve_stored_miner_key(None);
+        assert!(reported.is_none(), "a device with no key is unregistered");
+        assert!(!valid);
     }
 
     #[test]
