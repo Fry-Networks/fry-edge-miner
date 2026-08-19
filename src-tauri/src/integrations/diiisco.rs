@@ -3,9 +3,8 @@ use super::{HealthStatus, Integration, PocGateData};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use crate::api::client::ApiClient;
 use crate::api::types::CredentialInfo;
@@ -20,16 +19,23 @@ const HEALTH_URL: &str = "http://localhost:8181/health";
 pub const WALLET_NOT_PROVISIONED: &str =
     "Device wallet not provisioned yet — open Settings and re-register this device, or contact support.";
 
-/// Sticky, process-wide record of the wallet condition.
+/// How long a proven "this device has no wallet" answer is trusted before FEM
+/// asks hardwareapi again. Long enough that a device waiting on provisioning
+/// stops hammering the API on every supervisor retry, short enough that a
+/// wallet provisioned in the meantime is picked up without a restart.
+pub const WALLET_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// When the last lookup proved the device has no Algorand wallet, if it is
+/// still within `WALLET_CACHE_TTL`.
 ///
 /// `check_requirements()` is synchronous — the PoC reporter calls it on every
-/// tick — so it can never do the credentials lookup itself. This flag is how
+/// tick — so it can never do the credentials lookup itself. This cache is how
 /// the async discovery in `install()`/`start()` reaches it. Routing the
 /// condition through `unavailable_reason` instead of a start error is the
 /// whole point: the card goes inert with a sentence the user can act on, the
 /// toggle refuses up front, and the health loop stops restarting something
 /// that provably cannot start yet.
-static WALLET_MISSING: AtomicBool = AtomicBool::new(false);
+static NO_WALLET_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// Classify a credentials lookup into the wallet address or the user-facing
 /// reason the integration cannot run yet. A blank address counts as missing:
@@ -42,20 +48,44 @@ pub fn classify_wallet(algo_address: Option<&str>) -> Result<String, &'static st
     }
 }
 
-/// Record the observed wallet state. Logs only on a transition, so a device
-/// waiting on provisioning does not write a line every health tick.
-fn record_wallet_state(provisioned: bool) {
-    let was_missing = WALLET_MISSING.swap(!provisioned, Ordering::Relaxed);
-    match (provisioned, was_missing) {
-        (false, false) => info!("Diiisco unavailable: {}", WALLET_NOT_PROVISIONED),
-        (true, true) => info!("Diiisco: device wallet is now provisioned"),
-        _ => {}
+/// Whether a miss recorded at `since` is still authoritative at `now`.
+/// Pure so the TTL can be tested without waiting a quarter of an hour.
+pub fn cache_is_live(since: Option<Instant>, now: Instant, ttl: Duration) -> bool {
+    match since {
+        Some(t) => now.saturating_duration_since(t) < ttl,
+        None => false,
     }
 }
 
-/// True while the device is known to have no Algorand wallet.
+/// Record the observed wallet state. Logs only on a transition, so a device
+/// waiting on provisioning does not write a line every health tick.
+fn record_wallet_state(provisioned: bool) {
+    let mut slot = match NO_WALLET_SINCE.lock() {
+        Ok(s) => s,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let was_missing = cache_is_live(*slot, Instant::now(), WALLET_CACHE_TTL);
+    if provisioned {
+        *slot = None;
+        if was_missing {
+            info!("Diiisco: device wallet is now provisioned");
+        }
+    } else {
+        *slot = Some(Instant::now());
+        if !was_missing {
+            info!("Diiisco unavailable: {}", WALLET_NOT_PROVISIONED);
+        }
+    }
+}
+
+/// True while a recent lookup proved the device has no Algorand wallet.
+/// Expires on its own so a provisioned wallet is retried without a restart.
 pub fn wallet_missing() -> bool {
-    WALLET_MISSING.load(Ordering::Relaxed)
+    let slot = match NO_WALLET_SINCE.lock() {
+        Ok(s) => s,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    cache_is_live(*slot, Instant::now(), WALLET_CACHE_TTL)
 }
 
 /// The `check_requirements` answer for a given wallet state. Split out so it
@@ -147,6 +177,12 @@ impl Integration for DiiiscoIntegration {
     }
 
     async fn install(&self) -> Result<()> {
+        // B6: a recent lookup already proved this device has no wallet. Fail
+        // immediately with the actionable reason rather than re-asking
+        // hardwareapi and re-running a Docker build that cannot succeed.
+        if wallet_missing() {
+            anyhow::bail!("{}", WALLET_NOT_PROVISIONED);
+        }
         // Ensure Docker is available, auto-installing if needed
         super::docker_manager::ensure_docker().await?;
 
@@ -216,6 +252,12 @@ impl Integration for DiiiscoIntegration {
     }
 
     async fn start(&self) -> Result<()> {
+        // B6: short-circuit BEFORE any API call. The supervisor retries start()
+        // on a schedule; without this, a device waiting on provisioning issues
+        // a credentials lookup every single attempt to be told the same thing.
+        if wallet_missing() {
+            anyhow::bail!("{}", WALLET_NOT_PROVISIONED);
+        }
         super::docker_manager::ensure_docker().await?;
         let compose = compose_file();
         if !compose.exists() {
@@ -498,7 +540,7 @@ mod wallet_condition_tests {
 
     #[test]
     fn the_observed_state_drives_the_gate_and_clears_itself() {
-        // One test owns the process-wide flag so parallel siblings cannot
+        // One test owns the process-wide cache so parallel siblings cannot
         // observe it mid-transition.
         record_wallet_state(false);
         assert!(wallet_missing());
@@ -508,7 +550,44 @@ mod wallet_condition_tests {
         );
 
         record_wallet_state(true);
-        assert!(!wallet_missing(), "a provisioned wallet must clear the flag");
+        assert!(!wallet_missing(), "a provisioned wallet must clear the cache");
         assert_eq!(requirements_for(wallet_missing()), Ok(()));
+    }
+
+    #[test]
+    fn a_cached_miss_is_authoritative_only_inside_the_ttl() {
+        let ttl = Duration::from_secs(900);
+        let recorded = Instant::now();
+        assert!(cache_is_live(Some(recorded), recorded, ttl), "just recorded");
+        assert!(cache_is_live(
+            Some(recorded),
+            recorded + Duration::from_secs(899),
+            ttl
+        ));
+        // At the boundary the cache stops answering and the next attempt asks
+        // hardwareapi again — that is what lets a provisioned wallet recover
+        // without restarting the app.
+        assert!(!cache_is_live(
+            Some(recorded),
+            recorded + Duration::from_secs(900),
+            ttl
+        ));
+        assert!(!cache_is_live(
+            Some(recorded),
+            recorded + Duration::from_secs(5_000),
+            ttl
+        ));
+    }
+
+    #[test]
+    fn no_cached_miss_never_blocks_a_lookup() {
+        assert!(!cache_is_live(None, Instant::now(), WALLET_CACHE_TTL));
+    }
+
+    #[test]
+    fn the_ttl_is_long_enough_to_stop_the_retry_storm() {
+        // The supervisor re-arms roughly every 5 minutes; a TTL below that
+        // would let the hammering resume.
+        assert!(WALLET_CACHE_TTL >= Duration::from_secs(600));
     }
 }
