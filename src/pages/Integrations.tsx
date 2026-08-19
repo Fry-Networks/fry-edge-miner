@@ -1,17 +1,25 @@
-import { AlertTriangle, Cpu, HardDrive, Loader2, Radio, type LucideIcon } from 'lucide-react'
+import { AlertTriangle, Loader2, ShieldCheck, Zap, type LucideIcon } from 'lucide-react'
 import CategorySection from '../components/CategorySection'
 import IntCard from '../components/IntCard'
 import EmptyState from '../components/primitives/EmptyState'
 import type { FrontendIntegration } from '../hooks/useIntegrations'
 import { categoryCounts, toggleAllTargets } from '../lib/availability'
-import { CATEGORIES, type IntegrationCategory } from '../lib/integrationMeta'
+import { CATEGORIES } from '../lib/integrationMeta'
+import type { IntegrationTier } from '../lib/integrationMeta'
+import { splitByTier } from '../lib/tierSplit'
 import type { DockerProgress, SystemStatus } from '../lib/types'
 
-const CATEGORY_ICONS: Record<IntegrationCategory, LucideIcon> = {
-  'VPN & Bandwidth': Radio,
-  'Storage & Farming': HardDrive,
-  'AI & Data': Cpu
-}
+// F4: the page groups by tier, not by category — what a user needs to decide
+// here is "must I run this?", and the category is already on every card as
+// its tag. Members stay in category order inside a group so related
+// integrations still sit together.
+const TIER_GROUPS: { tier: IntegrationTier; title: string; Icon: LucideIcon }[] = [
+  { tier: 'official', title: 'Required', Icon: ShieldCheck },
+  { tier: 'sdk', title: 'Optional — Boost', Icon: Zap }
+]
+
+const byCategoryOrder = (a: FrontendIntegration, b: FrontendIntegration) =>
+  CATEGORIES.indexOf(a.category) - CATEGORIES.indexOf(b.category)
 
 interface IntegrationsProps {
   intgs: FrontendIntegration[]
@@ -29,6 +37,7 @@ export default function Integrations({ intgs, onToggle, system, dockerProgress, 
   const available = categoryCounts(intgs).availableTotal
   const dockerNotReady = !!system && system.docker !== 'ready'
   const anyNeedsDocker = intgs.some((i) => i.requires_docker)
+  const byTier = splitByTier(intgs)
 
   return (
     <div
@@ -114,15 +123,15 @@ export default function Integrations({ intgs, onToggle, system, dockerProgress, 
       {intgs.length === 0 ? (
         <EmptyState message="No integrations available" sub="Connect to the backend to manage partner integrations" />
       ) : (
-        CATEGORIES.map((cat) => {
-          const members = intgs.filter((i) => i.category === cat)
+        TIER_GROUPS.map(({ tier, title, Icon }) => {
+          const members = [...byTier[tier]].sort(byCategoryOrder)
           if (members.length === 0) return null
           const { activeCount, availableTotal, unavailableCount } = categoryCounts(members)
           return (
             <CategorySection
-              key={cat}
-              title={cat}
-              Icon={CATEGORY_ICONS[cat]}
+              key={title}
+              title={title}
+              Icon={Icon}
               activeCount={activeCount}
               totalCount={availableTotal}
               unavailableCount={unavailableCount}
