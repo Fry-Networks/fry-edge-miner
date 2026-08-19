@@ -2,6 +2,7 @@ import { Coins, Shield, TrendingUp } from 'lucide-react'
 import Lbl from '../components/primitives/Lbl'
 import StatCard from '../components/StatCard'
 import Tag from '../components/primitives/Tag'
+import { formatRewardWithToken } from '../lib/formatReward'
 import { GATES } from '../lib/integrationMeta'
 import { useRewards, type HourlyGates } from '../hooks/useRewards'
 
@@ -87,7 +88,7 @@ export default function Rewards() {
                     fontWeight: r.reward > 0 ? 500 : 400
                   }}
                 >
-                  {r.reward > 0 ? `${r.reward} ${rewardToken}` : '—'}
+                  {r.reward > 0 ? formatRewardWithToken(r.reward, rewardToken) : '—'}
                 </td>
                 <td
                   style={{
