@@ -16,6 +16,15 @@ import {
 export const CATEGORIES = ['VPN & Bandwidth', 'Storage & Farming', 'AI & Data'] as const
 export type IntegrationCategory = (typeof CATEGORIES)[number]
 
+/**
+ * Who stands behind an integration. `official` partners are contracted by Fry
+ * Networks and carry the base reward proportion; `sdk` ones are community
+ * builds on the partner SDK — experimental, and a bonus on top rather than a
+ * requirement. Mirrors `IntegrationTier` in src-tauri/src/integrations/mod.rs;
+ * the two lists must agree (see integrationTier.test.ts).
+ */
+export type IntegrationTier = 'official' | 'sdk'
+
 export interface IntegrationMeta {
   id: string
   name: string
@@ -25,6 +34,7 @@ export interface IntegrationMeta {
   col: string
   uptime: number
   category: IntegrationCategory
+  tier: IntegrationTier
 }
 
 export const INTEGRATION_META: IntegrationMeta[] = [
@@ -36,7 +46,8 @@ export const INTEGRATION_META: IntegrationMeta[] = [
     Icon: Globe,
     col: '#4a9eff',
     uptime: 99.2,
-    category: 'VPN & Bandwidth'
+    category: 'VPN & Bandwidth',
+    tier: 'official'
   },
   {
     id: 'storj',
@@ -46,7 +57,8 @@ export const INTEGRATION_META: IntegrationMeta[] = [
     Icon: Cloud,
     col: '#0066ff',
     uptime: 0,
-    category: 'Storage & Farming'
+    category: 'Storage & Farming',
+    tier: 'sdk'
   },
   {
     id: 'diiisco',
@@ -56,7 +68,8 @@ export const INTEGRATION_META: IntegrationMeta[] = [
     Icon: Cpu,
     col: '#f0a500',
     uptime: 0,
-    category: 'AI & Data'
+    category: 'AI & Data',
+    tier: 'official'
   },
   {
     id: 'space_acres',
@@ -66,7 +79,8 @@ export const INTEGRATION_META: IntegrationMeta[] = [
     Icon: HardDrive,
     col: '#22c55e',
     uptime: 98.4,
-    category: 'Storage & Farming'
+    category: 'Storage & Farming',
+    tier: 'official'
   },
   {
     id: 'aem',
@@ -76,7 +90,8 @@ export const INTEGRATION_META: IntegrationMeta[] = [
     Icon: Eye,
     col: '#00c49a',
     uptime: 96.1,
-    category: 'AI & Data'
+    category: 'AI & Data',
+    tier: 'official'
   },
   {
     id: 'fryvpn',
@@ -86,7 +101,8 @@ export const INTEGRATION_META: IntegrationMeta[] = [
     Icon: Shield,
     col: '#ef4444',
     uptime: 0,
-    category: 'VPN & Bandwidth'
+    category: 'VPN & Bandwidth',
+    tier: 'official'
   },
   {
     id: 'titan',
@@ -96,7 +112,8 @@ export const INTEGRATION_META: IntegrationMeta[] = [
     Icon: Network,
     col: '#e8452c',
     uptime: 0,
-    category: 'Storage & Farming'
+    category: 'Storage & Farming',
+    tier: 'sdk'
   },
   {
     id: 'sentinel',
@@ -106,7 +123,8 @@ export const INTEGRATION_META: IntegrationMeta[] = [
     Icon: Lock,
     col: '#0fa0ce',
     uptime: 0,
-    category: 'VPN & Bandwidth'
+    category: 'VPN & Bandwidth',
+    tier: 'sdk'
   },
   {
     id: 'iagon',
@@ -116,7 +134,8 @@ export const INTEGRATION_META: IntegrationMeta[] = [
     Icon: Server,
     col: '#7b3fe4',
     uptime: 0,
-    category: 'Storage & Farming'
+    category: 'Storage & Farming',
+    tier: 'sdk'
   },
   {
     id: 'pawns',
@@ -126,7 +145,8 @@ export const INTEGRATION_META: IntegrationMeta[] = [
     Icon: Wifi,
     col: '#f5a623',
     uptime: 0,
-    category: 'VPN & Bandwidth'
+    category: 'VPN & Bandwidth',
+    tier: 'sdk'
   }
 ]
 

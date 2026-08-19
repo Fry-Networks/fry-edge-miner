@@ -1,5 +1,7 @@
 // These match the Rust types from src-tauri/src/integrations/mod.rs and commands/
 
+import type { IntegrationTier } from './integrationMeta'
+
 export interface IntegrationStatus {
   id: string
   display_name: string
@@ -9,6 +11,12 @@ export interface IntegrationStatus {
   version: string | null
   poc_contribution: number
   requires_docker?: boolean
+  /**
+   * Official partner vs community SDK build. Optional on the wire so a status
+   * payload from an older backend still deserializes; the frontend falls back
+   * to INTEGRATION_META for the tier in that case.
+   */
+  tier?: IntegrationTier
   /** Present when this machine cannot meet the integration's minimum specs. */
   unavailable_reason?: string | null
   /**

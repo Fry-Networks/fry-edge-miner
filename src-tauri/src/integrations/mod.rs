@@ -52,6 +52,29 @@ pub enum LifecycleState {
     Updating,
 }
 
+/// Who stands behind an integration.
+///
+/// `Official` partners are contracted by Fry Networks and carry the base
+/// reward proportion. `Sdk` ones are community builds on the partner SDK:
+/// experimental, and a bonus on top rather than a requirement. The UI splits
+/// its Dashboard and Integrations screens on this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IntegrationTier {
+    Official,
+    Sdk,
+}
+
+/// Tier for a registered integration id. Static by design — the tier is a
+/// commercial fact about the partner, not runtime state. Unknown ids are
+/// `Sdk`: a new integration must be promoted deliberately, never by default.
+pub fn tier_for(id: &str) -> IntegrationTier {
+    match id {
+        "mysterium" | "diiisco" | "space_acres" | "aem" | "fryvpn" => IntegrationTier::Official,
+        _ => IntegrationTier::Sdk,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntegrationStatus {
     pub id: String,
@@ -61,6 +84,8 @@ pub struct IntegrationStatus {
     pub lifecycle: LifecycleState,
     pub version: Option<String>,
     pub poc_contribution: f64,
+    /// Official partner vs community SDK build (see `tier_for`).
+    pub tier: IntegrationTier,
     #[serde(default)]
     pub requires_docker: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -200,6 +225,7 @@ impl IntegrationRegistry {
                     } else {
                         0.0
                     },
+                    tier: tier_for(&id),
                     requires_docker: i.requires_docker(),
                     error: None,
                     unavailable_reason: i.check_requirements().err(),
@@ -240,5 +266,49 @@ impl IntegrationRegistry {
 impl Default for IntegrationRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+
+    /// The five contracted partners. Kept literal: the reward copy on the
+    /// Dashboard says "X / 5", and a silent addition here would change what
+    /// every user is told they must run.
+    const OFFICIAL: [&str; 5] = ["mysterium", "diiisco", "space_acres", "aem", "fryvpn"];
+    const SDK: [&str; 5] = ["storj", "titan", "sentinel", "iagon", "pawns"];
+
+    #[test]
+    fn every_contracted_partner_is_official() {
+        for id in OFFICIAL {
+            assert_eq!(tier_for(id), IntegrationTier::Official, "id was: {}", id);
+        }
+    }
+
+    #[test]
+    fn every_community_build_is_sdk() {
+        for id in SDK {
+            assert_eq!(tier_for(id), IntegrationTier::Sdk, "id was: {}", id);
+        }
+    }
+
+    #[test]
+    fn an_unknown_id_is_never_promoted_to_official() {
+        assert_eq!(tier_for("brand_new_partner"), IntegrationTier::Sdk);
+        assert_eq!(tier_for(""), IntegrationTier::Sdk);
+    }
+
+    #[test]
+    fn the_tier_serializes_lowercase_for_the_typescript_union() {
+        // src/lib/integrationMeta.ts declares `'official' | 'sdk'`.
+        assert_eq!(
+            serde_json::to_string(&IntegrationTier::Official).unwrap(),
+            "\"official\""
+        );
+        assert_eq!(
+            serde_json::to_string(&IntegrationTier::Sdk).unwrap(),
+            "\"sdk\""
+        );
     }
 }

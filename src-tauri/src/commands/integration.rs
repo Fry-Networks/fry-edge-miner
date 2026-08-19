@@ -71,6 +71,7 @@ pub async fn get_integrations(
                 } else {
                     0.0
                 },
+                tier: crate::integrations::tier_for(&id),
                 requires_docker,
                 error: last_errors.get(&id).and_then(|e| e.clone()),
                 unavailable_reason,

@@ -46,6 +46,10 @@ export function toFrontend(integrations: IntegrationStatus[]): FrontendIntegrati
       // Unknown ids fall into "AI & Data" so a backend-only integration still
       // renders somewhere instead of vanishing from the grouped view.
       category: base?.category ?? 'AI & Data',
+      // Backend is authoritative; the meta table covers an older backend that
+      // does not send `tier` yet. An id neither side knows is treated as
+      // community, never as an official partner.
+      tier: i.tier ?? base?.tier ?? 'sdk',
       enabled,
       health,
       healthy: health === 'Healthy',
