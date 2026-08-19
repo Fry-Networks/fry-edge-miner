@@ -40,7 +40,23 @@ export function tierCounts(members: TierLike[]): {
   return categoryCounts(members)
 }
 
-/** Secondary Dashboard line for the community tier, or null when there is none. */
+/**
+ * Counts for the official tier of a full integration list.
+ *
+ * The single source for the headline figure. The Dashboard StatCard and the
+ * sidebar badge both read it, which is the point: they used to derive their
+ * counts independently and disagreed (sidebar `N/10` against Dashboard `N/5`).
+ */
+export function officialCounts(members: TierLike[]) {
+  return tierCounts(splitByTier(members).official)
+}
+
+/** Counts for the community tier of a full integration list. */
+export function sdkCounts(members: TierLike[]) {
+  return tierCounts(splitByTier(members).sdk)
+}
+
+/** Secondary line for the community tier, or null when there is none. */
 export function sdkActiveLine(sdkActiveCount: number): string | null {
   if (sdkActiveCount <= 0) return null
   return `+${sdkActiveCount} community active`

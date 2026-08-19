@@ -12,7 +12,7 @@ import { categoryCounts } from '../lib/availability'
 import { activeFraction, proportionPct } from '../lib/integrationCount'
 import type { IntegrationTier } from '../lib/integrationMeta'
 import { SDK_REPORT_LINE } from '../lib/support'
-import { sdkActiveLine, splitByTier, tierCounts } from '../lib/tierSplit'
+import { officialCounts, sdkActiveLine, sdkCounts, splitByTier } from '../lib/tierSplit'
 
 interface DashboardIntegration {
   id: string
@@ -107,9 +107,9 @@ export default function Dashboard({ intgs }: DashboardProps) {
   // F2: presentation split only — `available`/`pct` above still feed the
   // reward breakdown from the full list, exactly as before.
   const { official: officialIntgs, sdk: sdkIntgs } = splitByTier(intgs)
-  const officialCounts = tierCounts(officialIntgs)
-  const sdkCounts = tierCounts(sdkIntgs)
-  const sdkLine = sdkActiveLine(sdkCounts.activeCount)
+  const official = officialCounts(intgs)
+  const sdk = sdkCounts(intgs)
+  const sdkLine = sdkActiveLine(sdk.activeCount)
   const slotHits = rewards.slots.filter((s) => s.done).length
   const estimated = summary ? summary.estimated_daily.toFixed(2) : '0.00'
   const rewardToken = summary ? summary.reward_token_name : '—'
@@ -163,7 +163,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
         <StatCard
           Icon={Puzzle}
           label="Active Integrations"
-          value={`${officialCounts.activeCount} / ${officialCounts.availableTotal}`}
+          value={`${official.activeCount} / ${official.availableTotal}`}
           sub={`${pct}% reward proportion`}
           sub2={sdkLine ?? undefined}
           accent="var(--teal)"
@@ -184,7 +184,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
               <Lbl>Official Partners</Lbl>
               <TierBadge kind="official" />
               <span style={{ fontFamily: 'var(--fm)', fontSize: 11, color: 'var(--t2)' }}>
-                {officialCounts.activeCount}/{officialCounts.availableTotal} active
+                {official.activeCount}/{official.availableTotal} active
               </span>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(185px,1fr))', gap: 8 }}>
@@ -200,7 +200,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
                 <Lbl>Community / SDK</Lbl>
                 <TierBadge kind="experimental" />
                 <span style={{ fontFamily: 'var(--fm)', fontSize: 11, color: 'var(--t2)' }}>
-                  {sdkCounts.activeCount}/{sdkCounts.availableTotal} active
+                  {sdk.activeCount}/{sdk.availableTotal} active
                 </span>
               </div>
               <div

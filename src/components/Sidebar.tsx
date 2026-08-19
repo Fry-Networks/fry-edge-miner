@@ -23,8 +23,11 @@ const NAV: { id: NavPage; label: string; Icon: LucideIcon }[] = [
 interface SidebarProps {
   page: NavPage
   onNav: (id: NavPage) => void
+  /** Official partners only — matches the Dashboard headline stat. */
   activeCount: number
   totalCount: number
+  /** Community tier line, or null when nothing community is running. */
+  sdkLine?: string | null
   hasUnhealthy?: boolean
   deviceName?: string
   minerKey?: string
@@ -36,7 +39,7 @@ function truncateMinerKey(key: string): string {
   return `FEM-${body.slice(0, 4).toLowerCase()}…${body.slice(-4).toLowerCase()}`
 }
 
-export default function Sidebar({ page, onNav, activeCount, totalCount, hasUnhealthy, deviceName = 'FEM Device', minerKey }: SidebarProps) {
+export default function Sidebar({ page, onNav, activeCount, totalCount, sdkLine, hasUnhealthy, deviceName = 'FEM Device', minerKey }: SidebarProps) {
   const minerKeyDisplay = truncateMinerKey(minerKey ?? '')
   return (
     <div
@@ -98,6 +101,11 @@ export default function Sidebar({ page, onNav, activeCount, totalCount, hasUnhea
             <Dot status={activeCount === 0 ? 'stopped' : hasUnhealthy ? 'warn' : 'run'} size={5} />
             <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: hasUnhealthy ? 'var(--amb)' : 'var(--teal)' }}>{activeFraction(activeCount, totalCount)} active</span>
           </div>
+          {sdkLine && (
+            <div style={{ fontFamily: 'var(--fm)', fontSize: 9, color: 'var(--amb)', marginTop: 4 }}>
+              {sdkLine}
+            </div>
+          )}
         </div>
       </div>
       <nav style={{ flex: 1, padding: '6px 0' }}>

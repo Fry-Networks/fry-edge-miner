@@ -9,7 +9,7 @@ import SettingsPage from './pages/SettingsPage'
 import Updates from './pages/Updates'
 import Wizard from './wizard/Wizard'
 import { useIntegrations } from './hooks/useIntegrations'
-import { categoryCounts } from './lib/availability'
+import { officialCounts, sdkActiveLine, sdkCounts } from './lib/tierSplit'
 import { deriveConnectivity } from './lib/connectivity'
 import { useDevice } from './hooks/useDevice'
 import { makeName } from './lib/names'
@@ -136,7 +136,11 @@ function IntegrationsErrorCard({ error, onRetry }: { error: string; onRetry: () 
 function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceName: string; minerKey?: string; deregister: () => Promise<void>; deviceError: string | null }) {
   const [page, setPage] = useState<NavPage>('dashboard')
   const { integrations, toggle, forceReinstall, error, system, dockerProgress, refetch } = useIntegrations()
-  const activeCount = integrations.filter((i) => i.enabled).length
+  // Official partners only, from the same helper the Dashboard headline uses —
+  // deriving these two independently is how the badge came to read N/10 while
+  // the Dashboard read N/5.
+  const official = officialCounts(integrations)
+  const sdkLine = sdkActiveLine(sdkCounts(integrations).activeCount)
   const hasUnhealthy = integrations.some((i) => i.enabled && !i.healthy)
   // Badge reflects reachability of the Fry backend only. Docker state is a
   // local prerequisite surfaced via the TopBar Docker chip + per-card errors,
@@ -158,7 +162,7 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
         fontFamily: 'var(--fb)'
       }}
     >
-      <Sidebar page={page} onNav={setPage} activeCount={activeCount} totalCount={categoryCounts(integrations).availableTotal} hasUnhealthy={hasUnhealthy} deviceName={deviceName} minerKey={minerKey} />
+      <Sidebar page={page} onNav={setPage} activeCount={official.activeCount} totalCount={official.availableTotal} sdkLine={sdkLine} hasUnhealthy={hasUnhealthy} deviceName={deviceName} minerKey={minerKey} />
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <TopBar page={page} connectivity={connectivity} docker={dockerChip} />
         {error && <ErrorBanner error={error} />}
