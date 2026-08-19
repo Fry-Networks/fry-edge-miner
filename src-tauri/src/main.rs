@@ -249,6 +249,21 @@ fn main() {
                         let reg = restart_registry.lock().unwrap();
                         match reg.get(&id_restart) {
                             Some(integration) => {
+                                // B6: an integration whose requirements this
+                                // machine cannot currently meet — an Algorand
+                                // wallet that has not been provisioned yet, a
+                                // disk that is too small — fails start() every
+                                // single time. Restarting it burns the budget
+                                // and re-raises an error the user has already
+                                // been shown as `unavailable_reason`.
+                                if let Err(reason) = integration.check_requirements() {
+                                    tracing::info!(
+                                        id = id_restart.as_str(),
+                                        reason = %reason,
+                                        "Restart skipped — integration is unavailable on this machine"
+                                    );
+                                    return false;
+                                }
                                 let _ = tokio::task::block_in_place(|| {
                                     tokio::runtime::Handle::current()
                                         .block_on(integration.stop())
@@ -386,9 +401,14 @@ fn main() {
             {
                 let updater_config = config_store.clone();
                 let updater_app = app.handle().clone();
+                // B7: the updater needs the supervisor so it can release the
+                // partner binaries (frynode.exe et al) before overwriting the
+                // install tree.
+                let updater_supervisor = supervisor.clone();
                 tauri::async_runtime::spawn(updater_auto::spawn_auto_updater(
                     updater_app,
                     updater_config,
+                    updater_supervisor,
                 ));
             }
 

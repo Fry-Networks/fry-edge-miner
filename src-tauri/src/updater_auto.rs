@@ -1,9 +1,62 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tauri_plugin_updater::UpdaterExt;
 use tracing::{info, warn};
 
 use crate::config::store::ConfigStore;
+use crate::supervisor::{ProcessInfo, Supervisor};
+
+/// Settle time after the last partner process exits, before the updater
+/// replaces the install tree. Process exit and Windows releasing the file
+/// handle are not the same instant.
+const PARTNER_STOP_SETTLE: Duration = Duration::from_secs(2);
+
+/// Which supervisor-managed processes must be stopped before the Tauri updater
+/// replaces the application files.
+///
+/// B7: the updater overwrites the whole install directory, and the partner
+/// binaries are launched FROM it — fryvpn resolves frynode.exe as
+/// `…\Fry Edge Miner\resources\frynode.exe`. A running child keeps that file
+/// open, so the install failed with a locked-file error and the device sat on
+/// the old version until someone restarted it by hand. Every *running* managed
+/// process is in the plan: they all come out of the same tree, and stopping a
+/// process that already exited is not worth a special case.
+pub fn partner_stop_plan(processes: &[ProcessInfo]) -> Vec<String> {
+    processes
+        .iter()
+        .filter(|p| p.running)
+        .map(|p| p.integration_id.clone())
+        .collect()
+}
+
+/// Stop the partner processes in the plan. Returns the ids actually asked to
+/// stop.
+///
+/// Best-effort by design: `Supervisor::stop_integration` already blocks up to
+/// 10s per process waiting for it to exit, and a failure here is logged and
+/// then ignored — refusing to update at all is worse than risking the locked
+/// file the update might hit anyway (which is the pre-B7 behaviour).
+fn stop_partner_processes(supervisor: &Arc<Mutex<Supervisor>>) -> Vec<String> {
+    let mut sup = match supervisor.lock() {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(error = %e, "Supervisor lock poisoned — installing without stopping partners");
+            return Vec::new();
+        }
+    };
+    let plan = partner_stop_plan(&sup.list_processes());
+    for id in &plan {
+        match sup.stop_integration(id) {
+            Ok(()) => info!(integration = id.as_str(), "Stopped for update"),
+            Err(e) => warn!(
+                integration = id.as_str(),
+                error = %e,
+                "Could not stop before update — continuing"
+            ),
+        }
+    }
+    plan
+}
 
 /// Background auto-updater task. Spawned once at app startup.
 /// - Initial delay: 3 minutes after boot
@@ -11,7 +64,11 @@ use crate::config::store::ConfigStore;
 /// - Respects config.auto_update flag (checked each cycle)
 /// - Per-device jitter on install (0–10 min) prevents fleet restarts simultaneously
 /// - Errors logged as warnings, never crash, never block boot
-pub async fn spawn_auto_updater(app: tauri::AppHandle, config: Arc<ConfigStore>) {
+pub async fn spawn_auto_updater(
+    app: tauri::AppHandle,
+    config: Arc<ConfigStore>,
+    supervisor: Arc<Mutex<Supervisor>>,
+) {
     // Initial delay: 3 minutes (allow UI to stabilize)
     tokio::time::sleep(Duration::from_secs(180)).await;
 
@@ -30,7 +87,7 @@ pub async fn spawn_auto_updater(app: tauri::AppHandle, config: Arc<ConfigStore>)
         }
 
         // Perform the update check
-        match check_and_install_update(&app, &config).await {
+        match check_and_install_update(&app, &config, &supervisor).await {
             Ok(action) => {
                 if let Some(action) = action {
                     info!(action = %action, "Auto-update action completed");
@@ -49,6 +106,7 @@ pub async fn spawn_auto_updater(app: tauri::AppHandle, config: Arc<ConfigStore>)
 async fn check_and_install_update(
     app: &tauri::AppHandle,
     config: &Arc<ConfigStore>,
+    supervisor: &Arc<Mutex<Supervisor>>,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     // Build updater with reasonable timeout
     let updater = app
@@ -79,6 +137,18 @@ async fn check_and_install_update(
         latest = %update.version,
         "Update available — downloading and installing"
     );
+
+    // B7: release the install tree before the updater rewrites it. The
+    // partners are restarted by the startup recovery pass after the restart
+    // below, so nothing here needs to put them back.
+    let stopped = stop_partner_processes(supervisor);
+    if !stopped.is_empty() {
+        info!(
+            stopped = stopped.join(",").as_str(),
+            "Stopped partner processes before update install"
+        );
+        tokio::time::sleep(PARTNER_STOP_SETTLE).await;
+    }
 
     // Download and install
     match update
@@ -199,5 +269,59 @@ mod tests {
 
     fn should_auto_install(current: &str, latest: &str, auto_update: bool) -> bool {
         auto_update && current != latest
+    }
+}
+
+/// B7: which partner processes get released before the updater rewrites the
+/// install tree.
+#[cfg(test)]
+mod partner_stop_tests {
+    use super::*;
+
+    fn proc(id: &str, running: bool) -> ProcessInfo {
+        ProcessInfo {
+            integration_id: id.to_string(),
+            pid: 4242,
+            running,
+        }
+    }
+
+    #[test]
+    fn the_fryvpn_binary_is_stopped_before_an_install() {
+        // frynode.exe is the file the update actually failed on: it lives in
+        // the install tree the updater replaces.
+        let plan = partner_stop_plan(&[proc("fryvpn", true)]);
+        assert_eq!(plan, vec!["fryvpn".to_string()]);
+    }
+
+    #[test]
+    fn every_running_managed_process_is_stopped() {
+        let plan = partner_stop_plan(&[
+            proc("fryvpn", true),
+            proc("iagon", true),
+            proc("mysterium", true),
+        ]);
+        assert_eq!(plan.len(), 3);
+        assert!(plan.contains(&"iagon".to_string()));
+    }
+
+    #[test]
+    fn processes_that_already_exited_are_left_alone() {
+        let plan = partner_stop_plan(&[proc("fryvpn", false), proc("iagon", true)]);
+        assert_eq!(plan, vec!["iagon".to_string()]);
+    }
+
+    #[test]
+    fn an_install_with_nothing_running_stops_nothing() {
+        assert!(partner_stop_plan(&[]).is_empty());
+        assert!(partner_stop_plan(&[proc("fryvpn", false)]).is_empty());
+    }
+
+    #[test]
+    fn the_settle_wait_is_bounded_and_short() {
+        // Long enough for Windows to release the handle, short enough that it
+        // cannot stall the 6-hour check loop in any meaningful way.
+        assert!(PARTNER_STOP_SETTLE >= Duration::from_secs(1));
+        assert!(PARTNER_STOP_SETTLE <= Duration::from_secs(10));
     }
 }
