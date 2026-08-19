@@ -3,6 +3,7 @@ use super::{HealthStatus, Integration, PocGateData};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -11,6 +12,61 @@ use crate::api::types::CredentialInfo;
 use crate::config::store::ConfigStore;
 
 const HEALTH_URL: &str = "http://localhost:8181/health";
+
+/// B6: what the user is told when hardwareapi has no Algorand wallet for this
+/// device yet. A missing wallet is a provisioning state, not a fault — the old
+/// "Device has no Algorand wallet — re-register or contact support" read as a
+/// crash and gave no first step.
+pub const WALLET_NOT_PROVISIONED: &str =
+    "Device wallet not provisioned yet — open Settings and re-register this device, or contact support.";
+
+/// Sticky, process-wide record of the wallet condition.
+///
+/// `check_requirements()` is synchronous — the PoC reporter calls it on every
+/// tick — so it can never do the credentials lookup itself. This flag is how
+/// the async discovery in `install()`/`start()` reaches it. Routing the
+/// condition through `unavailable_reason` instead of a start error is the
+/// whole point: the card goes inert with a sentence the user can act on, the
+/// toggle refuses up front, and the health loop stops restarting something
+/// that provably cannot start yet.
+static WALLET_MISSING: AtomicBool = AtomicBool::new(false);
+
+/// Classify a credentials lookup into the wallet address or the user-facing
+/// reason the integration cannot run yet. A blank address counts as missing:
+/// hardwareapi returns `""` for a device whose wallet row exists but has not
+/// been funded with an address.
+pub fn classify_wallet(algo_address: Option<&str>) -> Result<String, &'static str> {
+    match algo_address {
+        Some(addr) if !addr.trim().is_empty() => Ok(addr.trim().to_string()),
+        _ => Err(WALLET_NOT_PROVISIONED),
+    }
+}
+
+/// Record the observed wallet state. Logs only on a transition, so a device
+/// waiting on provisioning does not write a line every health tick.
+fn record_wallet_state(provisioned: bool) {
+    let was_missing = WALLET_MISSING.swap(!provisioned, Ordering::Relaxed);
+    match (provisioned, was_missing) {
+        (false, false) => info!("Diiisco unavailable: {}", WALLET_NOT_PROVISIONED),
+        (true, true) => info!("Diiisco: device wallet is now provisioned"),
+        _ => {}
+    }
+}
+
+/// True while the device is known to have no Algorand wallet.
+pub fn wallet_missing() -> bool {
+    WALLET_MISSING.load(Ordering::Relaxed)
+}
+
+/// The `check_requirements` answer for a given wallet state. Split out so it
+/// can be tested without constructing a `DiiiscoIntegration`, which needs a
+/// live `ApiClient` and `ConfigStore`.
+pub fn requirements_for(wallet_is_missing: bool) -> Result<(), String> {
+    if wallet_is_missing {
+        return Err(WALLET_NOT_PROVISIONED.to_string());
+    }
+    Ok(())
+}
 /// Diiisco bearer token: runtime env var → compile-time option_env! → empty default.
 fn diiisco_bearer_token() -> String {
     std::env::var("DIIISCO_BEARER_TOKEN")
@@ -120,9 +176,16 @@ impl Integration for DiiiscoIntegration {
         })?;
         let creds = fetch_credentials_with_retry(&self.api_client, miner_key).await
             .map_err(|e| anyhow::anyhow!("Failed to fetch credentials: {}", e))?;
-        let algo_address = creds.algo_address.ok_or_else(|| {
-            anyhow::anyhow!("Device has no Algorand wallet — re-register or contact support")
-        })?;
+        let algo_address = match classify_wallet(creds.algo_address.as_deref()) {
+            Ok(addr) => {
+                record_wallet_state(true);
+                addr
+            }
+            Err(reason) => {
+                record_wallet_state(false);
+                anyhow::bail!("{}", reason);
+            }
+        };
         let algo_mnemonic = creds.algo_mnemonic.ok_or_else(|| {
             anyhow::anyhow!("Device Algorand mnemonic unavailable — contact support")
         })?;
@@ -183,9 +246,16 @@ impl Integration for DiiiscoIntegration {
         })?;
         let creds = fetch_credentials_with_retry(&self.api_client, miner_key).await
             .map_err(|e| anyhow::anyhow!("Failed to fetch credentials: {}", e))?;
-        let algo_address = creds.algo_address.ok_or_else(|| {
-            anyhow::anyhow!("Device has no Algorand wallet — re-register or contact support")
-        })?;
+        let algo_address = match classify_wallet(creds.algo_address.as_deref()) {
+            Ok(addr) => {
+                record_wallet_state(true);
+                addr
+            }
+            Err(reason) => {
+                record_wallet_state(false);
+                anyhow::bail!("{}", reason);
+            }
+        };
         let algo_mnemonic = creds.algo_mnemonic.ok_or_else(|| {
             anyhow::anyhow!("Device Algorand mnemonic unavailable — contact support")
         })?;
@@ -337,6 +407,15 @@ impl Integration for DiiiscoIntegration {
     fn requires_docker(&self) -> bool {
         true
     }
+
+    /// B6: a device whose wallet has not been provisioned yet cannot run
+    /// Diiisco, and saying so here is what makes the card inert (with the
+    /// reason) instead of leaving the user staring at a red start error the
+    /// health loop keeps re-triggering. Self-clearing: the next successful
+    /// credentials lookup resets the flag.
+    fn check_requirements(&self) -> Result<(), String> {
+        requirements_for(wallet_missing())
+    }
 }
 
 #[cfg(test)]
@@ -371,5 +450,65 @@ mod tests {
     fn ollama_service_and_healthcheck_survived_the_edit() {
         assert!(COMPOSE.contains("container_name: diiisco-ollama"));
         assert!(COMPOSE.contains(r#"["CMD", "ollama", "list"]"#));
+    }
+}
+
+/// B6: an unprovisioned device wallet is a state to explain, not a crash.
+#[cfg(test)]
+mod wallet_condition_tests {
+    use super::*;
+
+    #[test]
+    fn a_real_address_is_accepted_and_trimmed() {
+        let addr = "TESTWALLETADDRESSTESTWALLETADDRESSTESTWALLETADDRESSTESTWA";
+        assert_eq!(classify_wallet(Some(addr)).unwrap(), addr);
+        assert_eq!(classify_wallet(Some("  ABC  ")).unwrap(), "ABC");
+    }
+
+    #[test]
+    fn a_missing_address_maps_to_the_provisioning_message() {
+        assert_eq!(classify_wallet(None), Err(WALLET_NOT_PROVISIONED));
+    }
+
+    #[test]
+    fn a_blank_address_counts_as_not_provisioned() {
+        // hardwareapi returns "" for a device row created before its wallet.
+        assert_eq!(classify_wallet(Some("")), Err(WALLET_NOT_PROVISIONED));
+        assert_eq!(classify_wallet(Some("   ")), Err(WALLET_NOT_PROVISIONED));
+    }
+
+    #[test]
+    fn the_message_tells_the_user_where_to_go_first() {
+        // The old text ("re-register or contact support") named no screen.
+        assert!(WALLET_NOT_PROVISIONED.contains("Settings"));
+        assert!(WALLET_NOT_PROVISIONED.contains("re-register"));
+        // It must not read like a failure — that is what drove the support load.
+        let lower = WALLET_NOT_PROVISIONED.to_lowercase();
+        assert!(!lower.contains("failed"));
+        assert!(!lower.contains("error"));
+    }
+
+    #[test]
+    fn the_requirement_gate_reports_exactly_the_same_reason() {
+        // Whatever the user sees as unavailable_reason has to be this string,
+        // or the card and the toggle rejection disagree.
+        assert_eq!(requirements_for(true), Err(WALLET_NOT_PROVISIONED.to_string()));
+        assert_eq!(requirements_for(false), Ok(()));
+    }
+
+    #[test]
+    fn the_observed_state_drives_the_gate_and_clears_itself() {
+        // One test owns the process-wide flag so parallel siblings cannot
+        // observe it mid-transition.
+        record_wallet_state(false);
+        assert!(wallet_missing());
+        assert_eq!(
+            requirements_for(wallet_missing()),
+            Err(WALLET_NOT_PROVISIONED.to_string())
+        );
+
+        record_wallet_state(true);
+        assert!(!wallet_missing(), "a provisioned wallet must clear the flag");
+        assert_eq!(requirements_for(wallet_missing()), Ok(()));
     }
 }
