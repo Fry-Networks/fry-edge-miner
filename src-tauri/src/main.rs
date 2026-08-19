@@ -227,11 +227,22 @@ fn main() {
                     let last_health_check = last_health.clone();
 
                     let check_fn = move || {
-                        let reg = check_registry.lock().unwrap();
-                        let health = if !reg.is_enabled(&id_check) {
+                        // B1: clone the handle out and DROP the registry guard
+                        // before blocking. Holding this std::sync::Mutex across
+                        // block_in_place + block_on meant one slow probe (aem
+                        // shells out to tasklist) blocked get_integrations,
+                        // get_reward_summary and every other integration's
+                        // health loop — 10 integrations on a 30s tick held it
+                        // near-continuously. Same Arc-clone idiom as
+                        // commands/integration.rs.
+                        let (enabled, integration) = {
+                            let reg = check_registry.lock().unwrap();
+                            (reg.is_enabled(&id_check), reg.get(&id_check))
+                        };
+                        let health = if !enabled {
                             HealthStatus::Stopped
                         } else {
-                            match reg.get(&id_check) {
+                            match integration {
                                 Some(integration) => tokio::task::block_in_place(|| {
                                     tokio::runtime::Handle::current()
                                         .block_on(integration.health_check())
@@ -246,8 +257,13 @@ fn main() {
                     };
 
                     let restart_fn = move || {
-                        let reg = restart_registry.lock().unwrap();
-                        match reg.get(&id_restart) {
+                        // B1: guard dropped before the blocking stop/start, for
+                        // the same reason as check_fn above.
+                        let integration = {
+                            let reg = restart_registry.lock().unwrap();
+                            reg.get(&id_restart)
+                        };
+                        match integration {
                             Some(integration) => {
                                 // B6: an integration whose requirements this
                                 // machine cannot currently meet — an Algorand
