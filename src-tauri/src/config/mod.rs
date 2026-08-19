@@ -2,6 +2,9 @@ pub mod store;
 pub mod miner_key;
 pub mod wallet;
 
+#[cfg(test)]
+mod preservation_tests;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -33,6 +36,15 @@ pub struct FemConfig {
     pub notifications: bool,
     #[serde(default)]
     pub myst_lan_override: bool,
+    /// B3: every key in fem_config.json this build does not recognise.
+    ///
+    /// `ConfigStore` saves by serializing this whole struct over the file, so
+    /// without this catch-all anything serde skipped on load was destroyed the
+    /// next time any setting changed. Named fields are matched first, so
+    /// `api_token` (skip_serializing) is still consumed by its own field and
+    /// can never be resurrected into the saved file through here.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl FemConfig {
@@ -74,6 +86,7 @@ impl Default for FemConfig {
             auto_update: true,
             notifications: true,
             myst_lan_override: false,
+            extra: serde_json::Map::new(),
         }
     }
 }
