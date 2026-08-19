@@ -6,10 +6,13 @@ interface StatCardProps {
   label: string
   value: string
   sub?: string
+  /** Secondary line under `sub`, for a count that is a bonus rather than part
+   *  of the headline figure (F2: community/SDK integrations). */
+  sub2?: string
   accent?: string
 }
 
-export default function StatCard({ Icon, label, value, sub, accent = 'var(--teal)' }: StatCardProps) {
+export default function StatCard({ Icon, label, value, sub, sub2, accent = 'var(--teal)' }: StatCardProps) {
   return (
     <div
       style={{
@@ -38,6 +41,7 @@ export default function StatCard({ Icon, label, value, sub, accent = 'var(--teal
         {value}
       </div>
       {sub && <div style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t2)', marginTop: 5 }}>{sub}</div>}
+      {sub2 && <div style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--amb)', marginTop: 2 }}>{sub2}</div>}
     </div>
   )
 }

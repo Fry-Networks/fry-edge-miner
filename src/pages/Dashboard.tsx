@@ -1,14 +1,18 @@
-import { Activity, Coins, Puzzle, type LucideIcon } from 'lucide-react'
+import { Activity, Coins, MessageCircle, Puzzle, type LucideIcon } from 'lucide-react'
 import Dot from '../components/primitives/Dot'
 import EmptyState from '../components/primitives/EmptyState'
 import Lbl from '../components/primitives/Lbl'
 import PoCGrid from '../components/PoCGrid'
 import StatCard from '../components/StatCard'
+import TierBadge from '../components/primitives/TierBadge'
 import Divider from '../components/primitives/Divider'
 import { useRewards } from '../hooks/useRewards'
 import { useReporting } from '../hooks/useReporting'
 import { categoryCounts } from '../lib/availability'
 import { activeFraction, proportionPct } from '../lib/integrationCount'
+import type { IntegrationTier } from '../lib/integrationMeta'
+import { SDK_REPORT_LINE } from '../lib/support'
+import { sdkActiveLine, splitByTier, tierCounts } from '../lib/tierSplit'
 
 interface DashboardIntegration {
   id: string
@@ -17,10 +21,72 @@ interface DashboardIntegration {
   col: string
   enabled: boolean
   healthy: boolean
+  tier: IntegrationTier
+  unavailable_reason?: string | null
 }
 
 interface DashboardProps {
   intgs: DashboardIntegration[]
+}
+
+/**
+ * One integration tile. `compact` shrinks it for the community section: the
+ * hierarchy between the two tiers is carried by density, not by a second
+ * accent colour, so the official partners stay the thing you read first.
+ */
+function MiniCard({ intg, compact }: { intg: DashboardIntegration; compact: boolean }) {
+  const { name, Icon, col, enabled, healthy } = intg
+  const st = !enabled ? 'stopped' : healthy ? 'run' : 'err'
+  const box = compact ? 24 : 30
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: compact ? 7 : 9,
+        padding: compact ? '7px 10px' : '10px 12px',
+        background: compact ? 'var(--s0)' : 'var(--s1)',
+        border: '1px solid var(--b0)',
+        borderRadius: 'var(--rad)',
+        opacity: enabled ? 1 : 0.5
+      }}
+    >
+      <div
+        style={{
+          width: box,
+          height: box,
+          borderRadius: 'var(--radsm)',
+          background: `${col}12`,
+          border: `1px solid ${col}22`,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0
+        }}
+      >
+        <Icon size={compact ? 12 : 14} color={col} />
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            fontFamily: 'var(--fh)',
+            fontWeight: 600,
+            fontSize: compact ? 11 : 12,
+            color: 'var(--txt)',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis'
+          }}
+        >
+          {name}
+        </div>
+        <div style={{ fontFamily: 'var(--fb)', fontSize: compact ? 10 : 11, color: 'var(--t2)' }}>
+          {!enabled ? 'Disabled' : healthy ? 'Running' : 'Unhealthy'}
+        </div>
+      </div>
+      <Dot status={st} />
+    </div>
+  )
 }
 
 export default function Dashboard({ intgs }: DashboardProps) {
@@ -38,6 +104,12 @@ export default function Dashboard({ intgs }: DashboardProps) {
   // Count against what this machine can run, matching the PoC denominator.
   const available = categoryCounts(intgs).availableTotal
   const pct = String(proportionPct(active.length, available))
+  // F2: presentation split only — `available`/`pct` above still feed the
+  // reward breakdown from the full list, exactly as before.
+  const { official: officialIntgs, sdk: sdkIntgs } = splitByTier(intgs)
+  const officialCounts = tierCounts(officialIntgs)
+  const sdkCounts = tierCounts(sdkIntgs)
+  const sdkLine = sdkActiveLine(sdkCounts.activeCount)
   const slotHits = rewards.slots.filter((s) => s.done).length
   const estimated = summary ? summary.estimated_daily.toFixed(2) : '0.00'
   const rewardToken = summary ? summary.reward_token_name : '—'
@@ -91,62 +163,68 @@ export default function Dashboard({ intgs }: DashboardProps) {
         <StatCard
           Icon={Puzzle}
           label="Active Integrations"
-          value={`${active.length} / ${available}`}
+          value={`${officialCounts.activeCount} / ${officialCounts.availableTotal}`}
           sub={`${pct}% reward proportion`}
+          sub2={sdkLine ?? undefined}
           accent="var(--teal)"
         />
         <StatCard Icon={Coins} label="Daily Estimate" value={estimated} sub={`${rewardToken} (ASA ${rewardAsa})`} accent="var(--amb)" />
         <StatCard Icon={Activity} label="PoC Score" value={(slotHits / 144).toFixed(3)} sub={`${slotHits} / 144 slot hits today`} accent="var(--red)" />
       </div>
 
-      <div>
-        <Lbl sx={{ marginBottom: 9 }}>Integration Status</Lbl>
-        {intgs.length === 0 ? (
+      {intgs.length === 0 ? (
+        <div>
+          <Lbl sx={{ marginBottom: 9 }}>Integration Status</Lbl>
           <EmptyState message="No integration data" />
-        ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(185px,1fr))', gap: 8 }}>
-            {intgs.map(({ id, name, Icon, col, enabled, healthy }) => {
-              const st = !enabled ? 'stopped' : healthy ? 'run' : 'err'
-              return (
-                <div
-                  key={id}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 9,
-                    padding: '10px 12px',
-                    background: 'var(--s1)',
-                    border: '1px solid var(--b0)',
-                    borderRadius: 'var(--rad)',
-                    opacity: enabled ? 1 : 0.5
-                  }}
-                >
-                  <div
-                    style={{
-                      width: 30,
-                      height: 30,
-                      borderRadius: 'var(--radsm)',
-                      background: `${col}12`,
-                      border: `1px solid ${col}22`,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      flexShrink: 0
-                    }}
-                  >
-                    <Icon size={14} color={col} />
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontFamily: 'var(--fh)', fontWeight: 600, fontSize: 12, color: 'var(--txt)' }}>{name}</div>
-                    <div style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t2)' }}>{!enabled ? 'Disabled' : healthy ? 'Running' : 'Unhealthy'}</div>
-                  </div>
-                  <Dot status={st} />
-                </div>
-              )
-            })}
+        </div>
+      ) : (
+        <>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 9 }}>
+              <Lbl>Official Partners</Lbl>
+              <TierBadge kind="official" />
+              <span style={{ fontFamily: 'var(--fm)', fontSize: 11, color: 'var(--t2)' }}>
+                {officialCounts.activeCount}/{officialCounts.availableTotal} active
+              </span>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(185px,1fr))', gap: 8 }}>
+              {officialIntgs.map((i) => (
+                <MiniCard key={i.id} intg={i} compact={false} />
+              ))}
+            </div>
           </div>
-        )}
-      </div>
+
+          {sdkIntgs.length > 0 && (
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 7, flexWrap: 'wrap' }}>
+                <Lbl>Community / SDK</Lbl>
+                <TierBadge kind="experimental" />
+                <span style={{ fontFamily: 'var(--fm)', fontSize: 11, color: 'var(--t2)' }}>
+                  {sdkCounts.activeCount}/{sdkCounts.availableTotal} active
+                </span>
+              </div>
+              <div
+                style={{
+                  fontFamily: 'var(--fb)',
+                  fontSize: 11,
+                  color: 'var(--t1)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  marginBottom: 8
+                }}
+              >
+                <MessageCircle size={11} style={{ flexShrink: 0 }} /> {SDK_REPORT_LINE}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(160px,1fr))', gap: 7 }}>
+                {sdkIntgs.map((i) => (
+                  <MiniCard key={i.id} intg={i} compact />
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
         <div
