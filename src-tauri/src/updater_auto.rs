@@ -4,7 +4,13 @@ use tauri_plugin_updater::UpdaterExt;
 use tracing::{info, warn};
 
 use crate::config::store::ConfigStore;
+use crate::supervisor::platform::BoundedOutput;
 use crate::supervisor::{ProcessInfo, Supervisor};
+
+/// Partner binaries that can outlive their supervisor entry — a crash, or a
+/// process left by a previous app run — and still hold the install tree open
+/// after every tracked process has been stopped.
+const ORPHAN_IMAGES: [&str; 1] = ["frynode.exe"];
 
 /// Settle time after the last partner process exits, before the updater
 /// replaces the install tree. Process exit and Windows releasing the file
@@ -56,6 +62,24 @@ fn stop_partner_processes(supervisor: &Arc<Mutex<Supervisor>>) -> Vec<String> {
         }
     }
     plan
+}
+
+/// Kill partner binaries the supervisor no longer tracks, so a crashed or
+/// orphaned process cannot keep the install tree locked.
+///
+/// `taskkill` exits non-zero when nothing matched the image name, which is the
+/// normal case and is success here — the precedent is `aem.rs`'s stop path.
+fn kill_orphan_partners() {
+    for image in ORPHAN_IMAGES {
+        match crate::supervisor::platform::command("taskkill")
+            .args(["/IM", image, "/T", "/F"])
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+        {
+            Ok(o) if o.status.success() => info!(image, "Killed orphaned partner process"),
+            Ok(_) => info!(image, "No orphaned partner process was running"),
+            Err(e) => warn!(image, error = %e, "Orphan cleanup could not run — continuing"),
+        }
+    }
 }
 
 /// Background auto-updater task. Spawned once at app startup.
@@ -141,7 +165,10 @@ async fn check_and_install_update(
     // B7: release the install tree before the updater rewrites it. The
     // partners are restarted by the startup recovery pass after the restart
     // below, so nothing here needs to put them back.
-    let stopped = stop_partner_processes(supervisor);
+    // ManagedProcess::stop blocks up to 10s per process waiting for exit, so
+    // this must not run on an async worker thread directly.
+    let stopped = tokio::task::block_in_place(|| stop_partner_processes(supervisor));
+    tokio::task::block_in_place(kill_orphan_partners);
     if !stopped.is_empty() {
         info!(
             stopped = stopped.join(",").as_str(),
@@ -315,6 +342,14 @@ mod partner_stop_tests {
     fn an_install_with_nothing_running_stops_nothing() {
         assert!(partner_stop_plan(&[]).is_empty());
         assert!(partner_stop_plan(&[proc("fryvpn", false)]).is_empty());
+    }
+
+    #[test]
+    fn the_orphan_sweep_covers_the_binary_that_holds_the_install_tree() {
+        // fryvpn spawns frynode.exe out of …\Fry Edge Miner\resources\, which
+        // is exactly what the updater overwrites. The sweep itself shells out
+        // to taskkill and is exercised by the release build, not here.
+        assert!(ORPHAN_IMAGES.contains(&"frynode.exe"));
     }
 
     #[test]
