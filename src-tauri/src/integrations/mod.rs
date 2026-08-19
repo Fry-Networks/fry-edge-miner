@@ -65,6 +65,37 @@ pub enum IntegrationTier {
     Sdk,
 }
 
+/// Longest stderr excerpt allowed into a UI error banner.
+const MAX_STDERR_CHARS: usize = 500;
+
+/// The last `n` non-empty lines of a subprocess's stderr, collapsed to one line.
+///
+/// B4: callers used `stderr.lines().last()`, which keeps exactly one line. For
+/// `docker run` that line is the generic usage hint rather than the cause, and
+/// when the output ends in a whitespace-only line it is blank — so the user
+/// got an error message that stopped at the colon. Blank lines are dropped,
+/// the last `n` survivors are joined with " | " to fit the one-line card slot,
+/// and the result is capped on a character boundary so a wall of Docker output
+/// cannot flood the layout. Every call site already logs the untruncated text.
+pub(crate) fn stderr_tail(stderr: &str, n: usize) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return "no error output".to_string();
+    }
+    let start = lines.len().saturating_sub(n);
+    let joined = lines[start..].join(" | ");
+    if joined.chars().count() > MAX_STDERR_CHARS {
+        let head: String = joined.chars().take(MAX_STDERR_CHARS).collect();
+        format!("{}…", head)
+    } else {
+        joined
+    }
+}
+
 /// Tier for a registered integration id. Static by design — the tier is a
 /// commercial fact about the partner, not runtime state. Unknown ids are
 /// `Sdk`: a new integration must be promoted deliberately, never by default.
@@ -266,6 +297,84 @@ impl IntegrationRegistry {
 impl Default for IntegrationRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// B4: what the user is actually told when a partner subprocess fails.
+#[cfg(test)]
+mod stderr_tail_tests {
+    use super::*;
+
+    /// Real `docker run` failure output. The cause is on the FIRST line and
+    /// the last line is Docker's generic usage hint — `lines().last()` handed
+    /// the user the hint and threw the cause away.
+    const RUN_FAILURE: &str = "\
+docker: Error response from daemon: driver failed programming external connectivity on endpoint fem-pawns: port is already allocated.
+See 'docker run --help'.";
+
+    /// A pull failure whose output ends in a whitespace-only progress line.
+    const PULL_FAILURE: &str = "Error response from daemon: manifest unknown\n   \n";
+
+    #[test]
+    fn the_real_cause_survives_instead_of_dockers_usage_hint() {
+        assert_eq!(
+            RUN_FAILURE.lines().last(),
+            Some("See 'docker run --help'."),
+            "fixture must reproduce the bug: the old code showed only this line"
+        );
+        let shown = stderr_tail(RUN_FAILURE, 10);
+        assert!(shown.contains("port is already allocated"), "shown was: {}", shown);
+    }
+
+    #[test]
+    fn a_trailing_whitespace_line_no_longer_blanks_the_message() {
+        assert_eq!(
+            PULL_FAILURE.lines().last(),
+            Some("   "),
+            "fixture must reproduce the bug: the old code showed only whitespace"
+        );
+        assert_eq!(
+            stderr_tail(PULL_FAILURE, 10),
+            "Error response from daemon: manifest unknown"
+        );
+    }
+
+    #[test]
+    fn newlines_become_separators_within_the_requested_tail() {
+        let stderr = "failed to solve\nprocess did not complete\nexit code: 1";
+        assert_eq!(
+            stderr_tail(stderr, 10),
+            "failed to solve | process did not complete | exit code: 1"
+        );
+    }
+
+    #[test]
+    fn only_the_last_n_surviving_lines_are_kept() {
+        let stderr = "one\ntwo\nthree\nfour";
+        assert_eq!(stderr_tail(stderr, 2), "three | four");
+    }
+
+    #[test]
+    fn blank_lines_do_not_consume_the_line_budget() {
+        // The whole point: empties are dropped BEFORE the tail is taken, so a
+        // padded log cannot push the cause out of the window.
+        assert_eq!(stderr_tail("real cause\n\n\n\n", 2), "real cause");
+    }
+
+    #[test]
+    fn entirely_empty_output_says_so_rather_than_showing_nothing() {
+        // The pre-fix message ended in a bare colon; a caller must never be
+        // able to render "Could not download the agent image: ".
+        assert_eq!(stderr_tail("", 10), "no error output");
+        assert_eq!(stderr_tail("\n\n   \n", 10), "no error output");
+    }
+
+    #[test]
+    fn a_wall_of_docker_output_is_capped_on_a_character_boundary() {
+        let huge = "é".repeat(5_000);
+        let shown = stderr_tail(&huge, 10);
+        assert!(shown.ends_with('…'));
+        assert_eq!(shown.chars().count(), MAX_STDERR_CHARS + 1);
     }
 }
 

@@ -31,41 +31,6 @@ const PAWNS_CONTAINER: &str = "fem-pawns";
 /// Version of the disclosure wording below; recorded with every consent entry.
 const CONSENT_WORDING_VERSION: &str = "1";
 
-/// The one Docker failure a device owner can fix themselves, said plainly.
-/// Distinct from the pull/run failures below, which are partner-side.
-pub const DOCKER_UNREACHABLE: &str =
-    "Docker daemon is not reachable — start Docker Desktop and retry.";
-
-/// Longest stderr excerpt allowed into a UI error banner.
-const MAX_STDERR_CHARS: usize = 500;
-
-/// Collapse a subprocess's stderr into one line the error banner can show.
-///
-/// B4: `stderr.lines().last()` used to be all that survived. For `docker pull`
-/// the last line is routinely blank or a progress fragment, so the actual
-/// cause ("manifest unknown", "no basic auth credentials") was thrown away and
-/// the user got `Could not download the Pawns.app agent image: ` with nothing
-/// after the colon. Keep every non-empty line, newlines collapsed to " | ", and
-/// cap the length so a wall of Docker output cannot flood the layout — the
-/// full text is already in the log file via the `warn!` above each call site.
-pub fn format_stderr(stderr: &str) -> String {
-    let joined = stderr
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect::<Vec<_>>()
-        .join(" | ");
-    if joined.is_empty() {
-        return "no error output".to_string();
-    }
-    if joined.chars().count() > MAX_STDERR_CHARS {
-        let head: String = joined.chars().take(MAX_STDERR_CHARS).collect();
-        format!("{}…", head)
-    } else {
-        joined
-    }
-}
-
 /// Exact wording the device owner must be shown before sharing starts
 /// (CLI Addendum §5.4 (a)–(e)). Surfaced through the integration's health
 /// message until consent is given, and stored with each consent record.
@@ -330,13 +295,6 @@ impl Integration for PawnsIntegration {
 
     async fn install(&self) -> Result<()> {
         super::docker_manager::ensure_docker().await?;
-        // ensure_docker may have just started the engine (or returned Ok from a
-        // probe seconds old). Confirm the daemon is actually answering before a
-        // multi-minute pull, so a stopped engine reads as itself instead of as
-        // an opaque pull failure.
-        if !Self::docker_available() {
-            anyhow::bail!(DOCKER_UNREACHABLE);
-        }
         tokio::fs::create_dir_all(Self::partner_dir()).await?;
 
         info!(image = PAWNS_IMAGE, "Pulling Pawns.app CLI agent image");
@@ -348,7 +306,7 @@ impl Integration for PawnsIntegration {
             warn!(stderr = %stderr, "docker pull failed for Pawns.app agent");
             anyhow::bail!(
                 "Could not download the Pawns.app agent image: {}",
-                format_stderr(&stderr)
+                super::stderr_tail(&stderr, 10)
             );
         }
 
@@ -378,9 +336,6 @@ impl Integration for PawnsIntegration {
         };
 
         super::docker_manager::ensure_docker().await?;
-        if !Self::docker_available() {
-            anyhow::bail!(DOCKER_UNREACHABLE);
-        }
         if !Self::install_marker().exists() {
             self.install().await?;
         }
@@ -425,7 +380,7 @@ impl Integration for PawnsIntegration {
             warn!(stderr = %stderr, "Failed to start Pawns.app agent");
             anyhow::bail!(
                 "Could not start the Pawns.app agent: {}",
-                format_stderr(&stderr)
+                super::stderr_tail(&stderr, 10)
             );
         }
 
@@ -747,85 +702,3 @@ mod tests {
     }
 }
 
-/// B4: what the user is actually told when Docker refuses the agent image.
-#[cfg(test)]
-mod error_reporting_tests {
-    use super::*;
-
-    /// Real `docker run` failure output. The cause is on the FIRST line and
-    /// the last line is Docker's generic usage hint — `lines().last()` handed
-    /// the user the hint and threw the cause away.
-    const RUN_FAILURE: &str = "\
-docker: Error response from daemon: driver failed programming external connectivity on endpoint fem-pawns: port is already allocated.
-See 'docker run --help'.";
-
-    /// A pull failure whose output ends in a whitespace-only progress line.
-    const PULL_FAILURE: &str = "Error response from daemon: manifest unknown\n   \n";
-
-    #[test]
-    fn the_real_cause_survives_instead_of_dockers_usage_hint() {
-        assert_eq!(
-            RUN_FAILURE.lines().last(),
-            Some("See 'docker run --help'."),
-            "fixture must reproduce the bug: the old code showed only this line"
-        );
-        let shown = format_stderr(RUN_FAILURE);
-        assert!(shown.contains("port is already allocated"), "shown was: {}", shown);
-    }
-
-    #[test]
-    fn a_trailing_whitespace_line_no_longer_blanks_the_message() {
-        assert_eq!(
-            PULL_FAILURE.lines().last(),
-            Some("   "),
-            "fixture must reproduce the bug: the old code showed only whitespace"
-        );
-        let shown = format_stderr(PULL_FAILURE);
-        assert_eq!(shown, "Error response from daemon: manifest unknown");
-    }
-
-    #[test]
-    fn every_line_is_kept_and_newlines_become_separators() {
-        let stderr = "failed to solve\nprocess did not complete\nexit code: 1";
-        assert_eq!(
-            format_stderr(stderr),
-            "failed to solve | process did not complete | exit code: 1"
-        );
-    }
-
-    #[test]
-    fn blank_and_whitespace_only_lines_are_dropped() {
-        assert_eq!(format_stderr("\n  \nreal cause\n\n"), "real cause");
-    }
-
-    #[test]
-    fn entirely_empty_output_says_so_rather_than_showing_nothing() {
-        // The pre-fix message ended in a bare colon; a caller must never be
-        // able to render "Could not download the agent image: ".
-        assert_eq!(format_stderr(""), "no error output");
-        assert_eq!(format_stderr("\n\n   \n"), "no error output");
-    }
-
-    #[test]
-    fn a_wall_of_docker_output_is_capped() {
-        let huge = "x".repeat(5_000);
-        let shown = format_stderr(&huge);
-        assert_eq!(shown.chars().count(), MAX_STDERR_CHARS + 1, "cap plus the ellipsis");
-        assert!(shown.ends_with('…'));
-    }
-
-    #[test]
-    fn the_cap_never_splits_a_multibyte_character() {
-        let huge = "é".repeat(5_000);
-        let shown = format_stderr(&huge);
-        assert!(shown.ends_with('…'));
-        assert_eq!(shown.chars().count(), MAX_STDERR_CHARS + 1);
-    }
-
-    #[test]
-    fn the_docker_daemon_message_is_actionable_and_distinct() {
-        // Must not read like the partner-side pull failures above it.
-        assert!(DOCKER_UNREACHABLE.contains("Docker Desktop"));
-        assert!(!DOCKER_UNREACHABLE.contains("Pawns"));
-    }
-}
