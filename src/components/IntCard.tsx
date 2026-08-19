@@ -1,6 +1,7 @@
-import type { ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { AlertTriangle, Download, Loader2, MessageCircle, RefreshCw } from 'lucide-react'
 import type { FrontendIntegration } from '../hooks/useIntegrations'
+import { DISABLE_CONFIRM_MS, shouldConfirmDisable } from '../lib/disableConfirm'
 import { condenseError } from '../lib/error'
 import { OFFICIAL_DISABLED_WARNING, SDK_REPORT_LINE } from '../lib/support'
 import { unhealthyReason } from '../lib/types'
@@ -37,10 +38,25 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
   const inst = version !== null
   const reason = unhealthyReason(health)
   const isSdk = tier === 'sdk'
-  // F4: only once it has actually been installed and then switched off — on a
-  // fresh install nothing is enabled yet, and warning about all five official
-  // partners at first launch would be noise, not guidance.
-  const officialDisabled = tier === 'official' && inst && !enabled && !unavailableReason
+
+  // F4: disabling an official partner costs reward proportion, so the first
+  // click arms a caution row and the second commits. The row disarms itself so
+  // a card left alone cannot silently keep a live confirmation.
+  const [confirmingDisable, setConfirmingDisable] = useState(false)
+  useEffect(() => {
+    if (!confirmingDisable) return
+    const timer = setTimeout(() => setConfirmingDisable(false), DISABLE_CONFIRM_MS)
+    return () => clearTimeout(timer)
+  }, [confirmingDisable])
+
+  const handleToggle = () => {
+    if (shouldConfirmDisable({ tier, enabled, confirming: confirmingDisable })) {
+      setConfirmingDisable(true)
+      return
+    }
+    setConfirmingDisable(false)
+    onToggle(id)
+  }
   const dockerBlocked = !!dockerNote
   // This machine cannot meet the partner's published minimums. Distinct from
   // "unhealthy": nothing is wrong, it simply can never run here — so the card
@@ -162,6 +178,7 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
             </span>
             <TierBadge kind={tier} />
             {isSdk && <TierBadge kind="experimental" />}
+            <TierBadge kind={isSdk ? 'optional' : 'required'} />
             <span title={reason ?? undefined} style={reason ? { cursor: 'help' } : undefined}>
               <Tag v={tv}>{stNode}</Tag>
             </span>
@@ -292,9 +309,10 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
                 <Download size={11} /> Auto-installs on enable
               </span>
             )}
-            {officialDisabled && (
+            {confirmingDisable && (
               <span
-                data-testid={`official-disabled-${id}`}
+                data-testid={`confirm-disable-${id}`}
+                role="alert"
                 style={{
                   fontFamily: 'var(--fb)',
                   fontSize: 11,
@@ -304,7 +322,8 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
                   gap: 4
                 }}
               >
-                <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {OFFICIAL_DISABLED_WARNING}
+                <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {OFFICIAL_DISABLED_WARNING}{' '}
+                Click the switch again to turn it off.
               </span>
             )}
             {isSdk && (
@@ -350,7 +369,7 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
         </div>
         <Tog
           checked={enabled}
-          onChange={() => onToggle(id)}
+          onChange={handleToggle}
           disabled={unavailable}
           label={`Toggle ${name} integration`}
           data-testid={`toggle-${id}`}
@@ -368,21 +387,6 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
         }}
       >
         <span style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t2)', flexShrink: 0 }}>Reward contribution</span>
-        {isSdk && (
-          <span
-            data-testid={`boost-${id}`}
-            style={{
-              fontFamily: 'var(--fh)',
-              fontWeight: 700,
-              fontSize: 9,
-              letterSpacing: '.09em',
-              color: 'var(--amb)',
-              flexShrink: 0
-            }}
-          >
-            BOOST
-          </span>
-        )}
         <div style={{ flex: 1, height: 4, background: 'var(--b1)', borderRadius: 2, overflow: 'hidden' }}>
           <div
             style={{

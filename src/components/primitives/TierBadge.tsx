@@ -1,4 +1,4 @@
-type BadgeKind = 'official' | 'sdk' | 'experimental'
+type BadgeKind = 'official' | 'sdk' | 'experimental' | 'required' | 'optional'
 
 interface TierBadgeProps {
   kind: BadgeKind
@@ -7,7 +7,9 @@ interface TierBadgeProps {
 const LABEL: Record<BadgeKind, string> = {
   official: 'OFFICIAL PARTNER',
   sdk: 'SDK',
-  experimental: 'EXPERIMENTAL'
+  experimental: 'EXPERIMENTAL',
+  required: 'REQUIRED',
+  optional: 'OPTIONAL — BOOST'
 }
 
 // Provenance badges carry a border; Tag (Running/Unhealthy/…) never does.
@@ -15,10 +17,16 @@ const LABEL: Record<BadgeKind, string> = {
 // the integration's current state, without spending another accent colour.
 // The dashed edge on EXPERIMENTAL reads "unfinished" where a solid amber
 // would read "warning" — the SDK builds are supported, just not guaranteed.
+// REQUIRED and OPTIONAL are the quietest of the five — they answer "must I run
+// this?", which the section a card sits in no longer says now that the page
+// groups by category. Both are borderless so they read as a caption on the
+// tier badge beside them rather than competing with it.
 const STYLE: Record<BadgeKind, { bg: string; co: string; bd: string }> = {
   official: { bg: 'var(--tealg)', co: 'var(--teal)', bd: '1px solid rgba(0,196,154,.28)' },
   sdk: { bg: 'transparent', co: 'var(--amb)', bd: '1px solid rgba(240,165,0,.30)' },
-  experimental: { bg: 'rgba(240,165,0,.10)', co: 'var(--amb)', bd: '1px dashed rgba(240,165,0,.40)' }
+  experimental: { bg: 'rgba(240,165,0,.10)', co: 'var(--amb)', bd: '1px dashed rgba(240,165,0,.40)' },
+  required: { bg: 'transparent', co: 'var(--teal)', bd: '1px solid transparent' },
+  optional: { bg: 'transparent', co: 'var(--t1)', bd: '1px solid transparent' }
 }
 
 export default function TierBadge({ kind }: TierBadgeProps) {
