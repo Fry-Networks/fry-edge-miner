@@ -1,9 +1,11 @@
 import type { ReactNode } from 'react'
-import { AlertTriangle, Download, Loader2, RefreshCw } from 'lucide-react'
+import { AlertTriangle, Download, Loader2, MessageCircle, RefreshCw } from 'lucide-react'
 import type { FrontendIntegration } from '../hooks/useIntegrations'
 import { condenseError } from '../lib/error'
+import { OFFICIAL_DISABLED_WARNING, SDK_REPORT_LINE } from '../lib/support'
 import { unhealthyReason } from '../lib/types'
 import Tag from './primitives/Tag'
+import TierBadge from './primitives/TierBadge'
 import Tog from './primitives/Tog'
 
 interface IntCardProps {
@@ -23,6 +25,7 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
     desc,
     Icon,
     col,
+    tier,
     enabled,
     healthy,
     health,
@@ -33,6 +36,11 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
   } = intg
   const inst = version !== null
   const reason = unhealthyReason(health)
+  const isSdk = tier === 'sdk'
+  // F4: only once it has actually been installed and then switched off — on a
+  // fresh install nothing is enabled yet, and warning about all five official
+  // partners at first launch would be noise, not guidance.
+  const officialDisabled = tier === 'official' && inst && !enabled && !unavailableReason
   const dockerBlocked = !!dockerNote
   // This machine cannot meet the partner's published minimums. Distinct from
   // "unhealthy": nothing is wrong, it simply can never run here — so the card
@@ -152,6 +160,8 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
             >
               {tag}
             </span>
+            <TierBadge kind={tier} />
+            {isSdk && <TierBadge kind="experimental" />}
             <span title={reason ?? undefined} style={reason ? { cursor: 'help' } : undefined}>
               <Tag v={tv}>{stNode}</Tag>
             </span>
@@ -282,6 +292,36 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
                 <Download size={11} /> Auto-installs on enable
               </span>
             )}
+            {officialDisabled && (
+              <span
+                data-testid={`official-disabled-${id}`}
+                style={{
+                  fontFamily: 'var(--fb)',
+                  fontSize: 11,
+                  color: 'var(--amb)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4
+                }}
+              >
+                <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {OFFICIAL_DISABLED_WARNING}
+              </span>
+            )}
+            {isSdk && (
+              <span
+                data-testid={`sdk-report-${id}`}
+                style={{
+                  fontFamily: 'var(--fb)',
+                  fontSize: 11,
+                  color: 'var(--t1)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4
+                }}
+              >
+                <MessageCircle size={11} style={{ flexShrink: 0 }} /> {SDK_REPORT_LINE}
+              </span>
+            )}
             {onForceReinstall && enabled && !healthy && lifecycle !== 'Installing' && (
               <button
                 type="button"
@@ -328,6 +368,21 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
         }}
       >
         <span style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t2)', flexShrink: 0 }}>Reward contribution</span>
+        {isSdk && (
+          <span
+            data-testid={`boost-${id}`}
+            style={{
+              fontFamily: 'var(--fh)',
+              fontWeight: 700,
+              fontSize: 9,
+              letterSpacing: '.09em',
+              color: 'var(--amb)',
+              flexShrink: 0
+            }}
+          >
+            BOOST
+          </span>
+        )}
         <div style={{ flex: 1, height: 4, background: 'var(--b1)', borderRadius: 2, overflow: 'hidden' }}>
           <div
             style={{
