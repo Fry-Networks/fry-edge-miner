@@ -32,6 +32,30 @@ fn generate_install_id() -> String {
     hex::encode(bytes)
 }
 
+/// Serializes registration attempts.
+///
+/// B1: `register_device` snapshots the prior config up front and restores that
+/// snapshot on ANY failure. With two attempts in flight — the retry window is
+/// 2+4+8s wide, and the wizard's button is clickable throughout — a failure
+/// landing after a sibling SUCCESS restored the pre-success snapshot and wrote
+/// `miner_key = None`, which `get_device_info` reports as unregistered and
+/// `App.tsx` turns into a bounce back to the onboarding wizard with the user's
+/// key and wallet apparently gone. The idempotency check below cannot cover
+/// this: it needs `install_id` AND `device_token` already set, so it does
+/// nothing on a first registration.
+static REGISTRATION_IN_FLIGHT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Whether a failed attempt may roll the config back to its own snapshot.
+///
+/// Only when the stored key is still the one this attempt wrote. If something
+/// else has since written a different key — a concurrent registration that
+/// succeeded, or a deregistration — the snapshot is stale and restoring it
+/// would destroy the newer binding. Belt-and-braces behind the in-flight lock
+/// above, which is what actually serializes the common case.
+pub fn should_restore_snapshot(current_key: Option<&str>, this_attempt_key: &str) -> bool {
+    current_key == Some(this_attempt_key)
+}
+
 /// Decide what `get_device_info` reports for a stored miner key.
 ///
 /// Returns `(key_to_report, format_is_valid_by_todays_rules)`.
@@ -117,6 +141,10 @@ pub async fn register_device(
     device_name: Option<String>,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<String, String> {
+    // B1: held for the whole attempt, so a second registration cannot snapshot
+    // state mid-flight and later restore it over this one's result.
+    let _in_flight = REGISTRATION_IN_FLIGHT.lock().await;
+
     crate::config::wallet::validate_address(&wallet).map_err(|e| e.to_string())?;
 
     let miner_key = match miner_key {
@@ -245,18 +273,25 @@ pub async fn register_device(
             Ok(miner_key)
         }
         Err(e) => {
-            // Restore prior state on registration failure
-            state
-                .config
-                .update(|cfg| {
-                    cfg.miner_key = prior_miner_key.clone();
-                    cfg.wallet_address = prior_wallet.clone();
-                    cfg.device_token = prior_device_token.clone();
-                    cfg.install_id = prior_install_id.clone();
-                })
-                .map_err(|e| e.to_string())?;
-            // Reset API client bearer token to reflect restored state
-            state.api_client.set_bearer_token(state.config.get().effective_api_token());
+            // Restore prior state on registration failure — but only if this
+            // attempt's key is still the one on disk (B1).
+            if should_restore_snapshot(state.config.get().miner_key.as_deref(), &miner_key) {
+                state
+                    .config
+                    .update(|cfg| {
+                        cfg.miner_key = prior_miner_key.clone();
+                        cfg.wallet_address = prior_wallet.clone();
+                        cfg.device_token = prior_device_token.clone();
+                        cfg.install_id = prior_install_id.clone();
+                    })
+                    .map_err(|e| e.to_string())?;
+                // Reset API client bearer token to reflect restored state
+                state.api_client.set_bearer_token(state.config.get().effective_api_token());
+            } else {
+                tracing::warn!(
+                    "Registration failed, but a different miner key is now stored — leaving it intact rather than restoring a stale snapshot"
+                );
+            }
 
             // Connection-level failures get a classified, actionable message
             // (UB-2: some carriers/DNS providers block *.frynetworks.com).
@@ -765,5 +800,52 @@ mod recovery_tests {
         let unauthorized =
             crate::api::client::ApiError::HttpStatus(401, "Invalid token".to_string());
         assert_eq!(api_error_status(&unauthorized), Some(401));
+    }
+}
+
+/// B1: overlapping registrations must not roll each other back.
+#[cfg(test)]
+mod registration_race_tests {
+    use super::*;
+
+    const KEY_A: &str = "FEM-15CCB0C7A857E62200373CCF72EAA7D4";
+    const KEY_B: &str = "FEM-2A2A2A2A2A2A2A2A2A2A2A2A2A2A2A2A";
+
+    #[test]
+    fn a_failed_attempt_rolls_back_its_own_write() {
+        // The ordinary case: nothing else touched the config, so the snapshot
+        // is still the right thing to restore.
+        assert!(should_restore_snapshot(Some(KEY_A), KEY_A));
+    }
+
+    #[test]
+    fn a_failed_attempt_never_overwrites_a_sibling_that_succeeded() {
+        // The field bug: this attempt failed, but another registration has
+        // since stored a different key. Restoring here would write
+        // miner_key = None and bounce a registered device to the wizard.
+        assert!(!should_restore_snapshot(Some(KEY_B), KEY_A));
+    }
+
+    #[test]
+    fn a_cleared_key_is_left_cleared() {
+        // A deregistration landing during the retry window. The user asked for
+        // that; a late failure path must not resurrect anything.
+        assert!(!should_restore_snapshot(None, KEY_A));
+    }
+
+    #[tokio::test]
+    async fn registration_attempts_are_serialized() {
+        // Proves the guard actually excludes: the second lock cannot be taken
+        // while the first is held, and becomes available once it is dropped.
+        let first = REGISTRATION_IN_FLIGHT.lock().await;
+        assert!(
+            REGISTRATION_IN_FLIGHT.try_lock().is_err(),
+            "a second registration must not proceed while one is in flight"
+        );
+        drop(first);
+        assert!(
+            REGISTRATION_IN_FLIGHT.try_lock().is_ok(),
+            "the guard must release once the attempt finishes"
+        );
     }
 }
