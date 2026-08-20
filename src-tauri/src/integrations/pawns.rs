@@ -19,7 +19,7 @@ use super::download::partners_base_dir;
 use super::{HealthStatus, Integration, PocGateData};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use crate::supervisor::platform::{BoundedOutput, LONG_TIMEOUT, PROBE_TIMEOUT};
@@ -72,10 +72,31 @@ impl PawnsIntegration {
         Self::partner_dir().join("consent-log.jsonl")
     }
 
-    fn user_consent() -> bool {
-        std::env::var("PAWNS_USER_CONSENT")
-            .map(|v| v.trim().eq_ignore_ascii_case("accepted"))
-            .unwrap_or(false)
+    /// Whether sharing is allowed to start: the headless override, or a consent
+    /// this device recorded and has not withdrawn.
+    pub(crate) fn user_consent() -> bool {
+        consent_from_env_value(std::env::var("PAWNS_USER_CONSENT").ok().as_deref())
+            || Self::consent_active()
+    }
+
+    /// The consent/withdrawal this device last recorded, or None if it never has.
+    pub(crate) fn consent_record() -> Option<ConsentRecord> {
+        last_consent_entry_in(&Self::consent_log(), &Self::device_id())
+    }
+
+    /// Whether this device currently holds a recorded consent.
+    pub(crate) fn consent_active() -> bool {
+        consent_is_active(&Self::consent_log(), &Self::device_id())
+    }
+
+    /// Record the device owner consenting (CLI Addendum §5.8).
+    pub(crate) fn grant_consent() {
+        Self::record_consent_event("consent");
+    }
+
+    /// Record the device owner withdrawing consent (CLI Addendum §5.8).
+    pub(crate) fn revoke_consent() {
+        Self::record_consent_event("withdrawal");
     }
 
     fn credentials() -> Option<(String, String)> {
@@ -109,6 +130,12 @@ impl PawnsIntegration {
 
     /// Append a consent or withdrawal record (CLI Addendum §5.8).
     fn record_consent_event(action: &str) {
+        Self::record_consent_event_at(&Self::consent_log(), action);
+    }
+
+    /// The write itself, against an explicit path so tests can exercise the
+    /// record format without touching the real device's consent log.
+    fn record_consent_event_at(path: &Path, action: &str) {
         let record = serde_json::json!({
             "action": action,
             "happened_at": utc_now_rfc3339(),
@@ -120,7 +147,6 @@ impl PawnsIntegration {
             "agent_image": PAWNS_IMAGE,
             "fem_version": env!("CARGO_PKG_VERSION"),
         });
-        let path = Self::consent_log();
         if let Some(parent) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 warn!(error = %e, "Could not create Pawns partner directory for consent log");
@@ -131,7 +157,7 @@ impl PawnsIntegration {
         match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
+            .open(path)
         {
             Ok(mut f) => {
                 use std::io::Write;
@@ -175,6 +201,71 @@ impl PawnsIntegration {
             String::from_utf8_lossy(&output.stderr)
         ))
     }
+}
+
+/// The consent or withdrawal a device last recorded.
+pub(crate) struct ConsentRecord {
+    /// `consent` or `withdrawal` — the audit vocabulary written to the log.
+    pub action: String,
+    /// RFC3339 UTC timestamp of that decision.
+    pub happened_at: String,
+}
+
+/// The audited disclosure the device owner has to be shown (§5.4 (a)–(e)).
+/// Handed to the UI so the wording exists in exactly one place.
+pub(crate) fn consent_disclosure() -> &'static str {
+    CONSENT_DISCLOSURE
+}
+
+/// Version of the wording above, recorded with every consent entry.
+pub(crate) fn consent_wording_version() -> &'static str {
+    CONSENT_WORDING_VERSION
+}
+
+/// The documented headless escape hatch: `PAWNS_USER_CONSENT=accepted`.
+fn consent_from_env_value(value: Option<&str>) -> bool {
+    value
+        .map(|v| v.trim().eq_ignore_ascii_case("accepted"))
+        .unwrap_or(false)
+}
+
+/// The last consent entry `device_id` wrote to the log at `path`.
+///
+/// The log is append-only and one device per line, so the newest entry for this
+/// device is the decision that stands. Lines that are not usable records are
+/// skipped rather than ending the scan: a half-written trailing line (power
+/// loss mid-append) must not silently withdraw a consent the owner gave.
+fn last_consent_entry_in(path: &Path, device_id: &str) -> Option<ConsentRecord> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let mut found = None;
+    for line in body.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.get("device_id").and_then(|v| v.as_str()) != Some(device_id) {
+            continue;
+        }
+        let Some(action) = value.get("action").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        found = Some(ConsentRecord {
+            action: action.to_string(),
+            happened_at: value
+                .get("happened_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        });
+    }
+    found
+}
+
+/// Whether `device_id`'s last recorded decision was a consent. No log, no
+/// readable entry, or a withdrawal all mean no — the gate fails closed.
+fn consent_is_active(path: &Path, device_id: &str) -> bool {
+    last_consent_entry_in(path, device_id)
+        .map(|e| e.action == "consent")
+        .unwrap_or(false)
 }
 
 /// Keep a device id to characters the API accepts.
@@ -482,6 +573,12 @@ impl Integration for PawnsIntegration {
         true
     }
 }
+
+/// Consent-log behaviour has its own file so these tests can reach the
+/// module-private log helpers without widening them for the whole crate.
+#[cfg(test)]
+#[path = "pawns_consent_tests.rs"]
+mod pawns_consent_tests;
 
 #[cfg(test)]
 mod tests {
