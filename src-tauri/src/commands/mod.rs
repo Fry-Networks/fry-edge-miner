@@ -1,3 +1,4 @@
+pub mod consent;
 pub mod debug;
 pub mod device;
 pub mod integration;
