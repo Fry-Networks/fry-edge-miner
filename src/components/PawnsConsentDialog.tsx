@@ -172,9 +172,7 @@ export default function PawnsConsentDialog({ status, onConfirm, onCancel, busy =
         </ul>
 
         <p style={{ fontFamily: 'var(--fb)', fontSize: 11.5, color: 'var(--t2)', margin: 0, lineHeight: 1.55 }}>
-          The full terms for this integration are the{' '}
-          <span style={{ color: 'var(--teal)' }}>Pawns.app CLI Addendum</span> (§5.2–5.4). Your decision is recorded
-          with the exact wording above.
+          Your decision is recorded with the exact wording above, along with the terms you accepted.
         </p>
 
         <label
@@ -200,7 +198,13 @@ export default function PawnsConsentDialog({ status, onConfirm, onCancel, busy =
             data-testid="pawns-consent-checkbox"
             style={{ accentColor: ACCENT, width: 15, height: 15, marginTop: 1, flexShrink: 0, cursor: 'pointer' }}
           />
-          <span>I understand and agree to share this device's bandwidth with Pawns.app.</span>
+          <span>
+            I understand and agree to share this device's bandwidth, and I acknowledge and accept the Pawns.app{' '}
+            <a href={status.terms_url} target="_blank" rel="noreferrer" style={{ color: 'var(--teal)' }}>
+              Terms
+            </a>
+            .
+          </span>
         </label>
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 2 }}>

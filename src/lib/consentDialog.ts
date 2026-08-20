@@ -27,6 +27,9 @@ export interface ConsentStatus {
   wording_version: string
   /** The audited disclosure text, rendered as-is — the UI never retypes it. */
   disclosure: string
+  /** The terms document the owner accepts, linked from the dialog. */
+  terms_url: string
+  terms_version: string
   /** When the deciding consent/withdrawal was recorded, or null if never. */
   recorded_at: string | null
 }

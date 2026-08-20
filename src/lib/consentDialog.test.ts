@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { toggleAllTargets } from './availability'
 import {
   PAWNS_CONSENT_REQUIRED,
   canConfirm,
@@ -15,6 +16,8 @@ const status = (over: Partial<ConsentStatus> = {}): ConsentStatus => ({
   active: false,
   wording_version: '1',
   disclosure: 'Pawns.app bandwidth sharing: …',
+  terms_url: 'https://cdn.pawns.app/documents/PawnsApp-CLI-Addendum.pdf',
+  terms_version: 'cli-addendum-2026-08-10',
   recorded_at: null,
   ...over
 })
@@ -103,6 +106,36 @@ describe('nextActionAfterConfirm', () => {
 
   it('does nothing when there is no status to consent against', () => {
     expect(nextActionAfterConfirm(null, true)).toEqual({ kind: 'blocked' })
+  })
+})
+
+describe('category toggle-all', () => {
+  // "VPN & Bandwidth" contains Pawns, so enabling the whole category fans out a
+  // toggle for it like any other. That is only safe because the fan-out calls
+  // the same consent-aware toggle a card does — if Pawns were ever routed
+  // straight to the backend here, bulk-enable would start sharing with no
+  // consent on record (the Rust PAWNS_CONSENT_REQUIRED gate is the backstop).
+  const member = (id: string, enabled = false, unavailable_reason: string | null = null) => ({
+    id,
+    enabled,
+    unavailable_reason
+  })
+
+  it('includes pawns in a bulk enable, so the consent check has to run per id', () => {
+    const targets = toggleAllTargets([member('mysterium'), member('pawns'), member('fryvpn')], true)
+    const ids = targets.map((t) => t.id)
+    expect(ids).toContain('pawns')
+    expect(ids.filter((id) => requiresConsent(id))).toEqual(['pawns'])
+  })
+
+  it('still singles pawns out when it is the only member needing consent', () => {
+    const targets = toggleAllTargets([member('mysterium'), member('pawns')], true)
+    expect(targets.filter((t) => requiresConsent(t.id)).length).toBe(1)
+  })
+
+  it('does not re-toggle pawns when it is already enabled', () => {
+    const targets = toggleAllTargets([member('pawns', true)], true)
+    expect(targets).toEqual([])
   })
 })
 

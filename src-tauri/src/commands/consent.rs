@@ -23,6 +23,9 @@ pub struct ConsentStatus {
     pub wording_version: String,
     /// The audited disclosure text, so the UI never retypes it.
     pub disclosure: String,
+    /// The terms document the owner accepts, for the dialog to link.
+    pub terms_url: String,
+    pub terms_version: String,
     /// When the deciding consent/withdrawal was recorded, or None if never.
     pub recorded_at: Option<String>,
 }
@@ -50,6 +53,8 @@ pub async fn check_consent(integration_id: String) -> Result<ConsentStatus, Stri
         active,
         wording_version: pawns::consent_wording_version().to_string(),
         disclosure: pawns::consent_disclosure().to_string(),
+        terms_url: pawns::terms_url().to_string(),
+        terms_version: pawns::terms_version().to_string(),
         recorded_at,
     })
 }
