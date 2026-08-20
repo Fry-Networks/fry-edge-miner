@@ -11,9 +11,11 @@
 //!
 //! Consent: the Pawns.app CLI Addendum (§5.2–5.4) requires a separate, explicit consent
 //! action from the person who owns the device *before* the agent starts, disclosing what
-//! sharing does, and (§5.8) a durable record of each consent and withdrawal. `start()`
-//! refuses to run without `PAWNS_USER_CONSENT=accepted` and appends a record of the exact
-//! wording shown to `consent-log.jsonl`; `stop()` records the withdrawal.
+//! sharing does, and (§5.8) a durable record of each consent and withdrawal. That record
+//! is `consent-log.jsonl`, and it is also where consent is read back from: the last entry
+//! this device wrote decides whether sharing may start, so a consent given once in the UI
+//! survives a restart. `PAWNS_USER_CONSENT=accepted` still forces it on for headless runs.
+//! `start()` refuses to run without consent; `stop()` records the withdrawal.
 
 use super::download::partners_base_dir;
 use super::{HealthStatus, Integration, PocGateData};
@@ -30,6 +32,13 @@ const PAWNS_IMAGE: &str = "iproyal/pawns-cli:latest";
 const PAWNS_CONTAINER: &str = "fem-pawns";
 /// Version of the disclosure wording below; recorded with every consent entry.
 const CONSENT_WORDING_VERSION: &str = "1";
+
+/// The terms the device owner accepts along with the disclosure. Recorded with
+/// every consent entry so the record says what was agreed to, not just when
+/// (CLI Addendum §5.8).
+const TERMS_URL: &str = "https://cdn.pawns.app/documents/PawnsApp-CLI-Addendum.pdf";
+/// Edition of the document at `TERMS_URL`.
+const TERMS_VERSION: &str = "cli-addendum-2026-08-10";
 
 /// Exact wording the device owner must be shown before sharing starts
 /// (CLI Addendum §5.4 (a)–(e)). Surfaced through the integration's health
@@ -94,6 +103,21 @@ impl PawnsIntegration {
         Self::record_consent_event("consent");
     }
 
+    /// Consent that covers a start, recorded only when none is already on
+    /// record. The owner's own consent action is what §5.2 asks for, so a
+    /// start under an existing consent must not append a second line and make
+    /// the log read as if they consented again. This still writes the first
+    /// durable record when consent came from the headless env override.
+    fn record_start_consent() {
+        Self::record_start_consent_at(&Self::consent_log(), &Self::device_id());
+    }
+
+    fn record_start_consent_at(path: &Path, device_id: &str) {
+        if !consent_is_active(path, device_id) {
+            Self::record_consent_event_at(path, "consent");
+        }
+    }
+
     /// Record the device owner withdrawing consent (CLI Addendum §5.8).
     pub(crate) fn revoke_consent() {
         Self::record_consent_event("withdrawal");
@@ -146,6 +170,8 @@ impl PawnsIntegration {
             "wording": CONSENT_DISCLOSURE,
             "agent_image": PAWNS_IMAGE,
             "fem_version": env!("CARGO_PKG_VERSION"),
+            "terms_url": TERMS_URL,
+            "terms_version": TERMS_VERSION,
         });
         if let Some(parent) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
@@ -220,6 +246,16 @@ pub(crate) fn consent_disclosure() -> &'static str {
 /// Version of the wording above, recorded with every consent entry.
 pub(crate) fn consent_wording_version() -> &'static str {
     CONSENT_WORDING_VERSION
+}
+
+/// The terms document the owner accepts, for the UI to link.
+pub(crate) fn terms_url() -> &'static str {
+    TERMS_URL
+}
+
+/// Edition of that document, recorded with every consent entry.
+pub(crate) fn terms_version() -> &'static str {
+    TERMS_VERSION
 }
 
 /// The documented headless escape hatch: `PAWNS_USER_CONSENT=accepted`.
@@ -431,7 +467,7 @@ impl Integration for PawnsIntegration {
             self.install().await?;
         }
 
-        Self::record_consent_event("consent");
+        Self::record_start_consent();
 
         // Drop any container left from a previous run so the fixed name is free
         // and the agent restarts with current credentials.

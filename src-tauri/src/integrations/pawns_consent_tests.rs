@@ -169,10 +169,14 @@ fn a_written_consent_line_still_carries_every_field_the_addendum_records() {
         "wording",
         "agent_image",
         "fem_version",
+        // Added after the first nine: the record has to say what was agreed to,
+        // not only when. The original nine keep their names and meaning.
+        "terms_url",
+        "terms_version",
     ] {
         assert!(obj.contains_key(field), "field {} was dropped: {}", field, body);
     }
-    assert_eq!(obj.len(), 9, "the record gained or lost a field: {}", body);
+    assert_eq!(obj.len(), 11, "the record gained or lost a field: {}", body);
 
     // The action names are the audit vocabulary — renaming either one silently
     // invalidates every record already on disk.
@@ -180,6 +184,86 @@ fn a_written_consent_line_still_carries_every_field_the_addendum_records() {
     assert_eq!(record["wording"], consent_disclosure());
     assert_eq!(record["wording_version"], consent_wording_version());
     assert_eq!(record["device_id"], PawnsIntegration::device_id());
+    assert_eq!(record["terms_url"], terms_url());
+    assert_eq!(record["terms_version"], terms_version());
+}
+
+#[test]
+fn a_record_written_before_the_terms_fields_existed_is_still_read() {
+    // `line()` writes the original nine-field shape. Consent already on disk
+    // from an earlier build must keep counting — extending the format cannot
+    // retroactively un-consent anyone.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_log(&dir.path(), &[line("consent", "dev-a", "2026-08-19T10:00:00Z")]);
+
+    assert!(consent_is_active(&path, "dev-a"));
+}
+
+#[test]
+fn the_recorded_terms_point_at_the_published_addendum() {
+    // The URL is what the dialog links and what the record cites; a typo here
+    // means every consent record references a document nobody can open.
+    assert_eq!(
+        terms_url(),
+        "https://cdn.pawns.app/documents/PawnsApp-CLI-Addendum.pdf"
+    );
+    assert_eq!(terms_version(), "cli-addendum-2026-08-10");
+}
+
+#[test]
+fn a_start_under_an_existing_consent_does_not_record_a_second_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("consent-log.jsonl");
+    let device = PawnsIntegration::device_id();
+
+    // The owner consents once through the UI, then the agent starts twice.
+    PawnsIntegration::record_consent_event_at(&path, "consent");
+    PawnsIntegration::record_start_consent_at(&path, &device);
+    PawnsIntegration::record_start_consent_at(&path, &device);
+
+    let body = std::fs::read_to_string(&path).unwrap();
+    let consents = body
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter(|l| {
+            serde_json::from_str::<serde_json::Value>(l).unwrap()["action"] == "consent"
+        })
+        .count();
+    assert_eq!(
+        consents, 1,
+        "starting re-recorded consent the owner only gave once: {}",
+        body
+    );
+}
+
+#[test]
+fn a_start_with_no_record_yet_writes_the_first_one() {
+    // The headless env override consents without ever touching the log, so the
+    // first start is what makes that consent durable.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("consent-log.jsonl");
+    let device = PawnsIntegration::device_id();
+
+    PawnsIntegration::record_start_consent_at(&path, &device);
+
+    assert!(consent_is_active(&path, &device));
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+}
+
+#[test]
+fn a_start_after_a_withdrawal_records_the_new_consent() {
+    // Withdrawn then re-enabled is a fresh consent decision and must appear as
+    // its own entry, not be swallowed by the de-duplication above.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("consent-log.jsonl");
+    let device = PawnsIntegration::device_id();
+
+    PawnsIntegration::record_consent_event_at(&path, "consent");
+    PawnsIntegration::record_consent_event_at(&path, "withdrawal");
+    PawnsIntegration::record_start_consent_at(&path, &device);
+
+    assert!(consent_is_active(&path, &device));
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
 }
 
 #[test]
