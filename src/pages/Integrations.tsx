@@ -1,9 +1,11 @@
 import { AlertTriangle, Cpu, HardDrive, Loader2, Radio, type LucideIcon } from 'lucide-react'
 import CategorySection from '../components/CategorySection'
 import IntCard from '../components/IntCard'
+import PawnsConsentDialog from '../components/PawnsConsentDialog'
 import EmptyState from '../components/primitives/EmptyState'
 import type { FrontendIntegration } from '../hooks/useIntegrations'
 import { categoryCounts, toggleAllTargets } from '../lib/availability'
+import type { ConsentStatus } from '../lib/consentDialog'
 import { CATEGORIES, type IntegrationCategory } from '../lib/integrationMeta'
 import type { DockerProgress, SystemStatus } from '../lib/types'
 
@@ -19,9 +21,27 @@ interface IntegrationsProps {
   system?: SystemStatus | null
   dockerProgress?: DockerProgress | null
   onForceReinstall?: (id: string) => void
+  /** Consent the user still has to give before an integration may start. */
+  consentPrompt?: ConsentStatus | null
+  consentBusy?: boolean
+  /** Per-integration recorded-consent flag, keyed by integration id. */
+  consentActive?: Record<string, boolean>
+  onConsentConfirm?: (checked: boolean) => void
+  onConsentCancel?: () => void
 }
 
-export default function Integrations({ intgs, onToggle, system, dockerProgress, onForceReinstall }: IntegrationsProps) {
+export default function Integrations({
+  intgs,
+  onToggle,
+  system,
+  dockerProgress,
+  onForceReinstall,
+  consentPrompt,
+  consentBusy,
+  consentActive,
+  onConsentConfirm,
+  onConsentCancel
+}: IntegrationsProps) {
   const active = intgs.filter((i) => i.enabled).length
   // Divide by what this machine can run, matching the denominator the PoC
   // reporter actually submits — otherwise the banner and each card's reward
@@ -141,11 +161,20 @@ export default function Integrations({ intgs, onToggle, system, dockerProgress, 
                   onToggle={onToggle}
                   dockerNote={intg.requires_docker && dockerNotReady ? system?.docker_message : null}
                   onForceReinstall={intg.id === 'aem' ? onForceReinstall : undefined}
+                  consentActive={consentActive?.[intg.id] ?? null}
                 />
               ))}
             </CategorySection>
           )
         })
+      )}
+      {consentPrompt && onConsentConfirm && onConsentCancel && (
+        <PawnsConsentDialog
+          status={consentPrompt}
+          busy={consentBusy}
+          onConfirm={onConsentConfirm}
+          onCancel={onConsentCancel}
+        />
       )}
     </div>
   )

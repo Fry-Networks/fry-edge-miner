@@ -2,6 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import type { DockerProgress, HealthStatus, IntegrationStatus, LifecycleState, SystemStatus } from '../lib/types'
+import {
+  isConsentRequiredError,
+  nextActionAfterConfirm,
+  requiresConsent,
+  shouldOpenDialog,
+  type ConsentStatus
+} from '../lib/consentDialog'
 import { extractErrorMessage } from '../lib/error'
 import { INTEGRATION_META, type IntegrationMeta } from '../lib/integrationMeta'
 import { isTauri } from '../lib/tauri'
@@ -72,6 +79,11 @@ export function useIntegrations() {
   const [error, setError] = useState<string | null>(null)
   const [system, setSystem] = useState<SystemStatus | null>(null)
   const [dockerProgress, setDockerProgress] = useState<DockerProgress | null>(null)
+  // Consent state for the integrations that need one (Pawns.app today): the
+  // open dialog, and the per-integration flag the card badge reads.
+  const [consentPrompt, setConsentPrompt] = useState<ConsentStatus | null>(null)
+  const [consentBusy, setConsentBusy] = useState(false)
+  const [consentActive, setConsentActive] = useState<Record<string, boolean>>({})
   // Toggles currently awaiting the backend — the docker-progress banner is
   // only cleared when NO toggle is in flight, so one integration's failure
   // can't hide another's still-running Docker install.
@@ -214,11 +226,31 @@ export function useIntegrations() {
     }
   }, [])
 
-  const toggle = useCallback(
-    async (id: string) => {
+  // Consent state for an integration that tracks one. Never throws: a status
+  // we cannot read is reported as unknown so the caller can decide.
+  const refreshConsent = useCallback(async (id: string): Promise<ConsentStatus | null> => {
+    if (!isTauri()) return null
+    try {
+      const status = await invoke<ConsentStatus>('check_consent', { integrationId: id })
+      setConsentActive((prev) => ({ ...prev, [id]: status.active }))
+      return status
+    } catch (e) {
+      console.warn(`check_consent(${id}) failed:`, e)
+      return null
+    }
+  }, [])
+
+  useEffect(() => {
+    INTEGRATION_META.filter((m) => requiresConsent(m.id)).forEach((m) => {
+      refreshConsent(m.id)
+    })
+  }, [refreshConsent])
+
+  // The toggle itself, with no consent handling — the caller has already
+  // decided this flip is allowed to happen. Returns whether the backend took it.
+  const runToggle = useCallback(
+    async (id: string, next: boolean): Promise<boolean> => {
       const current = integrations.find((i) => i.id === id)
-      if (!current) return
-      const next = !current.enabled
 
       // Optimistically flip state and show Installing while the backend installs/starts.
       setIntegrations((prev) =>
@@ -235,12 +267,26 @@ export function useIntegrations() {
       )
 
       inflightToggles.current += 1
+      let ok = false
       try {
         await invoke('toggle_integration', { id, enabled: next })
         setError(null)
+        ok = true
       } catch (e) {
         console.warn(`toggle_integration(${id}, ${next}) failed:`, e)
-        setError(`${current.name}: ${extractErrorMessage(e)}`)
+        if (isConsentRequiredError(e)) {
+          // The backend refused for want of consent (e.g. it was withdrawn in
+          // another window). Ask for it rather than showing the sentinel.
+          const status = await refreshConsent(id)
+          if (status) {
+            setConsentPrompt(status)
+            setError(null)
+          } else {
+            setError(`${current?.name ?? id}: bandwidth-sharing consent could not be confirmed.`)
+          }
+        } else {
+          setError(`${current?.name ?? id}: ${extractErrorMessage(e)}`)
+        }
       } finally {
         inflightToggles.current -= 1
         if (inflightToggles.current === 0) {
@@ -251,9 +297,82 @@ export function useIntegrations() {
         await fetch()
         fetchSystem()
       }
+      return ok
     },
-    [integrations, fetch, fetchSystem]
+    [integrations, fetch, fetchSystem, refreshConsent]
   )
+
+  const toggle = useCallback(
+    async (id: string) => {
+      const current = integrations.find((i) => i.id === id)
+      if (!current) return
+      const next = !current.enabled
+
+      if (requiresConsent(id)) {
+        if (next) {
+          // Ask before enabling, so the consent exists before anything starts.
+          const status = await refreshConsent(id)
+          if (shouldOpenDialog(status)) {
+            if (!status) {
+              setError(`${current.name}: bandwidth-sharing consent could not be confirmed.`)
+              return
+            }
+            setConsentPrompt(status)
+            return
+          }
+          await runToggle(id, true)
+          return
+        }
+
+        // Disabling: the integration's own stop() writes the withdrawal, so a
+        // successful toggle already recorded it. Only record one here when the
+        // toggle failed before stop() could run, which would otherwise leave
+        // the log claiming consent the user has just taken back.
+        const ok = await runToggle(id, false)
+        if (!ok) {
+          try {
+            await invoke('revoke_consent', { integrationId: id })
+          } catch (e) {
+            console.warn(`revoke_consent(${id}) failed:`, e)
+          }
+        }
+        await refreshConsent(id)
+        return
+      }
+
+      await runToggle(id, next)
+    },
+    [integrations, refreshConsent, runToggle]
+  )
+
+  const confirmConsent = useCallback(
+    async (checked: boolean) => {
+      const status = consentPrompt
+      const action = nextActionAfterConfirm(status, checked)
+      if (action.kind === 'blocked' || !status) return
+
+      setConsentBusy(true)
+      try {
+        await invoke('grant_consent', {
+          integrationId: status.integration_id,
+          wordingVersion: action.wordingVersion
+        })
+      } catch (e) {
+        console.warn(`grant_consent(${status.integration_id}) failed:`, e)
+        setError(`Pawns.app: ${extractErrorMessage(e)}`)
+        setConsentBusy(false)
+        return
+      }
+      setConsentPrompt(null)
+      setConsentBusy(false)
+      await refreshConsent(status.integration_id)
+      await runToggle(status.integration_id, true)
+    },
+    [consentPrompt, refreshConsent, runToggle]
+  )
+
+  // Declining changes nothing: no record is written and the toggle stays off.
+  const cancelConsent = useCallback(() => setConsentPrompt(null), [])
 
   // F2: clean-slate reinstall for a stuck integration (backend wipes all
   // install artifacts, then installs + starts). Currently Olostep-only.
@@ -282,5 +401,19 @@ export function useIntegrations() {
     [integrations, fetch, fetchSystem]
   )
 
-  return { integrations, loading, error, toggle, forceReinstall, refetch: fetch, system, dockerProgress }
+  return {
+    integrations,
+    loading,
+    error,
+    toggle,
+    forceReinstall,
+    refetch: fetch,
+    system,
+    dockerProgress,
+    consentPrompt,
+    consentBusy,
+    consentActive,
+    confirmConsent,
+    cancelConsent
+  }
 }

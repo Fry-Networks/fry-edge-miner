@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { AlertTriangle, Download, Loader2, MessageCircle, RefreshCw } from 'lucide-react'
 import type { FrontendIntegration } from '../hooks/useIntegrations'
+import { consentBadge } from '../lib/consentDialog'
 import { DISABLE_CONFIRM_MS, shouldConfirmDisable } from '../lib/disableConfirm'
 import { condenseError } from '../lib/error'
 import { OFFICIAL_DISABLED_WARNING, SDK_REPORT_LINE } from '../lib/support'
@@ -16,9 +17,12 @@ interface IntCardProps {
   dockerNote?: string | null
   // F2: clean-slate reinstall (Olostep only — backend rejects other ids).
   onForceReinstall?: (id: string) => void
+  // Recorded bandwidth-sharing consent, for the integrations that need one.
+  // null when this integration tracks no consent, or it isn't known yet.
+  consentActive?: boolean | null
 }
 
-export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }: IntCardProps) {
+export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, consentActive = null }: IntCardProps) {
   const {
     id,
     name,
@@ -38,6 +42,7 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
   const inst = version !== null
   const reason = unhealthyReason(health)
   const isSdk = tier === 'sdk'
+  const consent = consentBadge(consentActive)
 
   // F4: disabling an official partner costs reward proportion, so the first
   // click arms a caution row and the second commits. The row disarms itself so
@@ -207,6 +212,11 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall }
                 }}
               >
                 {/^\d/.test(version) ? `v${version}` : 'Installed'}
+              </span>
+            )}
+            {consent && (
+              <span data-testid={`consent-${id}`} title="Bandwidth sharing needs your explicit consent">
+                <Tag v={consent.variant}>{consent.label}</Tag>
               </span>
             )}
             {startError && (

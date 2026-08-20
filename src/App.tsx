@@ -135,7 +135,20 @@ function IntegrationsErrorCard({ error, onRetry }: { error: string; onRetry: () 
 
 function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceName: string; minerKey?: string; deregister: () => Promise<void>; deviceError: string | null }) {
   const [page, setPage] = useState<NavPage>('dashboard')
-  const { integrations, toggle, forceReinstall, error, system, dockerProgress, refetch } = useIntegrations()
+  const {
+    integrations,
+    toggle,
+    forceReinstall,
+    error,
+    system,
+    dockerProgress,
+    refetch,
+    consentPrompt,
+    consentBusy,
+    consentActive,
+    confirmConsent,
+    cancelConsent
+  } = useIntegrations()
   // Official partners only, from the same helper the Dashboard headline uses —
   // deriving these two independently is how the badge came to read N/10 while
   // the Dashboard read N/5.
@@ -172,7 +185,18 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
             (integrations.length === 0 && error ? (
               <IntegrationsErrorCard error={error} onRetry={refetch} />
             ) : (
-              <Integrations intgs={integrations} onToggle={toggle} system={system} dockerProgress={dockerProgress} onForceReinstall={forceReinstall} />
+              <Integrations
+                intgs={integrations}
+                onToggle={toggle}
+                system={system}
+                dockerProgress={dockerProgress}
+                onForceReinstall={forceReinstall}
+                consentPrompt={consentPrompt}
+                consentBusy={consentBusy}
+                consentActive={consentActive}
+                onConsentConfirm={confirmConsent}
+                onConsentCancel={cancelConsent}
+              />
             ))}
           {page === 'rewards' && <Rewards />}
           {page === 'settings' && <SettingsPage deviceName={deviceName} deregister={deregister} />}
