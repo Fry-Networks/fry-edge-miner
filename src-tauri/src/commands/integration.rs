@@ -1,5 +1,11 @@
 use crate::integrations::{HealthStatus, IntegrationStatus, LifecycleState};
 
+/// Sentinel returned when Pawns.app is enabled without a recorded consent. The
+/// frontend matches this exact string to open the consent dialog instead of
+/// showing a raw error, so it must stay stable (mirrored in
+/// `src/lib/consentDialog.ts`).
+const PAWNS_CONSENT_REQUIRED: &str = "PAWNS_CONSENT_REQUIRED";
+
 #[tauri::command]
 pub async fn get_integrations(
     state: tauri::State<'_, crate::AppState>,
@@ -152,6 +158,14 @@ pub async fn toggle_integration(
                     ));
                 }
             }
+        }
+
+        // Pawns.app routes other people's traffic through this connection, so
+        // the CLI Addendum (§5.2–5.4) requires the device owner's explicit
+        // consent before it may start. Refuse until one is on record; the UI
+        // turns this sentinel into the consent dialog.
+        if id == "pawns" && !crate::integrations::pawns::PawnsIntegration::user_consent() {
+            return Err(PAWNS_CONSENT_REQUIRED.to_string());
         }
     }
 
