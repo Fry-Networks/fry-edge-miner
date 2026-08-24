@@ -28,8 +28,11 @@ WORKDIR /build
 # Clone the official Diiisco node repo
 RUN git clone --depth 1 https://github.com/Diiisco-Inc/diiisco-node.git .
 
-# Install dependencies
-RUN npm install
+# Install dependencies. Upstream's package.json has historically imported
+# `json-canonicalize` without declaring it, so `npm install` alone left it
+# missing and the container died at runtime with MODULE_NOT_FOUND (F10).
+# Install it explicitly so the dependency is always present in node_modules.
+RUN npm install && npm install --save json-canonicalize
 
 # Build args — these are injected at image build time (CI/CD pipeline)
 ARG ALGO_ADDRESS
@@ -77,4 +80,7 @@ EXPOSE 8181
 
 # Try dist first (compiled), fall back to ts-node --transpile-only (ignores
 # upstream type errors at runtime), then plain node on src.
-CMD ["sh", "-c", "node dist/index.js 2>/dev/null || npx ts-node --transpile-only src/index.ts 2>/dev/null || node src/index.js"]
+# F10: do NOT swallow stderr — a silent MODULE_NOT_FOUND (e.g. a missing dep)
+# used to look like the container refusing to start with no explanation. Let the
+# real error reach `docker logs` so failures are diagnosable.
+CMD ["sh", "-c", "node dist/index.js || npx ts-node --transpile-only src/index.ts || node src/index.js"]

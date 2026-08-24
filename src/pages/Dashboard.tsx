@@ -8,9 +8,8 @@ import TierBadge from '../components/primitives/TierBadge'
 import Divider from '../components/primitives/Divider'
 import { useRewards } from '../hooks/useRewards'
 import { useReporting } from '../hooks/useReporting'
-import { categoryCounts } from '../lib/availability'
-import { activeFraction, proportionPct } from '../lib/integrationCount'
-import type { IntegrationTier } from '../lib/integrationMeta'
+import { activeFraction, boostPct, requiredProportionPct } from '../lib/integrationCount'
+import { isRequiredIntegration, type IntegrationTier } from '../lib/integrationMeta'
 import { SDK_REPORT_LINE } from '../lib/support'
 import { officialCounts, sdkActiveLine, sdkCounts, splitByTier } from '../lib/tierSplit'
 
@@ -101,9 +100,13 @@ export default function Dashboard({ intgs }: DashboardProps) {
     !!reporting?.registered && !notReporting && reporting.consecutive_poc_failures > 0
   const summary = rewards.summary
   const active = intgs.filter((i) => i.enabled)
-  // Count against what this machine can run, matching the PoC denominator.
-  const available = categoryCounts(intgs).availableTotal
-  const pct = String(proportionPct(active.length, available))
+  // F18: reward proportion is driven by the REQUIRED tier (Fry dVPN + Olostep);
+  // every other active integration adds a flat +5% boost.
+  const requiredActive = active.filter((i) => isRequiredIntegration(i.id)).length
+  const boostActive = active.filter((i) => !isRequiredIntegration(i.id)).length
+  const requiredPct = requiredProportionPct(requiredActive)
+  const boostPercent = boostPct(boostActive)
+  const pct = String(requiredPct)
   // F2: presentation split only — `available`/`pct` above still feed the
   // reward breakdown from the full list, exactly as before.
   const { official: officialIntgs, sdk: sdkIntgs } = splitByTier(intgs)
@@ -164,7 +167,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
           Icon={Puzzle}
           label="Active Integrations"
           value={`${official.activeCount} / ${official.availableTotal}`}
-          sub={`${pct}% reward proportion`}
+          sub={`${pct}% base + ${boostPercent}% boost`}
           sub2={sdkLine ?? undefined}
           accent="var(--teal)"
         />
@@ -278,14 +281,14 @@ export default function Dashboard({ intgs }: DashboardProps) {
           </div>
           <div style={{ marginBottom: 12 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-              <span style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t1)' }}>Active</span>
-              <span style={{ fontFamily: 'var(--fm)', fontSize: 11, color: 'var(--teal)' }}>{activeFraction(active.length, available)}</span>
+              <span style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t1)' }}>Required active</span>
+              <span style={{ fontFamily: 'var(--fm)', fontSize: 11, color: 'var(--teal)' }}>{activeFraction(requiredActive, 2)}</span>
             </div>
             <div style={{ height: 4, background: 'var(--b1)', borderRadius: 2, overflow: 'hidden' }}>
               <div
                 style={{
                   height: '100%',
-                  width: `${proportionPct(active.length, available)}%`,
+                  width: `${requiredPct}%`,
                   background: 'var(--teal)',
                   borderRadius: 2,
                   transition: 'width .5s ease'
@@ -297,7 +300,8 @@ export default function Dashboard({ intgs }: DashboardProps) {
           {[
             ['Base reward', summary ? `${baseReward} ${rewardToken}` : '—', 'var(--txt)'],
             ['Staking mult', summary ? `${summary.stake_multiplier.toFixed(1)}×` : '—', 'var(--teal)'],
-            ['Proportion', `${pct}%`, 'var(--txt)'],
+            ['Required proportion', `${requiredPct}%`, 'var(--txt)'],
+            ['Boost', `+${boostPercent}% (${boostActive} active)`, 'var(--teal)'],
             ['BYOD factor', '1.0×', 'var(--t1)']
           ].map(([l, v, c]) => (
             <div key={l as string} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>

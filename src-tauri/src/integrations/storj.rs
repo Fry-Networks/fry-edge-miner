@@ -284,9 +284,12 @@ impl Integration for StorjIntegration {
             _ => {
                 // TODO-COVERAGE-GAP: node-online state requires Storj account auth token (email signup).
                 // Install + eligibility + exclusivity work without the token; this state guides the
-                // user to paste their token for full activation.
+                // user to paste their token for full activation. F4: the toggle "not staying on" is
+                // this awaiting-setup state, not a crash — make the required action explicit so the
+                // card reads as "needs your Storj token", not a failed start.
                 HealthStatus::Unhealthy(
-                    "Identity pending — complete Storj account setup at storj.io to activate this node".to_string()
+                    "Awaiting Storj setup — create a node auth token at storj.io and complete node identity to bring this node online. Install and eligibility are already active."
+                        .to_string()
                 )
             }
         }

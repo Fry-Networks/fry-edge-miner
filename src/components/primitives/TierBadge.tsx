@@ -9,7 +9,7 @@ const LABEL: Record<BadgeKind, string> = {
   sdk: 'SDK',
   experimental: 'EXPERIMENTAL',
   required: 'REQUIRED',
-  optional: 'OPTIONAL — BOOST'
+  optional: 'OPTIONAL — BOOST +5%'
 }
 
 // Provenance badges carry a border; Tag (Running/Unhealthy/…) never does.

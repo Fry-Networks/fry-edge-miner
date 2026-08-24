@@ -237,8 +237,24 @@ impl Integration for MysteriumIntegration {
             anyhow::anyhow!("Miner key not set — complete device registration before starting MystNodes")
         })?;
 
-        let creds = crate::api::credentials::lookup(&self.api_client, miner_key)
-            .await
+        // F8: mirror the Diiisco credential path — a lookup right after
+        // registration can hit a transient network error, and a single attempt
+        // surfaced that as a permanent "token not found". Retry the transient
+        // (network) failures with backoff. A genuinely empty token is a
+        // server-side provisioning gap (hardwareapi), handled below/out-of-band.
+        let mut cred_result = crate::api::credentials::lookup(&self.api_client, miner_key).await;
+        for attempt in 1..=3u32 {
+            match &cred_result {
+                Err(crate::api::client::ApiError::Request(_)) => {
+                    let delay = 2u64.pow(attempt);
+                    warn!(attempt, delay_secs = delay, "MystNodes credential fetch failed (network error), retrying");
+                    tokio::time::sleep(Duration::from_secs(delay)).await;
+                    cred_result = crate::api::credentials::lookup(&self.api_client, miner_key).await;
+                }
+                _ => break,
+            }
+        }
+        let creds = cred_result
             .map_err(|e| anyhow::anyhow!("Failed to fetch credentials: {}", e))?;
 
         // Extract mystnodes_user_token — fail-closed if missing (no user-claimable fallback)

@@ -6,7 +6,8 @@ import EmptyState from '../components/primitives/EmptyState'
 import type { FrontendIntegration } from '../hooks/useIntegrations'
 import { categoryCounts, toggleAllTargets } from '../lib/availability'
 import type { ConsentStatus } from '../lib/consentDialog'
-import { CATEGORIES, type IntegrationCategory } from '../lib/integrationMeta'
+import { boostPct } from '../lib/integrationCount'
+import { CATEGORIES, isRequiredIntegration, type IntegrationCategory } from '../lib/integrationMeta'
 import type { DockerProgress, SystemStatus } from '../lib/types'
 
 const CATEGORY_ICONS: Record<IntegrationCategory, LucideIcon> = {
@@ -42,11 +43,10 @@ export default function Integrations({
   onConsentConfirm,
   onConsentCancel
 }: IntegrationsProps) {
-  const active = intgs.filter((i) => i.enabled).length
-  // Divide by what this machine can run, matching the denominator the PoC
-  // reporter actually submits — otherwise the banner and each card's reward
-  // contribution disagree.
-  const available = categoryCounts(intgs).availableTotal
+  // F17: reward proportion is driven by the two REQUIRED integrations (Fry dVPN
+  // + Olostep); every other active integration is a flat +5% boost.
+  const requiredActive = intgs.filter((i) => i.enabled && isRequiredIntegration(i.id)).length
+  const boostActive = intgs.filter((i) => i.enabled && !isRequiredIntegration(i.id)).length
   const dockerNotReady = !!system && system.docker !== 'ready'
   const anyNeedsDocker = intgs.some((i) => i.requires_docker)
 
@@ -74,8 +74,10 @@ export default function Integrations({
         }}
       >
         <span style={{ fontFamily: 'var(--fb)', fontSize: 13, color: 'var(--t1)' }}>
-          Each <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>running</span> integration contributes {available > 0 ? Math.round(100 / available) : 0}% to your daily
-          reward.
+          Only <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>Fry dVPN</span> and{' '}
+          <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>Olostep Browser</span> need to be active for
+          full rewards. Every other integration adds a{' '}
+          <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>+5% boost</span> each.
         </span>
         <div
           style={{
@@ -86,10 +88,11 @@ export default function Integrations({
             background: 'var(--tealg)',
             color: 'var(--teal)',
             flexShrink: 0,
-            marginLeft: 12
+            marginLeft: 12,
+            whiteSpace: 'nowrap'
           }}
         >
-          {active}/{available} · {available > 0 ? Math.round((active / available) * 100) : 0}%
+          Required {requiredActive}/2 · +{boostPct(boostActive)}% boost
         </div>
       </div>
       {dockerProgress && (

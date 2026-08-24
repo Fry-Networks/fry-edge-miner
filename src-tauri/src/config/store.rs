@@ -97,8 +97,14 @@ impl ConfigStore {
             roaming_path,
             load_warning: RwLock::new(warning),
         };
-        // Re-persist immediately so recovered state propagates to every copy.
-        if store.get().miner_key.is_some() {
+        // F1: only re-persist at boot when we ACTUALLY recovered from a backup or
+        // roaming copy (so the missing primary gets rebuilt). Rewriting an
+        // already-good primary config on every single launch churned the file
+        // and clobbered any hand-edits the user had made — the "fem_config.json
+        // overwritten on every restart" report. A clean primary load leaves the
+        // file untouched.
+        let recovered = recovered_from.is_some();
+        if recovered && store.get().miner_key.is_some() {
             if let Err(e) = store.save() {
                 tracing::warn!(error = %e, "ConfigStore: initial re-persist failed");
             }

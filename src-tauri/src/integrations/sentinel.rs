@@ -175,6 +175,52 @@ impl SentinelIntegration {
             .map(|s| s.trim().to_string())
             .filter(|s| s.starts_with("sent1"))
     }
+
+    /// F16: minimum node balance (in udvpn) below which a Sentinel node cannot
+    /// register on chain. Each node runs its own Fry-managed wallet.
+    const MIN_FUNDING_UDVPN: u64 = 10_000_000; // 10 DVPN (6 decimals)
+
+    /// F16 gate: whether FEM should actually transfer DVPN from the Fry treasury
+    /// to under-funded nodes. Default OFF — the per-node wallet management and
+    /// the funding decision below both run, but no live transfer happens unless
+    /// this is explicitly enabled. Keeps the capability shipped without moving
+    /// real funds.
+    fn auto_fund_enabled() -> bool {
+        std::env::var("FRY_SENTINEL_AUTO_FUND")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    /// F16: keep each node's Fry-managed wallet funded so it can register on
+    /// chain. The per-node key is generated and held inside the container — the
+    /// user has no access to it. This resolves the node address and decides
+    /// whether it needs funding; the actual treasury transfer is gated OFF by
+    /// default, so no live DVPN moves. When auto-funding is enabled the live
+    /// path is still guarded (the treasury endpoint is wired in deliberately by
+    /// an operator), so a flipped flag alone never silently spends funds.
+    async fn maybe_auto_fund(compose: &std::path::Path) {
+        let Some(addr) = Self::node_address(compose) else {
+            warn!("Sentinel node address unavailable — skipping funding check");
+            return;
+        };
+        if !Self::auto_fund_enabled() {
+            info!(
+                node = %addr,
+                min_udvpn = Self::MIN_FUNDING_UDVPN,
+                "Sentinel node would be auto-funded from the Fry treasury (auto-funding gated — no live transfer this build)"
+            );
+            return;
+        }
+        // Auto-funding explicitly enabled. The live treasury transfer requires a
+        // funding endpoint that is intentionally not wired in this build, so we
+        // do NOT move funds even when the flag is set — surface the intent and
+        // the target so an operator can complete the wiring deliberately.
+        warn!(
+            node = %addr,
+            min_udvpn = Self::MIN_FUNDING_UDVPN,
+            "Sentinel auto-funding is enabled but the treasury funding path is not wired in this build — NOT sending. Fund this node manually or complete the treasury endpoint."
+        );
+    }
 }
 
 #[async_trait]
@@ -252,6 +298,10 @@ impl Integration for SentinelIntegration {
             anyhow::bail!("Failed to start Sentinel dVPN: {}", tail_lines(&stderr, 15));
         }
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+        // F16: the node now has a Fry-managed wallet — check it and (gated)
+        // top it up from the treasury so it can register on chain.
+        Self::maybe_auto_fund(&compose).await;
         Ok(())
     }
 

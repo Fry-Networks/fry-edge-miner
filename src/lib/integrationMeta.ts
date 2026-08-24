@@ -150,4 +150,30 @@ export const INTEGRATION_META: IntegrationMeta[] = [
   }
 ]
 
+/**
+ * F17 reward tiering (operator model — mirrors the hardcoded lists in
+ * dbrewards). Only Fry dVPN and Olostep (`aem`) are REQUIRED to earn the full
+ * base reward proportion; every other integration is an optional BOOST worth
+ * +5% each. This is a reward-role concept, deliberately separate from `tier`
+ * (partner provenance) above, so official partners keep their provenance badge
+ * while the required/boost split drives the reward messaging.
+ */
+export const REQUIRED_INTEGRATIONS = ['fryvpn', 'aem'] as const
+export const BOOST_INTEGRATIONS = [
+  'mysterium',
+  'diiisco',
+  'space_acres',
+  'storj',
+  'titan',
+  'sentinel',
+  'iagon',
+  'pawns'
+] as const
+export const BOOST_RATE = 0.05
+
+/** True for the integrations required to earn the full base reward proportion. */
+export function isRequiredIntegration(id: string): boolean {
+  return (REQUIRED_INTEGRATIONS as readonly string[]).includes(id)
+}
+
 export const GATES = ['data', 'online', 'mac', 'pol', 'poi', 'poa']

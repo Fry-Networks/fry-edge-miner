@@ -83,6 +83,52 @@ impl FryVpnIntegration {
     }
 }
 
+/// One HTTP probe of the local frynode `/health` endpoint. Extracted so the
+/// health check can retry across the warm-up window (F5).
+async fn probe_health_once() -> HealthStatus {
+    let client = reqwest::Client::new();
+    let health_url = "http://127.0.0.1:8088/health";
+
+    match tokio::time::timeout(Duration::from_secs(5), client.get(health_url).send()).await {
+        Ok(Ok(resp)) if resp.status().is_success() => {
+            match resp.json::<serde_json::Value>().await {
+                Ok(body) => {
+                    let is_healthy = body
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s == "healthy")
+                        .unwrap_or(false);
+                    let is_registered = body
+                        .get("registered")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+
+                    if is_healthy && is_registered {
+                        HealthStatus::Healthy
+                    } else if !is_healthy {
+                        HealthStatus::Unhealthy("dVPN health check: status != healthy".to_string())
+                    } else {
+                        HealthStatus::Unhealthy("dVPN not registered on-chain".to_string())
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to parse health response");
+                    HealthStatus::Unhealthy("Invalid health response format".to_string())
+                }
+            }
+        }
+        Ok(Ok(_)) => HealthStatus::Unhealthy("Health check returned non-200".to_string()),
+        Ok(Err(e)) => {
+            warn!(error = %e, "Health check request failed");
+            HealthStatus::Unhealthy(format!("Health check error: {}", e))
+        }
+        Err(_) => {
+            warn!("Health check timeout");
+            HealthStatus::Unhealthy("Health check timeout".to_string())
+        }
+    }
+}
+
 #[async_trait]
 impl Integration for FryVpnIntegration {
     fn id(&self) -> &str {
@@ -162,54 +208,21 @@ impl Integration for FryVpnIntegration {
             return HealthStatus::Stopped;
         }
 
-        // HTTP health check
-        let client = reqwest::Client::new();
-        let health_url = "http://127.0.0.1:8088/health";
-
-        match tokio::time::timeout(
-            Duration::from_secs(5),
-            client.get(health_url).send(),
-        )
-        .await
-        {
-            Ok(Ok(resp)) if resp.status().is_success() => {
-                // Try to parse response as JSON
-                match resp.json::<serde_json::Value>().await {
-                    Ok(body) => {
-                        let is_healthy = body
-                            .get("status")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s == "healthy")
-                            .unwrap_or(false);
-                        let is_registered = body
-                            .get("registered")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-
-                        if is_healthy && is_registered {
-                            HealthStatus::Healthy
-                        } else if !is_healthy {
-                            HealthStatus::Unhealthy("dVPN health check: status != healthy".to_string())
-                        } else {
-                            HealthStatus::Unhealthy("dVPN not registered on-chain".to_string())
-                        }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "Failed to parse health response");
-                        HealthStatus::Unhealthy("Invalid health response format".to_string())
-                    }
-                }
+        // F5: the frynode HTTP endpoint and its on-chain registration both settle
+        // a beat after the process starts, so a single probe races the warm-up
+        // and flips the card to Unhealthy — arming a needless restart. Retry a
+        // few times and only surface the last failure if none succeed.
+        let mut last = HealthStatus::Unhealthy("dVPN health check pending".to_string());
+        for attempt in 0..3u32 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
             }
-            Ok(Ok(_)) => HealthStatus::Unhealthy("Health check returned non-200".to_string()),
-            Ok(Err(e)) => {
-                warn!(error = %e, "Health check request failed");
-                HealthStatus::Unhealthy(format!("Health check error: {}", e))
-            }
-            Err(_) => {
-                warn!("Health check timeout");
-                HealthStatus::Unhealthy("Health check timeout".to_string())
+            match probe_health_once().await {
+                HealthStatus::Healthy => return HealthStatus::Healthy,
+                other => last = other,
             }
         }
+        last
     }
 
     async fn check_update(&self) -> Result<Option<String>> {

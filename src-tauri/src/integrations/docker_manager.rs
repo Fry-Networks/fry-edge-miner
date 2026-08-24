@@ -62,15 +62,17 @@ pub enum DockerProbe {
     CliMissing,
 }
 
-/// Bounded docker probe with a 3-second timeout. Spawns `docker info` and polls
-/// every 100ms, killing and reaping the child on timeout.
-pub fn docker_cli_probe_detailed() -> DockerProbe {
-    const TIMEOUT_SECS: u64 = 3;
+/// Spawn a bounded `docker <args...>` probe, polling every 100ms up to
+/// `timeout_secs`, killing and reaping the child on timeout.
+fn docker_bounded_probe(args: &[&str], timeout_secs: u64) -> DockerProbe {
     const POLL_INTERVAL_MS: u64 = 100;
-    const MAX_POLLS: u64 = (TIMEOUT_SECS * 1000) / POLL_INTERVAL_MS;
+    let max_polls = (timeout_secs * 1000) / POLL_INTERVAL_MS;
 
-    let mut child = match crate::supervisor::platform::command("docker")
-        .arg("info")
+    let mut cmd = crate::supervisor::platform::command("docker");
+    for a in args {
+        cmd.arg(a);
+    }
+    let mut child = match cmd
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -82,7 +84,7 @@ pub fn docker_cli_probe_detailed() -> DockerProbe {
         }
     };
 
-    for _poll in 0..MAX_POLLS {
+    for _poll in 0..max_polls {
         match child.try_wait() {
             Ok(Some(status)) => {
                 return if status.success() {
@@ -101,8 +103,30 @@ pub fn docker_cli_probe_detailed() -> DockerProbe {
     // Timeout reached — kill and reap the child so it can't linger as a zombie.
     let _ = child.kill();
     let _ = child.wait();
-    tracing::warn!("Docker probe timed out after {} seconds", TIMEOUT_SECS);
     DockerProbe::TimedOut
+}
+
+/// Bounded docker probe. `docker info` is authoritative but heavy: on a busy
+/// Docker Desktop (WSL2) daemon it regularly took longer than the old 3s window
+/// and was reported as Stopped even though `docker run hello-world` worked (F11).
+/// Give `docker info` a longer window and, on timeout, fall back to the far
+/// lighter `docker version` server ping before concluding the daemon is down.
+pub fn docker_cli_probe_detailed() -> DockerProbe {
+    match docker_bounded_probe(&["info"], 10) {
+        DockerProbe::TimedOut => {
+            match docker_bounded_probe(&["version", "--format", "{{.Server.Version}}"], 5) {
+                // A successful server-version ping means the daemon is reachable.
+                DockerProbe::Ready => DockerProbe::Ready,
+                _ => {
+                    tracing::warn!(
+                        "Docker probe timed out and the lighter version ping did not confirm the daemon"
+                    );
+                    DockerProbe::TimedOut
+                }
+            }
+        }
+        other => other,
+    }
 }
 
 /// Probe the docker CLI: Some(true) = daemon ready, Some(false) = CLI present

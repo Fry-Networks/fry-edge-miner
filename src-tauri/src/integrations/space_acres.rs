@@ -438,8 +438,13 @@ impl Integration for SpaceAcresIntegration {
     }
 
     async fn health_check(&self) -> HealthStatus {
-        let binary = Self::binary_path();
-        if !binary.exists() {
+        // F6: resolve the real install location (Program Files on Windows), so a
+        // running farmer reports Healthy instead of a permanent Stopped.
+        #[cfg(target_os = "windows")]
+        let installed = Self::installed_binary().is_some();
+        #[cfg(not(target_os = "windows"))]
+        let installed = Self::binary_path().exists();
+        if !installed {
             return HealthStatus::Stopped;
         }
         if !has_ssd() {
@@ -484,7 +489,15 @@ impl Integration for SpaceAcresIntegration {
     }
 
     fn installed_version(&self) -> Option<String> {
-        if Self::binary_path().exists() {
+        // F6: on Windows the installer drops space-acres.exe into Program Files,
+        // not our staged partner dir — so resolve the same way start() does, or
+        // main.rs treats an installed farmer as "not installed" and re-runs the
+        // installer on every launch.
+        #[cfg(target_os = "windows")]
+        let present = Self::installed_binary().is_some();
+        #[cfg(not(target_os = "windows"))]
+        let present = Self::binary_path().exists();
+        if present {
             Some("installed".into())
         } else {
             None

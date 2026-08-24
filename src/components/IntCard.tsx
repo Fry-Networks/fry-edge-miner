@@ -4,6 +4,7 @@ import type { FrontendIntegration } from '../hooks/useIntegrations'
 import { consentBadge } from '../lib/consentDialog'
 import { DISABLE_CONFIRM_MS, shouldConfirmDisable } from '../lib/disableConfirm'
 import { condenseError } from '../lib/error'
+import { isRequiredIntegration } from '../lib/integrationMeta'
 import { OFFICIAL_DISABLED_WARNING, SDK_REPORT_LINE } from '../lib/support'
 import { unhealthyReason } from '../lib/types'
 import Tag from './primitives/Tag'
@@ -42,6 +43,8 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
   const inst = version !== null
   const reason = unhealthyReason(health)
   const isSdk = tier === 'sdk'
+  // F17: reward role (required vs boost) is independent of partner provenance.
+  const isRequired = isRequiredIntegration(id)
   const consent = consentBadge(consentActive)
 
   // F4: disabling an official partner costs reward proportion, so the first
@@ -183,7 +186,7 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
             </span>
             <TierBadge kind={tier} />
             {isSdk && <TierBadge kind="experimental" />}
-            <TierBadge kind={isSdk ? 'optional' : 'required'} />
+            <TierBadge kind={isRequired ? 'required' : 'optional'} />
             <span title={reason ?? undefined} style={reason ? { cursor: 'help' } : undefined}>
               <Tag v={tv}>{stNode}</Tag>
             </span>
