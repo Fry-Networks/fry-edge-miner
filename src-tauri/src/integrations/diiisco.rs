@@ -139,6 +139,20 @@ async fn fetch_credentials_with_retry(
     result
 }
 
+/// User-facing form of a failed credentials lookup. Network-level failures
+/// route through the shared classifier (DNS / connect / timeout / TLS get
+/// actionable guidance — carriers blocking *.frynetworks.com is a known
+/// case); HTTP errors keep ApiError's already-sanitized display.
+fn credential_fetch_error(e: crate::api::client::ApiError) -> anyhow::Error {
+    use crate::api::error_classify::{classify_request_error, user_facing_message};
+    if let crate::api::client::ApiError::Request(req) = &e {
+        if let Some(msg) = user_facing_message(classify_request_error(req)) {
+            return anyhow::anyhow!("Failed to fetch credentials — {msg}");
+        }
+    }
+    anyhow::anyhow!("Failed to fetch credentials: {e}")
+}
+
 fn docker_available() -> bool {
     super::docker_manager::docker_cli_probe_bounded() == Some(true)
 }
@@ -211,7 +225,7 @@ impl Integration for DiiiscoIntegration {
             anyhow::anyhow!("Miner key not set — complete device registration before installing Diiisco")
         })?;
         let creds = fetch_credentials_with_retry(&self.api_client, miner_key).await
-            .map_err(|e| anyhow::anyhow!("Failed to fetch credentials: {}", e))?;
+            .map_err(credential_fetch_error)?;
         let algo_address = match classify_wallet(creds.algo_address.as_deref()) {
             Ok(addr) => {
                 record_wallet_state(true);
@@ -287,7 +301,7 @@ impl Integration for DiiiscoIntegration {
             anyhow::anyhow!("Miner key not set — complete device registration before starting Diiisco")
         })?;
         let creds = fetch_credentials_with_retry(&self.api_client, miner_key).await
-            .map_err(|e| anyhow::anyhow!("Failed to fetch credentials: {}", e))?;
+            .map_err(credential_fetch_error)?;
         let algo_address = match classify_wallet(creds.algo_address.as_deref()) {
             Ok(addr) => {
                 record_wallet_state(true);
@@ -589,5 +603,46 @@ mod wallet_condition_tests {
         // The supervisor re-arms roughly every 5 minutes; a TTL below that
         // would let the hammering resume.
         assert!(WALLET_CACHE_TTL >= Duration::from_secs(600));
+    }
+}
+
+/// The credential-fetch card used to show reqwest's raw chain — full URL
+/// included, truncated mid-word by the card. Network failures should say
+/// what to do instead.
+#[cfg(test)]
+mod credential_error_message_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_network_failure_reads_as_guidance_not_a_reqwest_chain() {
+        // .invalid is reserved (RFC 2606) — resolution always fails locally.
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let req_err = client
+            .get("https://fem-cred-test.invalid/credentials/x")
+            .send()
+            .await
+            .expect_err("request to .invalid must fail");
+        let e = crate::api::client::ApiError::Request(req_err);
+        let msg = credential_fetch_error(e).to_string();
+        assert!(msg.starts_with("Failed to fetch credentials"), "{msg}");
+        assert!(
+            !msg.contains("error sending request for url"),
+            "raw reqwest chain leaked: {msg}"
+        );
+        assert!(
+            msg.contains("hardwareapi.frynetworks.com") || msg.contains("connection"),
+            "message must be actionable: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_http_status_error_keeps_its_sanitized_display() {
+        let e = crate::api::client::ApiError::HttpStatus(504, "<html>x</html>".into());
+        let msg = credential_fetch_error(e).to_string();
+        assert!(msg.contains("504"), "{msg}");
+        assert!(!msg.contains("<html>"), "{msg}");
     }
 }
