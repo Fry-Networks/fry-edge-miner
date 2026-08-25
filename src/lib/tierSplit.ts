@@ -58,17 +58,6 @@ export function tierCounts(members: TierLike[]): {
   return categoryCounts(members)
 }
 
-/**
- * Counts for the official tier of a full integration list.
- *
- * No longer the headline figure: the Dashboard StatCard and the sidebar badge
- * count REQUIRED integrations via `requiredActiveCount` now that the reward
- * model is required-driven. Kept for tier-level counting.
- */
-export function officialCounts(members: TierLike[]) {
-  return tierCounts(splitByTier(members).official)
-}
-
 /** Counts for the community tier of a full integration list. */
 export function sdkCounts(members: TierLike[]) {
   return tierCounts(splitByTier(members).sdk)

@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest'
 import {
   splitByTier,
   tierCounts,
-  officialCounts,
   sdkCounts,
   sdkActiveLine,
   type TierLike
@@ -66,10 +65,9 @@ describe('tierCounts', () => {
   })
 })
 
-// The sidebar badge and the Dashboard headline both read officialCounts. They
-// used to derive their figures independently and disagreed — the sidebar said
-// N/10 (whole catalogue) while the Dashboard said N/5 (official only).
-describe('officialCounts / sdkCounts', () => {
+// The headline moved to required-active counting in v0.4.18; the community
+// tier keeps its own secondary line, counted over the sdk tier only.
+describe('sdkCounts', () => {
   const fleet = [
     intg({ id: 'mysterium', tier: 'official', enabled: true }),
     intg({ id: 'aem', tier: 'official', enabled: true }),
@@ -83,15 +81,6 @@ describe('officialCounts / sdkCounts', () => {
     intg({ id: 'iagon', tier: 'sdk' })
   ]
 
-  it('counts only official partners against the headline denominator', () => {
-    // The bug: a full catalogue of 10 must never produce a denominator of 10.
-    expect(officialCounts(fleet)).toEqual({
-      activeCount: 2,
-      availableTotal: 5,
-      unavailableCount: 0
-    })
-  })
-
   it('counts only community builds for the secondary line', () => {
     expect(sdkCounts(fleet)).toEqual({
       activeCount: 1,
@@ -100,25 +89,17 @@ describe('officialCounts / sdkCounts', () => {
     })
   })
 
-  it('gives the sidebar and the Dashboard the same figures from one call', () => {
-    const a = officialCounts(fleet)
-    const b = officialCounts(fleet)
-    expect(a).toEqual(b)
-    expect(`${a.activeCount} / ${a.availableTotal}`).toBe('2 / 5')
-  })
-
   it('still drops hardware-unavailable members from the denominator', () => {
     const withUnavailable = [
       ...fleet,
-      intg({ id: 'ghost', tier: 'official', unavailable_reason: 'needs 900 GB' })
+      intg({ id: 'ghost', tier: 'sdk', unavailable_reason: 'needs 900 GB' })
     ]
-    const counts = officialCounts(withUnavailable)
+    const counts = sdkCounts(withUnavailable)
     expect(counts.availableTotal).toBe(5)
     expect(counts.unavailableCount).toBe(1)
   })
 
   it('is all zeroes for an empty list rather than throwing', () => {
-    expect(officialCounts([])).toEqual({ activeCount: 0, availableTotal: 0, unavailableCount: 0 })
     expect(sdkCounts([])).toEqual({ activeCount: 0, availableTotal: 0, unavailableCount: 0 })
   })
 })
