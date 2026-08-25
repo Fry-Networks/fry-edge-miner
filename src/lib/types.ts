@@ -151,3 +151,13 @@ export function unhealthyReason(health: HealthStatus): string | null {
   if (typeof health !== 'string' && 'Unhealthy' in health) return health.Unhealthy
   return null
 }
+
+// The Sentinel node's own `sent1...` funding address, extracted from the
+// "account not funded" health reason. The backend surfaces it (sentinel.rs
+// node_address() guarantees the sent1 prefix) but only inside the Unhealthy
+// message; this lets the UI show it as a prominent, copyable funding target.
+// Returns null when the health status carries no such address.
+export function sentinelFundingAddress(health: HealthStatus): string | null {
+  const reason = unhealthyReason(health)
+  return reason?.match(/sent1[0-9a-z]+/)?.[0] ?? null
+}

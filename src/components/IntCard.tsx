@@ -6,7 +6,8 @@ import { DISABLE_CONFIRM_MS, shouldConfirmDisable } from '../lib/disableConfirm'
 import { condenseError } from '../lib/error'
 import { isRequiredIntegration } from '../lib/integrationMeta'
 import { OFFICIAL_DISABLED_WARNING, SDK_REPORT_LINE } from '../lib/support'
-import { unhealthyReason } from '../lib/types'
+import { unhealthyReason, sentinelFundingAddress } from '../lib/types'
+import CopyField from './primitives/CopyField'
 import Tag from './primitives/Tag'
 import TierBadge from './primitives/TierBadge'
 import Tog from './primitives/Tog'
@@ -42,6 +43,11 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
   } = intg
   const inst = version !== null
   const reason = unhealthyReason(health)
+  // Sentinel dVPN nodes must be funded manually (auto-funding is blocked — no
+  // treasury balance and no mainnet DVPN faucet). When the node reports its
+  // account isn't funded, surface its own sent1 address prominently + copyable
+  // instead of burying it in a truncated one-liner.
+  const fundingAddr = id === 'sentinel' ? sentinelFundingAddress(health) : null
   const isSdk = tier === 'sdk'
   // F17: reward role (required vs boost) is independent of partner provenance.
   const isRequired = isRequiredIntegration(id)
@@ -245,26 +251,50 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
               </span>
             )}
             {reason && st === 'err' && !startError && (
-              <span
-                data-testid={`error-${id}`}
-                role="alert"
-                style={{
-                  fontFamily: 'var(--fb)',
-                  fontSize: 11,
-                  color: 'var(--amb)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 4,
-                  minWidth: 0,
-                  maxWidth: 420,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap'
-                }}
-                title={reason}
-              >
-                <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {reason}
-              </span>
+              fundingAddr ? (
+                <div
+                  data-testid={`sentinel-fund-${id}`}
+                  role="alert"
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 6,
+                    minWidth: 0,
+                    fontFamily: 'var(--fb)',
+                    fontSize: 11,
+                    color: 'var(--amb)'
+                  }}
+                >
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <AlertTriangle size={11} style={{ flexShrink: 0 }} /> Send 10 DVPN to this node address to activate it
+                  </span>
+                  <CopyField val={fundingAddr} />
+                  <span style={{ color: 'var(--t2)' }}>
+                    Fund manually — acquire DVPN on an exchange (e.g. Osmosis, KuCoin). No faucet exists.
+                  </span>
+                </div>
+              ) : (
+                <span
+                  data-testid={`error-${id}`}
+                  role="alert"
+                  style={{
+                    fontFamily: 'var(--fb)',
+                    fontSize: 11,
+                    color: 'var(--amb)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 4,
+                    minWidth: 0,
+                    maxWidth: 420,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap'
+                  }}
+                  title={reason}
+                >
+                  <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {reason}
+                </span>
+              )
             )}
             {dockerNote && !startError && (
               <span
