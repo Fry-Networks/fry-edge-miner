@@ -9,7 +9,7 @@ use serde::Serialize;
 pub enum ApiError {
     #[error("HTTP request failed: {0}")]
     Request(#[from] reqwest::Error),
-    #[error("HTTP {0}: {1}")]
+    #[error("{}", format_http_status(*.0, .1))]
     HttpStatus(u16, String),
     #[error("Failed to decode response from {path} (HTTP {status}): {message} — body starts with: {snippet}")]
     Decode {
@@ -18,6 +18,53 @@ pub enum ApiError {
         message: String,
         snippet: String,
     },
+}
+
+/// User-facing form of an HTTP error: "HTTP 504 Gateway Timeout: <safe body>".
+fn format_http_status(status: u16, body: &str) -> String {
+    let reason = status_reason(status);
+    if reason.is_empty() {
+        format!("HTTP {status}: {}", displayable_body(body))
+    } else {
+        format!("HTTP {status} {reason}: {}", displayable_body(body))
+    }
+}
+
+/// Human-readable reason for the status codes hardwareapi's edge actually
+/// produces; empty for anything else so the code alone still reads fine.
+fn status_reason(status: u16) -> &'static str {
+    match status {
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        409 => "Conflict",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => "",
+    }
+}
+
+/// UB-3: what an error body is allowed to look like in a user-facing message.
+///
+/// A CDN or proxy failure hands back its whole HTML error page; rendering
+/// that verbatim put a full `<!DOCTYPE html>` dump in the Dashboard banner.
+/// The raw body stays in the variant for callers that pattern-match on it —
+/// only Display is filtered.
+fn displayable_body(body: &str) -> String {
+    const MAX_BODY_CHARS: usize = 200;
+    let trimmed = body.trim();
+    if trimmed.starts_with('<') {
+        return "(HTML error page from server/CDN suppressed)".to_string();
+    }
+    if trimmed.chars().count() > MAX_BODY_CHARS {
+        let cut: String = trimmed.chars().take(MAX_BODY_CHARS).collect();
+        return format!("{cut}…");
+    }
+    trimmed.to_string()
 }
 
 /// Parse a JSON body with actionable context instead of reqwest's bare
@@ -156,5 +203,48 @@ impl ApiClient {
             return Err(ApiError::HttpStatus(status, body));
         }
         Ok(())
+    }
+}
+
+/// UB-3: the Dashboard banner renders `ApiError` Display verbatim, and a CDN
+/// 504 hands back its whole HTML error page as the body — which used to be
+/// dumped raw into the UI.
+#[cfg(test)]
+mod http_status_display_tests {
+    use super::*;
+
+    const BUNNY_504_PAGE: &str = r#"<!DOCTYPE html>
+<html>
+<head><title>504 Gateway Timeout</title>
+<script src="https://bunnynetassets.b-cdn.net/x.js"></script></head>
+<body>We can't connect to the server at 124.190.73.241.</body>
+</html>"#;
+
+    #[test]
+    fn an_html_error_body_is_never_shown_verbatim() {
+        let msg = ApiError::HttpStatus(504, BUNNY_504_PAGE.to_string()).to_string();
+        assert!(
+            !msg.contains("<!DOCTYPE") && !msg.contains("<html"),
+            "HTML error page leaked into the user-facing message: {msg}"
+        );
+        assert!(msg.contains("504"), "status code must survive: {msg}");
+        assert!(
+            msg.contains("Gateway Timeout"),
+            "the human-readable reason should replace the page: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_short_json_error_body_still_shows_its_detail() {
+        let msg = ApiError::HttpStatus(409, r#"{"detail":"IP conflict"}"#.to_string()).to_string();
+        assert!(msg.contains("IP conflict"), "API JSON detail must survive: {msg}");
+        assert!(msg.contains("409"), "{msg}");
+    }
+
+    #[test]
+    fn an_oversized_text_body_is_truncated() {
+        let long = "x".repeat(1000);
+        let msg = ApiError::HttpStatus(500, long).to_string();
+        assert!(msg.len() < 400, "body must be truncated, got {} chars", msg.len());
     }
 }

@@ -8,6 +8,7 @@ import TierBadge from '../components/primitives/TierBadge'
 import Divider from '../components/primitives/Divider'
 import { useRewards } from '../hooks/useRewards'
 import { useReporting } from '../hooks/useReporting'
+import { condenseError } from '../lib/error'
 import { activeFraction, boostPct, requiredProportionPct } from '../lib/integrationCount'
 import { isRequiredIntegration, type IntegrationTier } from '../lib/integrationMeta'
 import { SDK_REPORT_LINE } from '../lib/support'
@@ -143,7 +144,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
           }}
         >
           <strong>Not reporting to Fry Networks.</strong>{' '}
-          {reporting?.last_poc_error || reporting?.lease_error || 'PoC submissions are failing.'}{' '}
+          {condenseError(reporting?.last_poc_error || reporting?.lease_error || 'PoC submissions are failing.')}{' '}
           Rewards pause while reporting is down — the status below may be stale.
         </div>
       )}
@@ -159,7 +160,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
             color: 'var(--amb)'
           }}
         >
-          Reporting hiccup — retrying automatically. Last error: {reporting?.last_poc_error}
+          Reporting hiccup — retrying automatically. Last error: {condenseError(reporting?.last_poc_error ?? '')}
         </div>
       )}
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
