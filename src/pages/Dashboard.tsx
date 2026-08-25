@@ -12,7 +12,7 @@ import { condenseError } from '../lib/error'
 import { activeFraction, boostPct, requiredProportionPct } from '../lib/integrationCount'
 import { isRequiredIntegration, REQUIRED_INTEGRATIONS, type IntegrationTier } from '../lib/integrationMeta'
 import { SDK_REPORT_LINE } from '../lib/support'
-import { officialCounts, sdkActiveLine, sdkCounts, splitByTier } from '../lib/tierSplit'
+import { sdkActiveLine, sdkCounts, splitByRewardRole, splitByTier, tierCounts } from '../lib/tierSplit'
 
 interface DashboardIntegration {
   id: string
@@ -109,9 +109,12 @@ export default function Dashboard({ intgs }: DashboardProps) {
   const boostPercent = boostPct(boostActive)
   const pct = String(requiredPct)
   // F2: presentation split only — `available`/`pct` above still feed the
-  // reward breakdown from the full list, exactly as before.
+  // reward breakdown from the full list, exactly as before. The official tier
+  // splits again by reward role, so the two required cards get their own
+  // section and the partner grid does not repeat them.
   const { official: officialIntgs, sdk: sdkIntgs } = splitByTier(intgs)
-  const official = officialCounts(intgs)
+  const { required: requiredIntgs, boost: partnerIntgs } = splitByRewardRole(officialIntgs)
+  const partner = tierCounts(partnerIntgs)
   const sdk = sdkCounts(intgs)
   const sdkLine = sdkActiveLine(sdk.activeCount)
   const slotHits = rewards.slots.filter((s) => s.done).length
@@ -185,14 +188,32 @@ export default function Dashboard({ intgs }: DashboardProps) {
         <>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 9 }}>
+              <Lbl>Required Integrations</Lbl>
+              <TierBadge kind="required" />
+              <span style={{ fontFamily: 'var(--fm)', fontSize: 11, color: 'var(--t2)' }}>
+                {requiredActive}/{REQUIRED_INTEGRATIONS.length} active
+              </span>
+            </div>
+            <div style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t1)', marginBottom: 8 }}>
+              Both active = full base reward · one of two = 50%
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(185px,1fr))', gap: 8 }}>
+              {requiredIntgs.map((i) => (
+                <MiniCard key={i.id} intg={i} compact={false} />
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 9 }}>
               <Lbl>Official Partners</Lbl>
               <TierBadge kind="official" />
               <span style={{ fontFamily: 'var(--fm)', fontSize: 11, color: 'var(--t2)' }}>
-                {official.activeCount}/{official.availableTotal} active
+                {partner.activeCount}/{partner.availableTotal} active
               </span>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(185px,1fr))', gap: 8 }}>
-              {officialIntgs.map((i) => (
+              {partnerIntgs.map((i) => (
                 <MiniCard key={i.id} intg={i} compact={false} />
               ))}
             </div>

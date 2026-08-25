@@ -8,7 +8,7 @@
 // disagree about what "active" or "available" means.
 
 import { categoryCounts, type AvailabilityLike } from './availability'
-import type { IntegrationTier } from './integrationMeta'
+import { isRequiredIntegration, type IntegrationTier } from './integrationMeta'
 
 export interface TierLike extends AvailabilityLike {
   tier: IntegrationTier
@@ -24,6 +24,24 @@ export function splitByTier<T extends TierLike>(members: T[]): TierSplit<T> {
   return {
     official: members.filter((i) => i.tier === 'official'),
     sdk: members.filter((i) => i.tier === 'sdk')
+  }
+}
+
+export interface RewardRoleSplit<T> {
+  required: T[]
+  boost: T[]
+}
+
+/**
+ * Partition by reward role: the REQUIRED integrations (Fry dVPN + Olostep)
+ * against everything else, preserving input order. Presentation-only, like
+ * splitByTier — it feeds the dedicated "Required Integrations" section and
+ * keeps the partner grid from repeating those two cards.
+ */
+export function splitByRewardRole<T extends { id: string }>(members: T[]): RewardRoleSplit<T> {
+  return {
+    required: members.filter((i) => isRequiredIntegration(i.id)),
+    boost: members.filter((i) => !isRequiredIntegration(i.id))
   }
 }
 
