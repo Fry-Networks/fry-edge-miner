@@ -21,6 +21,30 @@ pub struct SpaceAcresIntegration;
 const GITHUB_API_URL: &str = "https://api.github.com/repos/autonomys/space-acres/releases/latest";
 const USER_AGENT: &str = concat!("FryEdgeMiner/", env!("CARGO_PKG_VERSION"));
 
+/// Every location the Space Acres binary can live under the discovery roots.
+/// Upstream's WiX package places it in a `bin` subdirectory
+/// (`<root>\Space Acres\bin\space-acres.exe`); older portable layouts keep it
+/// at the root. Pure so the layout list is testable.
+fn binary_candidates(roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots
+        .iter()
+        .flat_map(|root| {
+            [
+                root.join("space-acres.exe"),
+                root.join("bin").join("space-acres.exe"),
+            ]
+        })
+        .collect()
+}
+
+/// Whether install() actually needs to run the upstream installer. A live
+/// farmer process is proof of install even when path discovery misses —
+/// re-running the Burn installer over an existing install is what showed the
+/// Modify/Repair maintenance dialog on every launch.
+fn install_needed(running: bool, binary_found: bool) -> bool {
+    !running && !binary_found
+}
+
 impl SpaceAcresIntegration {
     fn partner_dir() -> PathBuf {
         partners_base_dir().join("space_acres")
@@ -70,13 +94,7 @@ impl SpaceAcresIntegration {
                 roots.push(PathBuf::from(&base).join("Space Acres"));
             }
         }
-        for root in roots {
-            let candidate = root.join("space-acres.exe");
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-        None
+        binary_candidates(&roots).into_iter().find(|c| c.exists())
     }
 
     fn github_token() -> Option<String> {
@@ -279,8 +297,17 @@ impl Integration for SpaceAcresIntegration {
     async fn install(&self) -> Result<()> {
         #[cfg(target_os = "windows")]
         {
-            if let Some(existing) = Self::installed_binary() {
-                info!(path = ?existing, "SpaceAcres already installed");
+            let binary_found = match Self::installed_binary() {
+                Some(existing) => {
+                    info!(path = ?existing, "SpaceAcres already installed");
+                    true
+                }
+                None => false,
+            };
+            if !install_needed(Self::is_running(), binary_found) {
+                if !binary_found {
+                    info!("SpaceAcres process already running — treating as installed");
+                }
                 return Ok(());
             }
 
@@ -612,4 +639,37 @@ fn has_ssd() -> bool {
 #[cfg(not(target_os = "windows"))]
 fn has_ssd() -> bool {
     false // Platform-specific SSD detection deferred
+}
+
+/// F6 follow-up: upstream's WiX package (res/windows/wix/space-acres.wxs)
+/// installs the farmer to `<root>\Space Acres\bin\space-acres.exe` — a `bin`
+/// level the discovery probe missed, so every fresh MSI install read as "not
+/// installed" and the Burn installer re-ran (showing its Modify/Repair
+/// maintenance dialog) on every launch.
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    #[test]
+    fn the_wix_bin_subdirectory_is_probed() {
+        let roots = vec![PathBuf::from(r"C:\Program Files\Space Acres")];
+        let candidates = binary_candidates(&roots);
+        assert!(
+            candidates.contains(&PathBuf::from(r"C:\Program Files\Space Acres\bin\space-acres.exe")),
+            "candidates must include the WiX bin layout: {candidates:?}"
+        );
+        assert!(
+            candidates.contains(&PathBuf::from(r"C:\Program Files\Space Acres\space-acres.exe")),
+            "the flat layout must keep working: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn a_running_farmer_never_triggers_a_reinstall() {
+        // The installer re-run is exactly the Repair-dialog loop, so a live
+        // process is proof of install even when path discovery misses.
+        assert!(!install_needed(true, false));
+        assert!(!install_needed(false, true));
+        assert!(install_needed(false, false));
+    }
 }
