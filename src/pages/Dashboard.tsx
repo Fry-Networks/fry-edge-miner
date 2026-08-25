@@ -10,7 +10,7 @@ import { useRewards } from '../hooks/useRewards'
 import { useReporting } from '../hooks/useReporting'
 import { condenseError } from '../lib/error'
 import { activeFraction, boostPct, requiredProportionPct } from '../lib/integrationCount'
-import { isRequiredIntegration, type IntegrationTier } from '../lib/integrationMeta'
+import { isRequiredIntegration, REQUIRED_INTEGRATIONS, type IntegrationTier } from '../lib/integrationMeta'
 import { SDK_REPORT_LINE } from '../lib/support'
 import { officialCounts, sdkActiveLine, sdkCounts, splitByTier } from '../lib/tierSplit'
 
@@ -166,8 +166,8 @@ export default function Dashboard({ intgs }: DashboardProps) {
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
         <StatCard
           Icon={Puzzle}
-          label="Active Integrations"
-          value={`${official.activeCount} / ${official.availableTotal}`}
+          label="Required Active"
+          value={`${requiredActive} / ${REQUIRED_INTEGRATIONS.length}`}
           sub={`${pct}% base + ${boostPercent}% boost`}
           sub2={sdkLine ?? undefined}
           accent="var(--teal)"

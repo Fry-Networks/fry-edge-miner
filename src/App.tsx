@@ -9,7 +9,9 @@ import SettingsPage from './pages/SettingsPage'
 import Updates from './pages/Updates'
 import Wizard from './wizard/Wizard'
 import { useIntegrations } from './hooks/useIntegrations'
-import { officialCounts, sdkActiveLine, sdkCounts } from './lib/tierSplit'
+import { sdkActiveLine, sdkCounts } from './lib/tierSplit'
+import { requiredActiveCount } from './lib/integrationCount'
+import { REQUIRED_INTEGRATIONS } from './lib/integrationMeta'
 import { deriveConnectivity } from './lib/connectivity'
 import { useDevice } from './hooks/useDevice'
 import { makeName } from './lib/names'
@@ -149,10 +151,10 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
     confirmConsent,
     cancelConsent
   } = useIntegrations()
-  // Official partners only, from the same helper the Dashboard headline uses —
-  // deriving these two independently is how the badge came to read N/10 while
-  // the Dashboard read N/5.
-  const official = officialCounts(integrations)
+  // Required integrations only, from the same helper the Dashboard headline
+  // uses — deriving these two independently is how the badge came to read
+  // N/10 while the Dashboard read N/5.
+  const requiredActive = requiredActiveCount(integrations)
   const sdkLine = sdkActiveLine(sdkCounts(integrations).activeCount)
   const hasUnhealthy = integrations.some((i) => i.enabled && !i.healthy)
   // Badge reflects reachability of the Fry backend only. Docker state is a
@@ -175,7 +177,7 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
         fontFamily: 'var(--fb)'
       }}
     >
-      <Sidebar page={page} onNav={setPage} activeCount={official.activeCount} totalCount={official.availableTotal} sdkLine={sdkLine} hasUnhealthy={hasUnhealthy} deviceName={deviceName} minerKey={minerKey} />
+      <Sidebar page={page} onNav={setPage} activeCount={requiredActive} totalCount={REQUIRED_INTEGRATIONS.length} sdkLine={sdkLine} hasUnhealthy={hasUnhealthy} deviceName={deviceName} minerKey={minerKey} />
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <TopBar page={page} connectivity={connectivity} docker={dockerChip} />
         {error && <ErrorBanner error={error} />}

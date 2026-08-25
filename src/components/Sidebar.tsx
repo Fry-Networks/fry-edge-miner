@@ -23,7 +23,7 @@ const NAV: { id: NavPage; label: string; Icon: LucideIcon }[] = [
 interface SidebarProps {
   page: NavPage
   onNav: (id: NavPage) => void
-  /** Official partners only — matches the Dashboard headline stat. */
+  /** Required integrations only — matches the Dashboard headline stat. */
   activeCount: number
   totalCount: number
   /** Community tier line, or null when nothing community is running. */
@@ -99,7 +99,7 @@ export default function Sidebar({ page, onNav, activeCount, totalCount, sdkLine,
             }}
           >
             <Dot status={activeCount === 0 ? 'stopped' : hasUnhealthy ? 'warn' : 'run'} size={5} />
-            <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: hasUnhealthy ? 'var(--amb)' : 'var(--teal)' }}>{activeFraction(activeCount, totalCount)} active</span>
+            <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: hasUnhealthy ? 'var(--amb)' : 'var(--teal)' }}>{activeFraction(activeCount, totalCount)} required active</span>
           </div>
           {sdkLine && (
             <div style={{ fontFamily: 'var(--fm)', fontSize: 9, color: 'var(--amb)', marginTop: 4 }}>
