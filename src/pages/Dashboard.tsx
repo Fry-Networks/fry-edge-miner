@@ -310,10 +310,12 @@ export default function Dashboard({ intgs }: DashboardProps) {
               <div
                 style={{
                   height: '100%',
-                  width: `${requiredPct}%`,
+                  width: '100%',
+                  transform: `scaleX(${requiredPct / 100})`,
+                  transformOrigin: 'left',
                   background: 'var(--teal)',
                   borderRadius: 2,
-                  transition: 'width .5s ease'
+                  transition: 'transform .5s ease'
                 }}
               />
             </div>
