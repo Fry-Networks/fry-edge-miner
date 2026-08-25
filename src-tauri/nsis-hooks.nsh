@@ -36,6 +36,18 @@
 !macroend
 
 !macro NSIS_HOOK_PREINSTALL
+  ; B7 (installer side): partner binaries are launched from the install tree
+  ; this installer is about to overwrite. The running app stops them before an
+  ; auto-update, but a manual installer run — or an update from a version that
+  ; predates that stop — leaves frynode.exe holding
+  ; resources\frynode.exe open, and the file copy fails with
+  ; "Error opening file for writing". Kill it here; a non-zero exit just means
+  ; nothing matched, which is the normal case.
+  DetailPrint "Stopping partner processes that hold the install folder..."
+  nsExec::Exec 'taskkill /F /T /IM frynode.exe'
+  Pop $1
+  Sleep 2000
+
   !if "${WEBVIEW2BOOTSTRAPPERPATH}" != ""
     !insertmacro _WV2_CHECK $2
 

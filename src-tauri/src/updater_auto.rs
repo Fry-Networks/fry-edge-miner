@@ -42,7 +42,7 @@ pub fn partner_stop_plan(processes: &[ProcessInfo]) -> Vec<String> {
 /// 10s per process waiting for it to exit, and a failure here is logged and
 /// then ignored — refusing to update at all is worse than risking the locked
 /// file the update might hit anyway (which is the pre-B7 behaviour).
-fn stop_partner_processes(supervisor: &Arc<Mutex<Supervisor>>) -> Vec<String> {
+pub(crate) fn stop_partner_processes(supervisor: &Arc<Mutex<Supervisor>>) -> Vec<String> {
     let mut sup = match supervisor.lock() {
         Ok(s) => s,
         Err(e) => {
@@ -69,7 +69,7 @@ fn stop_partner_processes(supervisor: &Arc<Mutex<Supervisor>>) -> Vec<String> {
 ///
 /// `taskkill` exits non-zero when nothing matched the image name, which is the
 /// normal case and is success here — the precedent is `aem.rs`'s stop path.
-fn kill_orphan_partners() {
+pub(crate) fn kill_orphan_partners() {
     for image in ORPHAN_IMAGES {
         match crate::supervisor::platform::command("taskkill")
             .args(["/IM", image, "/T", "/F"])
@@ -80,6 +80,26 @@ fn kill_orphan_partners() {
             Err(e) => warn!(image, error = %e, "Orphan cleanup could not run — continuing"),
         }
     }
+}
+
+/// Release the install tree before ANY updater install — shared by the
+/// background auto-updater and the manual Updates-page path (B7: partner
+/// binaries are launched FROM the install dir the updater replaces, so a
+/// running or orphaned one keeps the NSIS copy step failing on a locked file).
+///
+/// ManagedProcess::stop blocks up to 10s per process, so both halves run
+/// under block_in_place rather than directly on an async worker.
+pub(crate) async fn release_install_tree(supervisor: &Arc<Mutex<Supervisor>>) -> Vec<String> {
+    let stopped = tokio::task::block_in_place(|| stop_partner_processes(supervisor));
+    tokio::task::block_in_place(kill_orphan_partners);
+    if !stopped.is_empty() {
+        info!(
+            stopped = stopped.join(",").as_str(),
+            "Stopped partner processes before update install"
+        );
+        tokio::time::sleep(PARTNER_STOP_SETTLE).await;
+    }
+    stopped
 }
 
 /// Background auto-updater task. Spawned once at app startup.
@@ -165,17 +185,7 @@ async fn check_and_install_update(
     // B7: release the install tree before the updater rewrites it. The
     // partners are restarted by the startup recovery pass after the restart
     // below, so nothing here needs to put them back.
-    // ManagedProcess::stop blocks up to 10s per process waiting for exit, so
-    // this must not run on an async worker thread directly.
-    let stopped = tokio::task::block_in_place(|| stop_partner_processes(supervisor));
-    tokio::task::block_in_place(kill_orphan_partners);
-    if !stopped.is_empty() {
-        info!(
-            stopped = stopped.join(",").as_str(),
-            "Stopped partner processes before update install"
-        );
-        tokio::time::sleep(PARTNER_STOP_SETTLE).await;
-    }
+    release_install_tree(supervisor).await;
 
     // Download and install
     match update

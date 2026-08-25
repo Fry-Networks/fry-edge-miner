@@ -190,6 +190,10 @@ pub async fn install_update(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "No update available for Fry Edge Miner".to_string())?;
 
+        // B7: same release as the auto-updater — a manual install from the
+        // Updates page otherwise hits the frynode.exe locked-file NSIS error.
+        crate::updater_auto::release_install_tree(&state.supervisor).await;
+
         update
             .download_and_install(|_chunk, _total| {}, || {})
             .await
@@ -219,5 +223,27 @@ pub async fn install_update(
         })
     } else {
         Err(format!("Unknown update kind '{}'", kind))
+    }
+}
+
+/// B7 (manual path): the Updates-page install rewrites the same install tree
+/// the auto-updater does, so it must release that tree first.
+#[cfg(test)]
+mod manual_install_tests {
+    /// Regression tripwire: the Tauri command itself cannot run under
+    /// `cargo test`, but deleting the release call must still fail a test.
+    /// The app branch of `install_update` ends where the integration branch
+    /// begins, so the call has to appear before that split.
+    #[test]
+    fn the_manual_app_install_releases_the_install_tree_first() {
+        let src = include_str!("updates.rs");
+        let app_branch = src
+            .split("else if kind ==")
+            .next()
+            .expect("updates.rs always has the integration branch");
+        assert!(
+            app_branch.contains("release_install_tree"),
+            "install_update's app branch no longer releases the install tree before download_and_install"
+        );
     }
 }
