@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import { splitByRewardRole } from './tierSplit'
+import { INTEGRATION_META, REQUIRED_INTEGRATIONS } from './integrationMeta'
 
 // FR: the Dashboard shows a dedicated "Required Integrations" section
 // (fryvpn + aem) above Official Partners, and the partner grid no longer
@@ -25,5 +26,15 @@ describe('splitByRewardRole', () => {
     const { required, boost } = splitByRewardRole([member('storj')])
     expect(required).toEqual([])
     expect(boost.map((m) => m.id)).toEqual(['storj'])
+  })
+
+  test('every required integration is official-tier, so the section can never lose one', () => {
+    // The Dashboard feeds splitByRewardRole the OFFICIAL-tier list; a required
+    // integration retagged 'sdk' would silently vanish from the Required
+    // Integrations section while still driving the reward math.
+    for (const id of REQUIRED_INTEGRATIONS) {
+      const meta = INTEGRATION_META.find((m) => m.id === id)
+      expect(meta?.tier, `${id} must stay tier 'official'`).toBe('official')
+    }
   })
 })

@@ -61,9 +61,9 @@ export function tierCounts(members: TierLike[]): {
 /**
  * Counts for the official tier of a full integration list.
  *
- * The single source for the headline figure. The Dashboard StatCard and the
- * sidebar badge both read it, which is the point: they used to derive their
- * counts independently and disagreed (sidebar `N/10` against Dashboard `N/5`).
+ * No longer the headline figure: the Dashboard StatCard and the sidebar badge
+ * count REQUIRED integrations via `requiredActiveCount` now that the reward
+ * model is required-driven. Kept for tier-level counting.
  */
 export function officialCounts(members: TierLike[]) {
   return tierCounts(splitByTier(members).official)

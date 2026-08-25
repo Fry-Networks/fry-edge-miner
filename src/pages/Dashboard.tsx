@@ -9,7 +9,7 @@ import Divider from '../components/primitives/Divider'
 import { useRewards } from '../hooks/useRewards'
 import { useReporting } from '../hooks/useReporting'
 import { condenseError } from '../lib/error'
-import { activeFraction, boostPct, requiredProportionPct } from '../lib/integrationCount'
+import { activeFraction, boostPct, requiredActiveCount, requiredProportionPct } from '../lib/integrationCount'
 import { isRequiredIntegration, REQUIRED_INTEGRATIONS, type IntegrationTier } from '../lib/integrationMeta'
 import { SDK_REPORT_LINE } from '../lib/support'
 import { sdkActiveLine, sdkCounts, splitByRewardRole, splitByTier, tierCounts } from '../lib/tierSplit'
@@ -103,7 +103,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
   const active = intgs.filter((i) => i.enabled)
   // F18: reward proportion is driven by the REQUIRED tier (Fry dVPN + Olostep);
   // every other active integration adds a flat +5% boost.
-  const requiredActive = active.filter((i) => isRequiredIntegration(i.id)).length
+  const requiredActive = requiredActiveCount(intgs)
   const boostActive = active.filter((i) => !isRequiredIntegration(i.id)).length
   const requiredPct = requiredProportionPct(requiredActive)
   const boostPercent = boostPct(boostActive)
