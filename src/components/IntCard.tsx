@@ -6,7 +6,7 @@ import { DISABLE_CONFIRM_MS, shouldConfirmDisable } from '../lib/disableConfirm'
 import { condenseError } from '../lib/error'
 import { isRequiredIntegration } from '../lib/integrationMeta'
 import { OFFICIAL_DISABLED_WARNING, SDK_REPORT_LINE } from '../lib/support'
-import { unhealthyReason, sentinelFundingAddress } from '../lib/types'
+import { awaitsUserSetup, unhealthyReason, sentinelFundingAddress } from '../lib/types'
 import CopyField from './primitives/CopyField'
 import Tag from './primitives/Tag'
 import TierBadge from './primitives/TierBadge'
@@ -116,6 +116,11 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
     // don't scare the user with a red badge for a transient state.
     st = 'info'
     stLbl = 'Starting'
+  } else if (awaitsUserSetup(health)) {
+    // Not a failure — the partner is waiting on a setup step only the user
+    // can complete (Storj node token + identity). Amber, and say what it is.
+    st = 'info'
+    stLbl = 'Setup required'
   } else {
     st = 'err'
     stLbl = 'Unhealthy'

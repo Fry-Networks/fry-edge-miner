@@ -154,6 +154,15 @@ export function unhealthyReason(health: HealthStatus): string | null {
   return null
 }
 
+// Some partners report Unhealthy for a state that is really "waiting on a
+// setup step only you can do" — Storj cannot come online until the operator
+// creates a node auth token and completes node identity, which can take
+// hours. Presenting that as a red failure reads as a crash the user should
+// report; it is a to-do item. Matches the reason text storj.rs emits.
+export function awaitsUserSetup(health: HealthStatus): boolean {
+  return !!unhealthyReason(health)?.startsWith('Awaiting Storj setup')
+}
+
 // The Sentinel node's own `sent1...` funding address, extracted from the
 // "account not funded" health reason. The backend surfaces it (sentinel.rs
 // node_address() guarantees the sent1 prefix) but only inside the Unhealthy
