@@ -64,9 +64,9 @@ export function useDevice() {
     [fetch]
   )
 
-  const deregister = useCallback(async () => {
+  const deregister = useCallback(async (force = false) => {
     try {
-      await invoke('deregister_device')
+      await invoke('deregister_device', { force })
       await fetch()
     } catch (e) {
       setError(extractErrorMessage(e))

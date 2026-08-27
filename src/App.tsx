@@ -135,7 +135,7 @@ function IntegrationsErrorCard({ error, onRetry }: { error: string; onRetry: () 
   )
 }
 
-function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceName: string; minerKey?: string; deregister: () => Promise<void>; deviceError: string | null }) {
+function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceName: string; minerKey?: string; deregister: (force?: boolean) => Promise<void>; deviceError: string | null }) {
   const [page, setPage] = useState<NavPage>('dashboard')
   const {
     integrations,

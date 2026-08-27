@@ -15,6 +15,13 @@ import { useRewards } from '../hooks/useRewards'
 import { APP_VERSION } from '../lib/version'
 import { shouldShowSavedMinerKey } from '../lib/settingsView'
 import { deriveRewardDisplay } from '../lib/rewardReadiness'
+import {
+  DEREGISTER_CONFIRM,
+  DEREGISTER_FORCE_CONFIRM,
+  deregisterFailureState,
+  IDLE_DEREGISTER_STATE,
+  type DeregisterState
+} from '../lib/deregisterFlow'
 
 interface SettingSectionProps {
   Icon: LucideIcon
@@ -55,7 +62,7 @@ function SettingSection({ Icon, ico, label, children }: SettingSectionProps) {
 
 interface SettingsPageProps {
   deviceName?: string
-  deregister: () => Promise<void>
+  deregister: (force?: boolean) => Promise<void>
 }
 
 export default function SettingsPage({ deviceName = 'FEM Device', deregister }: SettingsPageProps) {
@@ -71,6 +78,21 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
   const [regLoading, setRegLoading] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [exportResult, setExportResult] = useState<{ ok: boolean; text: string } | null>(null)
+  const [deregisterState, setDeregisterState] = useState<DeregisterState>(IDLE_DEREGISTER_STATE)
+
+  // A rejected deregistration used to vanish into a generic error state, so
+  // the button read as doing nothing. Surface the reason here, and offer the
+  // local-only clear as an explicit second choice — without it a device whose
+  // server call keeps failing can never be detached, even by reinstalling.
+  const runDeregister = async (force: boolean) => {
+    if (!window.confirm(force ? DEREGISTER_FORCE_CONFIRM : DEREGISTER_CONFIRM)) return
+    try {
+      await deregister(force)
+      setDeregisterState(IDLE_DEREGISTER_STATE)
+    } catch (e) {
+      setDeregisterState(deregisterFailureState(e, force))
+    }
+  }
   const { rewards } = useRewards()
   const summary = rewards.summary
   // Cold-cache guard (mirrors Dashboard.tsx): don't present a placeholder
@@ -348,14 +370,32 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
 
       <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
         {isRegistered && (
-          <Btn v="g" onClick={() => { if (window.confirm('Deregister this device? This cannot be undone.')) deregister() }} >
+          <Btn v="g" onClick={() => runDeregister(false)}>
             Deregister
+          </Btn>
+        )}
+        {deregisterState.offerForce && (
+          <Btn v="g" data-testid="deregister-force" onClick={() => runDeregister(true)}>
+            Clear local registration anyway
           </Btn>
         )}
         <Btn v="g" data-testid="export-debug-bundle" disabled={exporting} onClick={handleExportBundle}>
           {exporting ? 'Exporting…' : 'Export Debug Bundle'}
         </Btn>
       </div>
+      {deregisterState.error && (
+        <div
+          data-testid="deregister-error"
+          style={{
+            marginTop: 8,
+            fontFamily: 'var(--fb)',
+            fontSize: 12,
+            color: 'var(--red)'
+          }}
+        >
+          {deregisterState.error}
+        </div>
+      )}
       {exportResult && (
         <div
           data-testid="export-debug-result"

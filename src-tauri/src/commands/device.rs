@@ -320,15 +320,36 @@ pub async fn register_device(
     }
 }
 
+/// Whether the local registration should be cleared after the server call.
+///
+/// Normally a failed server-side unregister aborts the whole thing, so the
+/// device does not silently detach from a registration the server still
+/// believes in. But that left no way out when the call keeps failing: the
+/// key stayed in fem_config.json, survived an uninstall/reinstall (the
+/// installer does not remove app data), and the device came back registered
+/// to the same key forever. `force` is the user explicitly choosing local
+/// cleanup anyway, from a second confirmation in Settings.
+pub fn should_clear_local(api_ok: bool, force: bool) -> bool {
+    api_ok || force
+}
+
 #[tauri::command]
 pub async fn deregister_device(
+    force: Option<bool>,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<(), String> {
+    let force = force.unwrap_or(false);
     let config = state.config.get();
+    let mut api_ok = true;
     if let (Some(ref key), Some(ref id)) = (&config.miner_key, &config.install_id) {
-        crate::api::installations::unregister(&state.api_client, key, id)
-            .await
-            .map_err(|e| format!("API deregistration failed: {}", e))?;
+        if let Err(e) = crate::api::installations::unregister(&state.api_client, key, id).await {
+            api_ok = false;
+            let msg = format!("API deregistration failed: {}", e);
+            if !should_clear_local(api_ok, force) {
+                return Err(msg);
+            }
+            tracing::warn!(error = %e, "Deregistration rejected by the server — clearing local registration anyway at the user's request");
+        }
     }
 
     state
@@ -847,5 +868,32 @@ mod registration_race_tests {
             REGISTRATION_IN_FLIGHT.try_lock().is_ok(),
             "the guard must release once the attempt finishes"
         );
+    }
+}
+
+/// JuggaCrypto's report: Deregister appeared to do nothing, and reinstalling
+/// FEM brought the device back registered to the same key. The server call
+/// failed, so the local clear never ran, and the installer does not remove
+/// %APPDATA% state — leaving no way to detach the device at all.
+#[cfg(test)]
+mod deregistration_tests {
+    use super::should_clear_local;
+
+    #[test]
+    fn a_successful_server_call_clears_local_state() {
+        assert!(should_clear_local(true, false));
+    }
+
+    #[test]
+    fn a_failed_server_call_leaves_local_state_alone_by_default() {
+        // Default behaviour is unchanged: don't silently detach from a
+        // registration the server still believes in.
+        assert!(!should_clear_local(false, false));
+    }
+
+    #[test]
+    fn force_clears_local_state_even_when_the_server_call_failed() {
+        // The user explicitly chose local cleanup from the second confirm.
+        assert!(should_clear_local(false, true));
     }
 }
