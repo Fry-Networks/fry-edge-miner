@@ -413,7 +413,11 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
         <Tog
           checked={enabled}
           onChange={handleToggle}
-          disabled={unavailable}
+          // Unavailable blocks turning an integration ON, never turning one
+          // OFF: an integration that became unavailable while enabled (e.g.
+          // Diiisco once its device wallet stopped resolving) must stay
+          // switchable off. The backend disable path has no requirements gate.
+          disabled={unavailable && !enabled}
           label={`Toggle ${name} integration`}
           data-testid={`toggle-${id}`}
           aria-label={`Toggle ${name} integration`}
