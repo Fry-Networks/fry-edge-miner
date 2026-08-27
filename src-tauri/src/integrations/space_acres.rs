@@ -25,6 +25,20 @@ const USER_AGENT: &str = concat!("FryEdgeMiner/", env!("CARGO_PKG_VERSION"));
 /// Upstream's WiX package places it in a `bin` subdirectory
 /// (`<root>\Space Acres\bin\space-acres.exe`); older portable layouts keep it
 /// at the root. Pure so the layout list is testable.
+/// Every install root Space Acres can occupy under one base directory.
+/// Upstream's WiX per-user install lands in `<base>\Programs\Space Acres`
+/// (capitalised, matching its product name) while per-machine installs use
+/// `<base>\Space Acres`; the lowercase spellings cover older portable
+/// layouts. Pure so the layout list is testable.
+fn roots_for_base(base: &std::path::Path) -> Vec<PathBuf> {
+    vec![
+        base.join("space-acres"),
+        base.join("Programs").join("space-acres"),
+        base.join("Space Acres"),
+        base.join("Programs").join("Space Acres"),
+    ]
+}
+
 fn binary_candidates(roots: &[PathBuf]) -> Vec<PathBuf> {
     roots
         .iter()
@@ -89,9 +103,7 @@ impl SpaceAcresIntegration {
         let mut roots: Vec<PathBuf> = Vec::new();
         for var in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
             if let Ok(base) = std::env::var(var) {
-                roots.push(PathBuf::from(&base).join("space-acres"));
-                roots.push(PathBuf::from(&base).join("Programs").join("space-acres"));
-                roots.push(PathBuf::from(&base).join("Space Acres"));
+                roots.extend(roots_for_base(std::path::Path::new(&base)));
             }
         }
         binary_candidates(&roots).into_iter().find(|c| c.exists())
@@ -662,6 +674,41 @@ mod discovery_tests {
             candidates.contains(&PathBuf::from(r"C:\Program Files\Space Acres\space-acres.exe")),
             "the flat layout must keep working: {candidates:?}"
         );
+    }
+
+    #[test]
+    fn the_capitalised_per_user_programs_root_is_probed() {
+        // WiX per-user installs land in %LOCALAPPDATA%\Programs\Space Acres,
+        // using the product's capitalised name. That root was missing, so a
+        // per-user install read as "not installed" and the startup recovery
+        // re-ran the installer — the Modify/Repair dialog users reported.
+        let roots = roots_for_base(std::path::Path::new(r"C:\Users\x\AppData\Local"));
+        assert!(
+            roots.contains(&PathBuf::from(r"C:\Users\x\AppData\Local\Programs\Space Acres")),
+            "per-user capitalised root must be probed: {roots:?}"
+        );
+        let candidates = binary_candidates(&roots);
+        assert!(
+            candidates.contains(&PathBuf::from(
+                r"C:\Users\x\AppData\Local\Programs\Space Acres\bin\space-acres.exe"
+            )),
+            "and its WiX bin layout must resolve: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn every_previously_probed_root_still_resolves() {
+        let roots = roots_for_base(std::path::Path::new(r"C:\Program Files"));
+        for expected in [
+            r"C:\Program Files\space-acres",
+            r"C:\Program Files\Programs\space-acres",
+            r"C:\Program Files\Space Acres",
+        ] {
+            assert!(
+                roots.contains(&PathBuf::from(expected)),
+                "{expected} must still be probed: {roots:?}"
+            );
+        }
     }
 
     #[test]
