@@ -18,6 +18,81 @@ pub struct TitanIntegration {
     pub log_dir: PathBuf,
 }
 
+/// Whether one titan-edge log line reports a real failure.
+///
+/// The health check used to flag any line merely *containing* "error", which
+/// matched routine output — a summary reading `errors=0`, a URL with "error"
+/// in the path, a Go `error=<nil>` field — and left the card stuck on
+/// Unhealthy while the daemon was fine. Match a log LEVEL instead, and never
+/// let an explicitly-zero/absent error count count as one.
+fn line_indicates_error(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    // An explicit "no error" report is the opposite of a failure.
+    const BENIGN: [&str; 6] = [
+        "0 errors",
+        "errors=0",
+        "errors: 0",
+        "no error",
+        "error=<nil>",
+        "error: <nil>",
+    ];
+    if BENIGN.iter().any(|b| lower.contains(b)) {
+        return false;
+    }
+    if lower.contains("error=nil") || lower.contains("\"error\":null") {
+        return false;
+    }
+    // Structured level fields (zap / logrus / slog).
+    if lower.contains("level=error")
+        || lower.contains("level=fatal")
+        || lower.contains("\"level\":\"error\"")
+        || lower.contains("\"level\":\"fatal\"")
+    {
+        return true;
+    }
+    // Bare level tokens: "[ERROR]", a leading "ERROR ", or " ERROR " / " FATAL ".
+    line.split(|c: char| !c.is_ascii_alphabetic())
+        .any(|tok| tok.eq_ignore_ascii_case("error") || tok.eq_ignore_ascii_case("fatal"))
+        && line
+            .split_whitespace()
+            .take(4)
+            .any(|w| {
+                let t = w.trim_matches(|c: char| !c.is_ascii_alphabetic());
+                t.eq_ignore_ascii_case("error") || t.eq_ignore_ascii_case("fatal")
+            })
+}
+
+#[cfg(test)]
+mod log_level_tests {
+    use super::line_indicates_error;
+
+    #[test]
+    fn routine_lines_are_not_failures() {
+        for line in [
+            "2026-08-27T03:00:00Z INFO scheduler completed with 0 errors",
+            "2026-08-27T03:00:00Z INFO sync finished errors=0 duration=1.2s",
+            "2026-08-27T03:00:00Z INFO fetched https://api.example.com/v1/error-codes",
+            "2026-08-27T03:00:00Z INFO rpc call returned error=<nil>",
+            "2026-08-27T03:00:00Z INFO Daemon listening on 0.0.0.0:1234",
+        ] {
+            assert!(!line_indicates_error(line), "should be benign: {line}");
+        }
+    }
+
+    #[test]
+    fn real_failures_are_still_caught() {
+        for line in [
+            "2026-08-27T03:00:00Z ERROR failed to dial locator",
+            "2026-08-27T03:00:00Z [ERROR] candidate registration rejected",
+            "time=2026-08-27T03:00:00Z level=error msg=\"disk full\"",
+            "{\"level\":\"fatal\",\"msg\":\"cannot open datastore\"}",
+            "2026-08-27T03:00:00Z FATAL unrecoverable state",
+        ] {
+            assert!(line_indicates_error(line), "should be a failure: {line}");
+        }
+    }
+}
+
 impl TitanIntegration {
     fn partner_dir() -> PathBuf {
         partners_base_dir().join("titan")
@@ -194,9 +269,7 @@ impl Integration for TitanIntegration {
             .collect();
 
         // Check for error markers
-        let has_errors = recent_lines
-            .iter()
-            .any(|l| l.contains("error") || l.contains("ERROR") || l.contains("fatal"));
+        let has_errors = recent_lines.iter().any(|l| line_indicates_error(l));
 
         if has_errors {
             return HealthStatus::Unhealthy("Error detected in Titan daemon logs".to_string());
