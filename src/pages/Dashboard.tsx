@@ -13,6 +13,7 @@ import { activeFraction, boostPct, requiredActiveCount, requiredProportionPct } 
 import { isRequiredIntegration, REQUIRED_INTEGRATIONS, type IntegrationTier } from '../lib/integrationMeta'
 import { SDK_REPORT_LINE } from '../lib/support'
 import { sdkActiveLine, sdkCounts, splitByRewardRole, splitByTier, tierCounts } from '../lib/tierSplit'
+import { deriveRewardDisplay } from '../lib/rewardReadiness'
 
 interface DashboardIntegration {
   id: string
@@ -118,10 +119,11 @@ export default function Dashboard({ intgs }: DashboardProps) {
   const sdk = sdkCounts(intgs)
   const sdkLine = sdkActiveLine(sdk.activeCount)
   const slotHits = rewards.slots.filter((s) => s.done).length
-  const estimated = summary ? summary.estimated_daily.toFixed(2) : '0.00'
-  const rewardToken = summary ? summary.reward_token_name : '—'
-  const rewardAsa = summary ? summary.reward_token_asa_id : '—'
-  const baseReward = summary ? summary.base_reward.toFixed(2) : '0.00'
+  // Cold-cache guard: a summary can exist before the PoC-loop's first tick
+  // has warmed base_reward/stake data. Rendering those fields as if real
+  // (1.0x multiplier, 0.00 base) misleads the user — show placeholders
+  // instead until both readiness flags are true (see deriveRewardDisplay).
+  const { estimated, rewardToken, rewardAsa, baseReward, stakeMultiplierLabel } = deriveRewardDisplay(summary)
   return (
     <div
       className="sc"
@@ -322,8 +324,8 @@ export default function Dashboard({ intgs }: DashboardProps) {
           </div>
           <Divider sx={{ marginBottom: 10 }} />
           {[
-            ['Base reward', summary ? `${baseReward} ${rewardToken}` : '—', 'var(--txt)'],
-            ['Staking mult', summary ? `${summary.stake_multiplier.toFixed(1)}×` : '—', 'var(--teal)'],
+            ['Base reward', baseReward === '—' ? '—' : `${baseReward} ${rewardToken}`, 'var(--txt)'],
+            ['Staking mult', stakeMultiplierLabel, 'var(--teal)'],
             ['Required proportion', `${requiredPct}%`, 'var(--txt)'],
             ['Boost', `+${boostPercent}% (${boostActive} active)`, 'var(--teal)'],
             ['BYOD factor', '1.0×', 'var(--t1)']

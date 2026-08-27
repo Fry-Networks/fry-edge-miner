@@ -76,6 +76,8 @@ export interface RewardSummary {
   stake_multiplier: number
   stake_label: string
   stake_tiers?: Record<string, { multiplier: number; label: string }>
+  config_ready: boolean
+  stake_data_ready: boolean
 }
 
 export interface PocSlot {

@@ -24,6 +24,68 @@ pub struct RewardSummary {
     pub stake_token_name: String,
     pub stake_multiplier: f64,
     pub stake_label: String,
+    /// True once the reward config has been resolved at least once (either a
+    /// live `/versions/FEM` fetch succeeded, or a prior PoC-loop tick already
+    /// cached a positive base reward). False on the very first render after
+    /// launch, before the 60s PoC-loop tick has done its first network
+    /// round-trip — the frontend must not present `base_reward`/
+    /// `estimated_daily` as real numbers while this is false.
+    pub config_ready: bool,
+    /// True once the verified-stake lookup has resolved, OR the device has no
+    /// miner key at all (an unregistered device's 0x multiplier is truthful,
+    /// not a cold-cache placeholder). False means `stake_multiplier`/
+    /// `stake_label` are best-guess defaults, not confirmed data.
+    pub stake_data_ready: bool,
+}
+
+/// Pure readiness computation, unit-testable without a `tauri::State`.
+///
+/// `config_present`  — `cached_reward_config` has resolved at least once.
+/// `cached_base`     — the last cached `base_reward` value (0.0 = never warmed).
+/// `verified_present` — `cached_verified_status` has resolved at least once.
+/// `has_key`         — the device has a saved miner key (i.e. is/was registered).
+fn readiness(
+    config_present: bool,
+    cached_base: f64,
+    verified_present: bool,
+    has_key: bool,
+) -> (bool, bool) {
+    let config_ready = config_present || cached_base > 0.0;
+    // An unregistered device has no verified-stake call to wait on — its 0x
+    // multiplier is already the whole truth, so it's "ready" by definition.
+    let stake_data_ready = verified_present || !has_key;
+    (config_ready, stake_data_ready)
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::readiness;
+
+    #[test]
+    fn cold_cache_registered_device_is_not_ready() {
+        assert_eq!(readiness(false, 0.0, false, true), (false, false));
+    }
+
+    #[test]
+    fn warm_cache_registered_device_is_ready() {
+        assert_eq!(readiness(true, 1.5, true, true), (true, true));
+    }
+
+    #[test]
+    fn unregistered_device_stake_data_is_always_ready() {
+        // No miner key → nothing to wait on; the 0x multiplier is truthful.
+        let (config_ready, stake_data_ready) = readiness(false, 0.0, false, false);
+        assert!(!config_ready);
+        assert!(stake_data_ready);
+    }
+
+    #[test]
+    fn a_previously_cached_positive_base_reward_counts_as_config_ready() {
+        // config re-resolves to None on a transient API hiccup, but a prior
+        // tick already cached a real number — don't regress to a placeholder.
+        let (config_ready, _) = readiness(false, 2.75, false, true);
+        assert!(config_ready);
+    }
 }
 
 #[tauri::command]
@@ -74,6 +136,9 @@ pub async fn get_reward_summary(
     // and cached verified status (from /credentials/{key}/verified)
     let tiers = state.cached_stake_tiers.read().map_err(|e| e.to_string())?;
     let verified = state.cached_verified_status.read().map_err(|e| e.to_string())?;
+    let has_key = state.config.get().miner_key.is_some();
+    let (config_ready, stake_data_ready) =
+        readiness(config.is_some(), cached, verified.is_some(), has_key);
 
     let (stake_multiplier, stake_label) = match (&*tiers, &*verified) {
         (Some(tiers), Some(vs)) => {
@@ -90,7 +155,6 @@ pub async fn get_reward_summary(
         }
         (Some(tiers), None) => {
             // Verified status not yet fetched — check if device is registered
-            let has_key = state.config.get().miner_key.is_some();
             if has_key {
                 tiers.get("none").map_or(
                     (1.0, "No stake".to_string()),
@@ -105,7 +169,6 @@ pub async fn get_reward_summary(
         }
         _ => {
             // No cached data yet — use registration state as best guess
-            let has_key = state.config.get().miner_key.is_some();
             if has_key {
                 (1.0, "No stake".to_string())
             } else {
@@ -127,6 +190,8 @@ pub async fn get_reward_summary(
         stake_token_name,
         stake_multiplier,
         stake_label,
+        config_ready,
+        stake_data_ready,
     })
 }
 
