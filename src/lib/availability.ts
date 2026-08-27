@@ -17,12 +17,19 @@ export function isUnavailable(intg: AvailabilityLike): boolean {
 /**
  * Which members a category's toggle-all should actually flip.
  *
- * Unavailable members are skipped: the backend refuses them, and a rejection
- * the user did not ask for reads as a bug. Members already in the target state
- * are skipped too — re-toggling them would turn them back off.
+ * Turning a category ON skips unavailable members: the backend refuses to
+ * start them, and a rejection the user did not ask for reads as a bug.
+ * Turning one OFF must still include an unavailable member that is currently
+ * enabled — otherwise an integration that became unavailable while running
+ * (Diiisco, once its device wallet stops resolving) can never be switched off
+ * from the category slider. The backend's disable path applies no
+ * requirements gate, so a stop is always accepted.
+ *
+ * Members already in the target state are skipped either way — re-toggling
+ * them would flip them back.
  */
 export function toggleAllTargets<T extends AvailabilityLike>(members: T[], next: boolean): T[] {
-  return members.filter((i) => !isUnavailable(i) && i.enabled !== next)
+  return members.filter((i) => (next ? !isUnavailable(i) : true) && i.enabled !== next)
 }
 
 /**
