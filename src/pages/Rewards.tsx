@@ -5,12 +5,14 @@ import Tag from '../components/primitives/Tag'
 import { formatRewardWithToken } from '../lib/formatReward'
 import { GATES } from '../lib/integrationMeta'
 import { useRewards, type HourlyGates } from '../hooks/useRewards'
+import { deriveRewardDisplay } from '../lib/rewardReadiness'
 
 export default function Rewards() {
   const { rewards } = useRewards()
   const { rows, hourlyGates, summary } = rewards
-  const rewardToken = summary ? summary.reward_token_name : '—'
-  const fullDayEst = summary ? summary.base_reward.toFixed(2) : '—'
+  // Cold-cache guard (mirrors Dashboard.tsx): don't show a placeholder
+  // base_reward/stake_multiplier as if it were confirmed data.
+  const { rewardToken, baseReward: fullDayEst, stakeMultiplierLabel, stakeLabel } = deriveRewardDisplay(summary)
   const totalEarned = rows.reduce((sum, r) => sum + r.reward, 0).toFixed(2)
 
   return (
@@ -34,7 +36,7 @@ export default function Rewards() {
           sub={`${rewardToken} at full proportion`}
           accent="var(--amb)"
         />
-        <StatCard Icon={Shield} label="Staking Tier" value={summary ? `${summary.stake_multiplier.toFixed(1)}×` : '—'} sub={summary ? `${summary.stake_label} stake active` : '—'} accent="var(--red)" />
+        <StatCard Icon={Shield} label="Staking Tier" value={stakeMultiplierLabel} sub={stakeLabel === '—' ? '—' : `${stakeLabel} stake active`} accent="var(--red)" />
       </div>
 
       <div

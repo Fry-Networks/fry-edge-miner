@@ -14,6 +14,7 @@ import { useDevice } from '../hooks/useDevice'
 import { useRewards } from '../hooks/useRewards'
 import { APP_VERSION } from '../lib/version'
 import { shouldShowSavedMinerKey } from '../lib/settingsView'
+import { deriveRewardDisplay } from '../lib/rewardReadiness'
 
 interface SettingSectionProps {
   Icon: LucideIcon
@@ -72,6 +73,10 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
   const [exportResult, setExportResult] = useState<{ ok: boolean; text: string } | null>(null)
   const { rewards } = useRewards()
   const summary = rewards.summary
+  // Cold-cache guard (mirrors Dashboard.tsx): don't present a placeholder
+  // stake_label/stake_multiplier as if it were confirmed data.
+  const { stakeLabel, stakeMultiplierLabel } = deriveRewardDisplay(summary)
+  const stakeReady = stakeLabel !== '—'
 
   useEffect(() => {
     safeInvoke<FemConfig>('get_settings')
@@ -160,7 +165,7 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
                 <>
                   <Shield size={13} color="var(--teal)" strokeWidth={2.5} />
                   <span style={{ fontFamily: 'var(--fb)', fontSize: 13, color: 'var(--teal)' }}>Registered</span>
-                  <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--t2)' }}>{summary ? `${summary.stake_label}${summary.stake_label.toLowerCase().includes('stake') ? '' : ' stake'}` : '—'}</span>
+                  <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--t2)' }}>{stakeReady ? `${stakeLabel}${stakeLabel.toLowerCase().includes('stake') ? '' : ' stake'}` : 'Stake info loading…'}</span>
                 </>
               ) : (
                 <>
@@ -251,8 +256,8 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
         {isRegistered && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 10 }}>
             <Shield size={12} color="var(--teal)" />
-            <span style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--t1)' }}>{summary ? `${summary.stake_label}${summary.stake_label.toLowerCase().includes('stake') ? '' : ' stake'} active` : 'Stake info unavailable'}</span>
-            <span style={{ fontFamily: 'var(--fm)', fontSize: 12, color: 'var(--teal)' }}>{summary ? `${summary.stake_multiplier.toFixed(1)}×` : '—'}</span>
+            <span style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--t1)' }}>{stakeReady ? `${stakeLabel}${stakeLabel.toLowerCase().includes('stake') ? '' : ' stake'} active` : 'Stake info loading…'}</span>
+            <span style={{ fontFamily: 'var(--fm)', fontSize: 12, color: 'var(--teal)' }}>{stakeMultiplierLabel}</span>
           </div>
         )}
       </SettingSection>

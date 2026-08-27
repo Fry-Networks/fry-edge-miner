@@ -6,6 +6,9 @@ import type {
   RewardRow,
   PocSlotUi
 } from '../lib/types'
+import { isSummaryReady } from '../lib/rewardReadiness'
+
+export { isSummaryReady }
 
 function toRewardRows(summary: RewardSummary | null): RewardRow[] {
   if (!summary) return []
@@ -63,6 +66,24 @@ export interface RewardsData {
   hourlyGates: HourlyGates[]
 }
 
+// While a not-ready summary is showing, re-poll every 5s until it resolves —
+// bounded so a permanently-unregistered device (which never becomes "ready"
+// via config alone) doesn't poll forever.
+export const NOT_READY_POLL_MS = 5000
+export const NOT_READY_POLL_CAP = 60
+
+/**
+ * Pure polling decision, unit-testable without mounting the hook.
+ * `hasSummary` — a summary has been fetched at least once (nothing to poll
+ * for until the first fetch lands). `ready` — both readiness flags are true.
+ * `pollsSoFar` — how many not-ready polls have already fired.
+ * Returns true iff another poll should be scheduled.
+ */
+export function shouldPollAgain(hasSummary: boolean, ready: boolean, pollsSoFar: number): boolean {
+  if (!hasSummary || ready) return false
+  return pollsSoFar < NOT_READY_POLL_CAP
+}
+
 export function useRewards() {
   const [rewards, setRewards] = useState<RewardsData>({
     summary: null,
@@ -72,6 +93,7 @@ export function useRewards() {
   })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const ready = isSummaryReady(rewards.summary)
 
   const fetch = useCallback(async () => {
     try {
@@ -91,5 +113,28 @@ export function useRewards() {
     fetch()
   }, [fetch])
 
-  return { rewards, loading, error, refetch: fetch }
+  useEffect(() => {
+    const hasSummary = !!rewards.summary
+    if (!shouldPollAgain(hasSummary, ready, 0)) return
+    let cancelled = false
+    let polls = 0
+    const id = setInterval(() => {
+      polls += 1
+      if (cancelled) return
+      if (!shouldPollAgain(hasSummary, ready, polls)) {
+        clearInterval(id)
+        return
+      }
+      fetch()
+    }, NOT_READY_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+    // Re-arm whenever readiness flips (e.g. summary appears, or resolves)
+    // rather than on every fetch — `fetch` itself is stable (useCallback []).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [!!rewards.summary, ready, fetch])
+
+  return { rewards, loading, error, ready, refetch: fetch }
 }
