@@ -45,11 +45,18 @@ describe('toggleAllTargets', () => {
     expect(toggleAllTargets([intg('a', true), intg('b', true)], true)).toEqual([])
   })
 
-  it('never returns an unavailable member even if its enabled flag disagrees', () => {
-    // Defensive: a stale enabled=true on an unavailable integration must not
-    // produce a toggle the backend will reject.
-    const stale = [intg('iagon', true, 'needs 900 GB')]
-    expect(toggleAllTargets(stale, false)).toEqual([])
+  it('still turns off an unavailable member that is running', () => {
+    // An integration can become unavailable while it is enabled — Diiisco does
+    // exactly this once its device wallet stops resolving. Excluding it here
+    // left no way to stop it from the category slider. The backend's disable
+    // path applies no requirements gate, so the stop is always accepted.
+    const running = [intg('iagon', true, 'needs 900 GB')]
+    expect(toggleAllTargets(running, false).map((i) => i.id)).toEqual(['iagon'])
+  })
+
+  it('still refuses to turn an unavailable member on', () => {
+    const stopped = [intg('iagon', false, 'needs 900 GB')]
+    expect(toggleAllTargets(stopped, true)).toEqual([])
   })
 })
 
