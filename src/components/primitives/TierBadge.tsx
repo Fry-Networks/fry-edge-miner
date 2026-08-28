@@ -1,15 +1,27 @@
-type BadgeKind = 'official' | 'sdk' | 'experimental' | 'required' | 'optional'
+import { OFFICIAL_PARTNER_BOOST, COMMUNITY_SDK_BOOST } from '../../lib/rewardModel'
+
+type BadgeKind =
+  | 'official'
+  | 'sdk'
+  | 'experimental'
+  | 'required'
+  | 'optionalPartner'
+  | 'optionalCommunity'
 
 interface TierBadgeProps {
   kind: BadgeKind
 }
 
+// The two optional labels quote different boosts because they earn different
+// boosts: an official partner is worth OFFICIAL_PARTNER_BOOST, a community/SDK
+// build COMMUNITY_SDK_BOOST (see lib/rewardModel.ts).
 const LABEL: Record<BadgeKind, string> = {
   official: 'OFFICIAL PARTNER',
   sdk: 'SDK',
   experimental: 'EXPERIMENTAL',
   required: 'REQUIRED',
-  optional: 'OPTIONAL — BOOST +5%'
+  optionalPartner: `OPTIONAL — BOOST +${Math.round(OFFICIAL_PARTNER_BOOST * 100)}%`,
+  optionalCommunity: `OPTIONAL — BOOST +${Math.round(COMMUNITY_SDK_BOOST * 100)}%`
 }
 
 // Provenance badges carry a border; Tag (Running/Unhealthy/…) never does.
@@ -26,7 +38,8 @@ const STYLE: Record<BadgeKind, { bg: string; co: string; bd: string }> = {
   sdk: { bg: 'transparent', co: 'var(--amb)', bd: '1px solid rgba(240,165,0,.30)' },
   experimental: { bg: 'rgba(240,165,0,.10)', co: 'var(--amb)', bd: '1px dashed rgba(240,165,0,.40)' },
   required: { bg: 'transparent', co: 'var(--teal)', bd: '1px solid transparent' },
-  optional: { bg: 'transparent', co: 'var(--t1)', bd: '1px solid transparent' }
+  optionalPartner: { bg: 'transparent', co: 'var(--t1)', bd: '1px solid transparent' },
+  optionalCommunity: { bg: 'transparent', co: 'var(--t1)', bd: '1px solid transparent' }
 }
 
 export default function TierBadge({ kind }: TierBadgeProps) {

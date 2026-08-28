@@ -197,7 +197,11 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
             </span>
             <TierBadge kind={tier} />
             {isSdk && <TierBadge kind="experimental" />}
-            <TierBadge kind={isRequired ? 'required' : 'optional'} />
+            <TierBadge
+              kind={
+                isRequired ? 'required' : intg.tier === 'official' ? 'optionalPartner' : 'optionalCommunity'
+              }
+            />
             <span title={reason ?? undefined} style={reason ? { cursor: 'help' } : undefined}>
               <Tag v={tv}>{stNode}</Tag>
             </span>

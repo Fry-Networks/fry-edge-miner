@@ -6,8 +6,19 @@ import EmptyState from '../components/primitives/EmptyState'
 import type { FrontendIntegration } from '../hooks/useIntegrations'
 import { categoryCounts, toggleAllTargets } from '../lib/availability'
 import type { ConsentStatus } from '../lib/consentDialog'
-import { boostPct } from '../lib/integrationCount'
-import { CATEGORIES, isRequiredIntegration, type IntegrationCategory } from '../lib/integrationMeta'
+import {
+  CATEGORIES,
+  REQUIRED_INTEGRATIONS,
+  type IntegrationCategory
+} from '../lib/integrationMeta'
+import {
+  COMMUNITY_SDK_BOOST,
+  OFFICIAL_PARTNER_BOOST,
+  SECOND_REQUIRED_BOOST,
+  boostDisplayPct,
+  countActive,
+  isActive
+} from '../lib/rewardModel'
 import type { DockerProgress, SystemStatus } from '../lib/types'
 
 const CATEGORY_ICONS: Record<IntegrationCategory, LucideIcon> = {
@@ -43,10 +54,11 @@ export default function Integrations({
   onConsentConfirm,
   onConsentCancel
 }: IntegrationsProps) {
-  // F17: reward proportion is driven by the two REQUIRED integrations (Fry dVPN
-  // + Olostep); every other active integration is a flat +5% boost.
-  const requiredActive = intgs.filter((i) => i.enabled && isRequiredIntegration(i.id)).length
-  const boostActive = intgs.filter((i) => i.enabled && !isRequiredIntegration(i.id)).length
+  // One required integration active earns the full base reward; the second adds
+  // the largest single boost, and optional integrations earn theirs with or
+  // without a required one. "Active" is enabled AND healthy (lib/rewardModel).
+  const counts = countActive(intgs)
+  const requiredActive = counts.required
   const dockerNotReady = !!system && system.docker !== 'ready'
   const anyNeedsDocker = intgs.some((i) => i.requires_docker)
 
@@ -74,10 +86,21 @@ export default function Integrations({
         }}
       >
         <span style={{ fontFamily: 'var(--fb)', fontSize: 13, color: 'var(--t1)' }}>
-          Only <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>Fry dVPN</span> and{' '}
-          <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>Olostep Browser</span> need to be active for
-          full rewards. Every other integration adds a{' '}
-          <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>+5% boost</span> each.
+          Either <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>Fry dVPN</span> or{' '}
+          <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>Olostep Browser</span> earns full base
+          rewards — running both adds{' '}
+          <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>
+            +{Math.round(SECOND_REQUIRED_BOOST * 100)}%
+          </span>
+          . Official partners add{' '}
+          <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>
+            +{Math.round(OFFICIAL_PARTNER_BOOST * 100)}%
+          </span>{' '}
+          each and community integrations{' '}
+          <span style={{ color: 'var(--teal)', fontFamily: 'var(--fm)' }}>
+            +{Math.round(COMMUNITY_SDK_BOOST * 100)}%
+          </span>{' '}
+          each, with or without a required integration running.
         </span>
         <div
           style={{
@@ -92,7 +115,7 @@ export default function Integrations({
             whiteSpace: 'nowrap'
           }}
         >
-          Required {requiredActive}/2 · +{boostPct(boostActive)}% boost
+          Required {requiredActive}/{REQUIRED_INTEGRATIONS.length} · +{boostDisplayPct(counts)}% boost
         </div>
       </div>
       {dockerProgress && (
@@ -140,14 +163,20 @@ export default function Integrations({
         CATEGORIES.map((cat) => {
           const members = intgs.filter((i) => i.category === cat)
           if (members.length === 0) return null
-          const { activeCount, availableTotal, unavailableCount } = categoryCounts(members)
+          // The badge counts what the user can see: every member renders a card
+          // below, so the denominator is the rendered list, and the numerator
+          // is active = enabled AND healthy. Counting enabled-only against an
+          // availability-filtered total produced "3/4 active" above five
+          // visible cards (E7).
+          const { unavailableCount } = categoryCounts(members)
+          const activeCount = members.filter(isActive).length
           return (
             <CategorySection
               key={cat}
               title={cat}
               Icon={CATEGORY_ICONS[cat]}
               activeCount={activeCount}
-              totalCount={availableTotal}
+              totalCount={members.length}
               unavailableCount={unavailableCount}
               onToggleAll={(next) => {
                 // Stagger the flips: firing every toggle in one tick raced the

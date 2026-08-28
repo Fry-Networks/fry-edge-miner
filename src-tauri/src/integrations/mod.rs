@@ -13,6 +13,7 @@ pub mod iagon;
 pub mod mysterium;
 pub mod mysterium_lan_check;
 pub mod pawns;
+pub mod reward_model;
 pub mod sentinel;
 pub mod space_acres;
 pub mod storj;
