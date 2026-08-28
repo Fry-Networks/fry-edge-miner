@@ -76,6 +76,17 @@ export interface RewardSummary {
   stake_multiplier: number
   stake_label: string
   stake_tiers?: Record<string, { multiplier: number; label: string }>
+  // Reward-model breakdown (see lib/rewardModel.ts). `partner_active` excludes
+  // the required integrations, which pay through required_component and the
+  // second-required boost instead. Optional here because the UI recomputes the
+  // same numbers from the live integration list and only uses these to
+  // cross-check the backend; a summary from an older build simply omits them.
+  required_active?: number
+  partner_active?: number
+  community_active?: number
+  required_component?: number
+  boost?: number
+  integration_multiplier?: number
   config_ready: boolean
   stake_data_ready: boolean
 }
