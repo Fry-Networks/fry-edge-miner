@@ -59,6 +59,45 @@ fn install_needed(running: bool, binary_found: bool) -> bool {
     !running && !binary_found
 }
 
+/// The PE section name WiX Burn stamps into every bootstrapper it builds.
+const BURN_SECTION_MARKER: &[u8] = b".wixburn";
+
+/// Whether a PE header carries the `.wixburn` section, i.e. the file is a WiX
+/// Burn bootstrapper (upstream's Windows *installer*) rather than the farmer.
+/// Pure so it is testable without touching the filesystem.
+fn head_is_burn_bundle(head: &[u8]) -> bool {
+    head.windows(BURN_SECTION_MARKER.len())
+        .any(|w| w == BURN_SECTION_MARKER)
+}
+
+/// Section headers sit within the first few KB of a PE image.
+#[cfg(target_os = "windows")]
+fn file_is_burn_bundle(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut buf = [0u8; 8192];
+    match std::fs::File::open(path) {
+        Ok(mut f) => match f.read(&mut buf) {
+            Ok(n) => head_is_burn_bundle(&buf[..n]),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
+}
+
+/// Pick the binary to launch, given the staged copy and whatever path discovery
+/// found. FEM <= 0.4.20 saved the downloaded Burn bootstrapper as
+/// `space-acres.exe` in its own partner directory and then preferred that copy
+/// unconditionally, so `start()` spawned the INSTALLER on every launch and the
+/// user got the "Modify Setup" maintenance dialog instead of a farmer. The
+/// staged copy is only usable when it is the farmer itself.
+fn pick_binary(
+    staged: Option<PathBuf>,
+    staged_is_installer: bool,
+    discovered: Option<PathBuf>,
+) -> Option<PathBuf> {
+    staged.filter(|_| !staged_is_installer).or(discovered)
+}
+
 impl SpaceAcresIntegration {
     fn partner_dir() -> PathBuf {
         partners_base_dir().join("space_acres")
@@ -95,18 +134,37 @@ impl SpaceAcresIntegration {
     #[cfg(target_os = "windows")]
     fn installed_binary() -> Option<PathBuf> {
         // A previously-staged portable copy still wins, so existing installs
-        // that already work keep working.
+        // that already work keep working — but only when it really is the
+        // farmer. Builds up to 0.4.20 staged the Burn bootstrapper under this
+        // name, and preferring that meant every start() ran the installer.
         let staged = Self::binary_path();
-        if staged.exists() {
-            return Some(staged);
-        }
+        let staged_exists = staged.exists();
+        let staged_is_installer = staged_exists && file_is_burn_bundle(&staged);
+        let staged = staged_exists.then_some(staged);
         let mut roots: Vec<PathBuf> = Vec::new();
         for var in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
             if let Ok(base) = std::env::var(var) {
                 roots.extend(roots_for_base(std::path::Path::new(&base)));
             }
         }
-        binary_candidates(&roots).into_iter().find(|c| c.exists())
+        let discovered = binary_candidates(&roots).into_iter().find(|c| c.exists());
+        pick_binary(staged, staged_is_installer, discovered)
+    }
+
+    /// Move a mis-staged Burn bootstrapper out of the farmer's filename so it
+    /// stops being launched. Renamed rather than deleted: the file is a valid
+    /// installer, and a rename is trivially reversible.
+    #[cfg(target_os = "windows")]
+    fn quarantine_staged_installer() {
+        let staged = Self::binary_path();
+        if !staged.exists() || !file_is_burn_bundle(&staged) {
+            return;
+        }
+        let dest = Self::partner_dir().join("space-acres-installer.exe");
+        match std::fs::rename(&staged, &dest) {
+            Ok(()) => info!(from = ?staged, to = ?dest, "Quarantined mis-staged SpaceAcres installer"),
+            Err(e) => warn!(error = %e, path = ?staged, "Could not quarantine mis-staged SpaceAcres installer"),
+        }
     }
 
     fn github_token() -> Option<String> {
@@ -309,6 +367,7 @@ impl Integration for SpaceAcresIntegration {
     async fn install(&self) -> Result<()> {
         #[cfg(target_os = "windows")]
         {
+            Self::quarantine_staged_installer();
             let binary_found = match Self::installed_binary() {
                 Some(existing) => {
                     info!(path = ?existing, "SpaceAcres already installed");
@@ -718,5 +777,50 @@ mod discovery_tests {
         assert!(!install_needed(true, false));
         assert!(!install_needed(false, true));
         assert!(install_needed(false, false));
+    }
+
+    /// A real staged artifact from a machine showing the repair loop had
+    /// `OriginalFilename: space-acres-0.2.21-x86_64.exe` and a `.wixburn`
+    /// section: it was the installer saved under the farmer's name.
+    #[test]
+    fn burn_bundle_is_detected_from_pe_section_names() {
+        let mut head = b"MZ\x90\x00.text\x00\x00\x00.rdata\x00\x00".to_vec();
+        head.extend_from_slice(b".wixburn8");
+        head.extend_from_slice(b".rsrc\x00\x00\x00");
+        assert!(head_is_burn_bundle(&head));
+    }
+
+    #[test]
+    fn farmer_binary_is_not_mistaken_for_a_burn_bundle() {
+        let head = b"MZ\x90\x00.text\x00\x00\x00.rdata\x00\x00.data\x00\x00\x00.rsrc\x00\x00\x00".to_vec();
+        assert!(!head_is_burn_bundle(&head));
+    }
+
+    #[test]
+    fn staged_installer_is_skipped_in_favour_of_the_real_install() {
+        let staged = PathBuf::from(r"C:\Users\u\AppData\Roaming\FryEdgeMiner\partners\space_acres\space-acres.exe");
+        let discovered = PathBuf::from(r"C:\Program Files\Space Acres\bin\space-acres.exe");
+        // Staged copy is really the Burn installer: launching it shows the
+        // "Modify Setup" dialog, so the installed farmer must win instead.
+        assert_eq!(
+            pick_binary(Some(staged), true, Some(discovered.clone())),
+            Some(discovered)
+        );
+    }
+
+    #[test]
+    fn staged_farmer_still_wins_when_it_is_a_real_binary() {
+        let staged = PathBuf::from(r"C:\staged\space-acres.exe");
+        let discovered = PathBuf::from(r"C:\Program Files\Space Acres\bin\space-acres.exe");
+        assert_eq!(
+            pick_binary(Some(staged.clone()), false, Some(discovered)),
+            Some(staged)
+        );
+    }
+
+    #[test]
+    fn staged_installer_with_no_install_found_yields_nothing_to_launch() {
+        let staged = PathBuf::from(r"C:\staged\space-acres.exe");
+        assert_eq!(pick_binary(Some(staged), true, None), None);
     }
 }
