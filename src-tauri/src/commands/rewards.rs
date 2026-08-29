@@ -1,4 +1,5 @@
 use chrono::Local;
+use crate::integrations::reward_model;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 
@@ -24,6 +25,18 @@ pub struct RewardSummary {
     pub stake_token_name: String,
     pub stake_multiplier: f64,
     pub stake_label: String,
+    /// Active (enabled AND healthy) counts per reward category. `partner`
+    /// excludes the two required integrations, which pay through
+    /// `required_component` and `second_required_boost` instead.
+    pub required_active: u32,
+    pub partner_active: u32,
+    pub community_active: u32,
+    /// 1.0 once at least one required integration is healthy, else 0.0.
+    pub required_component: f64,
+    /// Total boost fraction earned on top of `required_component`.
+    pub boost: f64,
+    /// `required_component + boost` — what `base_reward` is multiplied by.
+    pub integration_multiplier: f64,
     /// True once the reward config has been resolved at least once (either a
     /// live `/versions/FEM` fetch succeeded, or a prior PoC-loop tick already
     /// cached a positive base reward). False on the very first render after
@@ -93,7 +106,36 @@ pub async fn get_reward_summary(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<RewardSummary, String> {
     let registry = state.registry.lock().map_err(|e| e.to_string())?;
-    let proportion = registry.proportion();
+
+    // The estimate multiplies by the integration reward model, not by a raw
+    // enabled/total proportion: one healthy required integration earns the full
+    // base, the second adds a boost, and optional integrations pay whether or
+    // not a required one is running. "Active" is enabled AND healthy, matching
+    // what the PoC reporter submits — an enabled-but-unhealthy integration
+    // earns nothing, so counting it would promise a reward that never arrives.
+    let counts = {
+        let last = state.last_health.read().map_err(|e| e.to_string())?;
+        let states: Vec<(String, bool, bool)> = registry
+            .list()
+            .into_iter()
+            .map(|i| {
+                let id = i.id().to_string();
+                let healthy = matches!(
+                    last.get(&id),
+                    Some(crate::integrations::HealthStatus::Healthy)
+                );
+                (id, registry.is_enabled(i.id()), healthy)
+            })
+            .collect();
+        reward_model::count_active(
+            states
+                .iter()
+                .map(|(id, enabled, healthy)| (id.as_str(), *enabled, *healthy)),
+        )
+    };
+    let integration_multiplier = counts.multiplier();
+    // Kept for the frontend's existing breakdown row: the base component only.
+    let proportion = reward_model::required_component(counts.required);
 
     let bits = state.cached_base_reward.load(Ordering::Relaxed);
     let cached = f64::from_bits(bits);
@@ -178,10 +220,10 @@ pub async fn get_reward_summary(
     };
 
     Ok(RewardSummary {
-        active_count: registry.enabled_count(),
+        active_count: counts.required + counts.partner + counts.community,
         total_count: registry.total_count(),
         proportion,
-        estimated_daily: base_reward * proportion * stake_multiplier,
+        estimated_daily: base_reward * integration_multiplier * stake_multiplier,
         base_reward,
         reward_amount,
         reward_token_asa_id,
@@ -190,6 +232,12 @@ pub async fn get_reward_summary(
         stake_token_name,
         stake_multiplier,
         stake_label,
+        required_active: counts.required,
+        partner_active: counts.partner,
+        community_active: counts.community,
+        required_component: reward_model::required_component(counts.required),
+        boost: reward_model::boost(counts.required, counts.partner, counts.community),
+        integration_multiplier,
         config_ready,
         stake_data_ready,
     })

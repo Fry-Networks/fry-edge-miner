@@ -96,8 +96,9 @@ export default function Step0Welcome({ onNext }: Step0Props) {
             maxWidth: 380
           }}
         >
-          FEM consolidates all DePIN integrations into one application. Enable what you want, earn
-          proportional rewards for every active integration.
+          FEM consolidates all DePIN integrations into one application. Running either Fry dVPN or
+          the Olostep Browser earns the full base reward, and every other integration you enable
+          adds a boost on top.
         </div>
       </div>
 
