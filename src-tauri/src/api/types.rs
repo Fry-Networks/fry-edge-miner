@@ -122,6 +122,13 @@ pub struct CredentialInfo {
     pub algo_mnemonic: Option<String>,
     #[serde(default)]
     pub mystnodes_user_token: Option<String>,
+    /// Fry Networks' own Pawns.app account, shared by every device and
+    /// released only to a caller holding this device's own token. Device
+    /// owners never hold or enter Pawns credentials.
+    #[serde(default)]
+    pub pawns_account_email: Option<String>,
+    #[serde(default)]
+    pub pawns_account_password: Option<String>,
 }
 
 // --- IP Status ---

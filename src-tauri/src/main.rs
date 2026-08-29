@@ -121,7 +121,10 @@ fn main() {
             registry.register(Arc::new(integrations::iagon::IagonIntegration {
                 supervisor: supervisor.clone(),
             }));
-            registry.register(Arc::new(integrations::pawns::PawnsIntegration));
+            registry.register(Arc::new(integrations::pawns::PawnsIntegration {
+                api_client: api_client.clone(),
+                config: config_store.clone(),
+            }));
 
             // Restore enabled states from config. Skip ids no longer registered
             // (e.g. the removed Presearch) — a stale key would otherwise inflate
