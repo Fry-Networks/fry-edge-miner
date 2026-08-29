@@ -9,8 +9,15 @@ import Divider from '../components/primitives/Divider'
 import { useRewards } from '../hooks/useRewards'
 import { useReporting } from '../hooks/useReporting'
 import { condenseError } from '../lib/error'
-import { activeFraction, boostPct, requiredActiveCount, requiredProportionPct } from '../lib/integrationCount'
-import { isRequiredIntegration, REQUIRED_INTEGRATIONS, type IntegrationTier } from '../lib/integrationMeta'
+import { activeFraction } from '../lib/integrationCount'
+import { REQUIRED_INTEGRATIONS, type IntegrationTier } from '../lib/integrationMeta'
+import {
+  SECOND_REQUIRED_BOOST,
+  boostDisplayPct,
+  countActive,
+  isActive,
+  requiredComponent
+} from '../lib/rewardModel'
 import { SDK_REPORT_LINE } from '../lib/support'
 import { sdkActiveLine, sdkCounts, splitByRewardRole, splitByTier, tierCounts } from '../lib/tierSplit'
 import { deriveRewardDisplay } from '../lib/rewardReadiness'
@@ -101,13 +108,15 @@ export default function Dashboard({ intgs }: DashboardProps) {
   const reportingDegraded =
     !!reporting?.registered && !notReporting && reporting.consecutive_poc_failures > 0
   const summary = rewards.summary
-  const active = intgs.filter((i) => i.enabled)
-  // F18: reward proportion is driven by the REQUIRED tier (Fry dVPN + Olostep);
-  // every other active integration adds a flat +5% boost.
-  const requiredActive = requiredActiveCount(intgs)
-  const boostActive = active.filter((i) => !isRequiredIntegration(i.id)).length
-  const requiredPct = requiredProportionPct(requiredActive)
-  const boostPercent = boostPct(boostActive)
+  // One required integration active earns the full base reward; the second is
+  // the largest single boost. Optional integrations earn whether or not a
+  // required one is running. "Active" is enabled AND healthy everywhere on this
+  // page — counting an enabled-but-unhealthy integration promised a reward the
+  // server never pays (E7: "2/2 · 100%" beside a red Fry dVPN card).
+  const counts = countActive(intgs)
+  const requiredActive = counts.required
+  const requiredPct = Math.round(requiredComponent(counts.required) * 100)
+  const boostPercent = boostDisplayPct(counts)
   const pct = String(requiredPct)
   // F2: presentation split only — `available`/`pct` above still feed the
   // reward breakdown from the full list, exactly as before. The official tier
@@ -115,8 +124,11 @@ export default function Dashboard({ intgs }: DashboardProps) {
   // section and the partner grid does not repeat them.
   const { official: officialIntgs, sdk: sdkIntgs } = splitByTier(intgs)
   const { required: requiredIntgs, boost: partnerIntgs } = splitByRewardRole(officialIntgs)
-  const partner = tierCounts(partnerIntgs)
-  const sdk = sdkCounts(intgs)
+  // Denominators count the cards actually rendered in each section. Excluding
+  // unavailable members from the total while still rendering their cards is
+  // what produced "COMMUNITY / SDK 3/4 active" above five visible cards (E7).
+  const partner = { activeCount: partnerIntgs.filter(isActive).length, availableTotal: partnerIntgs.length }
+  const sdk = { activeCount: sdkIntgs.filter(isActive).length, availableTotal: sdkIntgs.length }
   const sdkLine = sdkActiveLine(sdk.activeCount)
   const slotHits = rewards.slots.filter((s) => s.done).length
   // Cold-cache guard: a summary can exist before the PoC-loop's first tick
@@ -197,7 +209,8 @@ export default function Dashboard({ intgs }: DashboardProps) {
               </span>
             </div>
             <div style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t1)', marginBottom: 8 }}>
-              Both active = full base reward · one of two = 50%
+              One required active = full base reward · both active = +
+              {Math.round(SECOND_REQUIRED_BOOST * 100)}% boost
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(185px,1fr))', gap: 8 }}>
               {requiredIntgs.map((i) => (
@@ -327,7 +340,16 @@ export default function Dashboard({ intgs }: DashboardProps) {
             ['Base reward', baseReward === '—' ? '—' : `${baseReward} ${rewardToken}`, 'var(--txt)'],
             ['Staking mult', stakeMultiplierLabel, 'var(--teal)'],
             ['Required proportion', `${requiredPct}%`, 'var(--txt)'],
-            ['Boost', `+${boostPercent}% (${boostActive} active)`, 'var(--teal)'],
+            [
+              'Second required boost',
+              counts.required >= 2 ? `+${Math.round(SECOND_REQUIRED_BOOST * 100)}%` : '—',
+              counts.required >= 2 ? 'var(--teal)' : 'var(--t1)'
+            ],
+            [
+              'Boost',
+              `+${boostPercent}% (${counts.partner + counts.community} optional active)`,
+              'var(--teal)'
+            ],
             ['BYOD factor', '1.0×', 'var(--t1)']
           ].map(([l, v, c]) => (
             <div key={l as string} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>

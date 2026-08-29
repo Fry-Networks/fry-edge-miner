@@ -5,7 +5,7 @@ import { consentBadge } from '../lib/consentDialog'
 import { DISABLE_CONFIRM_MS, shouldConfirmDisable } from '../lib/disableConfirm'
 import { condenseError } from '../lib/error'
 import { isRequiredIntegration } from '../lib/integrationMeta'
-import { OFFICIAL_DISABLED_WARNING, SDK_REPORT_LINE } from '../lib/support'
+import { OFFICIAL_DISABLED_WARNING, REQUIRED_DISABLED_WARNING, SDK_REPORT_LINE } from '../lib/support'
 import { awaitsUserSetup, unhealthyReason, sentinelFundingAddress } from '../lib/types'
 import CopyField from './primitives/CopyField'
 import Tag from './primitives/Tag'
@@ -197,7 +197,11 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
             </span>
             <TierBadge kind={tier} />
             {isSdk && <TierBadge kind="experimental" />}
-            <TierBadge kind={isRequired ? 'required' : 'optional'} />
+            <TierBadge
+              kind={
+                isRequired ? 'required' : intg.tier === 'official' ? 'optionalPartner' : 'optionalCommunity'
+              }
+            />
             <span title={reason ?? undefined} style={reason ? { cursor: 'help' } : undefined}>
               <Tag v={tv}>{stNode}</Tag>
             </span>
@@ -242,17 +246,22 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                   fontSize: 11,
                   color: 'var(--amb)',
                   display: 'flex',
-                  alignItems: 'center',
+                  alignItems: 'flex-start',
                   gap: 4,
                   minWidth: 0,
                   maxWidth: 420,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap'
+                  // Warnings wrap instead of clipping: the full text is the
+                  // instruction ("this device has 185 GB available…"), and a
+                  // title tooltip is unreachable on touch and for screen
+                  // readers on a role="alert" span. Matches the Sentinel
+                  // funding block, the one warning that always read in full.
+                  whiteSpace: 'normal',
+                  overflowWrap: 'anywhere',
+                  lineHeight: 1.4
                 }}
                 title={lastError ?? undefined}
               >
-                <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {startError}
+                <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 2 }} /> {startError}
               </span>
             )}
             {reason && st === 'err' && !startError && (
@@ -287,17 +296,17 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                     fontSize: 11,
                     color: 'var(--amb)',
                     display: 'flex',
-                    alignItems: 'center',
+                    alignItems: 'flex-start',
                     gap: 4,
                     minWidth: 0,
                     maxWidth: 420,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap'
+                    whiteSpace: 'normal',
+                    overflowWrap: 'anywhere',
+                    lineHeight: 1.4
                   }}
                   title={reason}
                 >
-                  <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {reason}
+                  <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 2 }} /> {reason}
                 </span>
               )
             )}
@@ -308,17 +317,22 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                   fontSize: 11,
                   color: 'var(--amb)',
                   display: 'flex',
-                  alignItems: 'center',
+                  alignItems: 'flex-start',
                   gap: 4,
                   minWidth: 0,
                   maxWidth: 420,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap'
+                  // Warnings wrap instead of clipping: the full text is the
+                  // instruction ("this device has 185 GB available…"), and a
+                  // title tooltip is unreachable on touch and for screen
+                  // readers on a role="alert" span. Matches the Sentinel
+                  // funding block, the one warning that always read in full.
+                  whiteSpace: 'normal',
+                  overflowWrap: 'anywhere',
+                  lineHeight: 1.4
                 }}
                 title={dockerNote}
               >
-                <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {dockerNote}
+                <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 2 }} /> {dockerNote}
               </span>
             )}
             {unavailable && (
@@ -330,17 +344,22 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                   fontSize: 11,
                   color: 'var(--amb)',
                   display: 'flex',
-                  alignItems: 'center',
+                  alignItems: 'flex-start',
                   gap: 4,
                   minWidth: 0,
                   maxWidth: 420,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap'
+                  // Warnings wrap instead of clipping: the full text is the
+                  // instruction ("this device has 185 GB available…"), and a
+                  // title tooltip is unreachable on touch and for screen
+                  // readers on a role="alert" span. Matches the Sentinel
+                  // funding block, the one warning that always read in full.
+                  whiteSpace: 'normal',
+                  overflowWrap: 'anywhere',
+                  lineHeight: 1.4
                 }}
                 title={unavailableReason ?? undefined}
               >
-                <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {unavailableReason}
+                <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 2 }} /> {unavailableReason}
               </span>
             )}
             {!unavailable && !startError && !inst && !dockerNote && lifecycle !== 'Installing' && (
@@ -370,8 +389,9 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                   gap: 4
                 }}
               >
-                <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {OFFICIAL_DISABLED_WARNING}{' '}
-                Click the switch again to turn it off.
+                <AlertTriangle size={11} style={{ flexShrink: 0 }} />{' '}
+                {isRequired ? REQUIRED_DISABLED_WARNING : OFFICIAL_DISABLED_WARNING} Click the switch
+                again to turn it off.
               </span>
             )}
             {isSdk && (
