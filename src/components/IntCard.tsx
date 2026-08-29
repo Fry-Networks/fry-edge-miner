@@ -5,7 +5,7 @@ import { consentBadge } from '../lib/consentDialog'
 import { DISABLE_CONFIRM_MS, shouldConfirmDisable } from '../lib/disableConfirm'
 import { condenseError } from '../lib/error'
 import { isRequiredIntegration } from '../lib/integrationMeta'
-import { OFFICIAL_DISABLED_WARNING, SDK_REPORT_LINE } from '../lib/support'
+import { OFFICIAL_DISABLED_WARNING, REQUIRED_DISABLED_WARNING, SDK_REPORT_LINE } from '../lib/support'
 import { awaitsUserSetup, unhealthyReason, sentinelFundingAddress } from '../lib/types'
 import CopyField from './primitives/CopyField'
 import Tag from './primitives/Tag'
@@ -389,8 +389,9 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                   gap: 4
                 }}
               >
-                <AlertTriangle size={11} style={{ flexShrink: 0 }} /> {OFFICIAL_DISABLED_WARNING}{' '}
-                Click the switch again to turn it off.
+                <AlertTriangle size={11} style={{ flexShrink: 0 }} />{' '}
+                {isRequired ? REQUIRED_DISABLED_WARNING : OFFICIAL_DISABLED_WARNING} Click the switch
+                again to turn it off.
               </span>
             )}
             {isSdk && (
