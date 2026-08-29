@@ -5,9 +5,12 @@
 //! this image; there is no Windows build of the CLI, so FEM runs the official image
 //! through the Docker engine it already manages for its other container integrations.
 //!
-//! Credentials come from the process environment (`PAWNS_EMAIL` / `PAWNS_PASSWORD`),
-//! matching how the other partner integrations take their secrets, and are passed
-//! straight to `docker run` — nothing is written to disk.
+//! Credentials: every FEM device shares under Fry Networks' own Pawns.app account, so
+//! there is nothing for a device owner to enter. hardwareapi delivers the account over
+//! `GET /credentials/{miner_key}`, released only to a caller holding that device's own
+//! token, and the values are passed straight to `docker run` — nothing is written to disk.
+//! The old `PAWNS_EMAIL` / `PAWNS_PASSWORD` environment path is gone: no Settings field
+//! ever existed for either, so it could only ever fail with "sign-in details are missing".
 //!
 //! Consent: the Pawns.app CLI Addendum (§5.2–5.4) requires a separate, explicit consent
 //! action from the person who owns the device *before* the agent starts, disclosing what
@@ -22,6 +25,7 @@ use super::{HealthStatus, Integration, PocGateData};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::supervisor::platform::{BoundedOutput, LONG_TIMEOUT, PROBE_TIMEOUT};
@@ -64,7 +68,10 @@ pub enum PawnsState {
     Unknown,
 }
 
-pub struct PawnsIntegration;
+pub struct PawnsIntegration {
+    pub api_client: Arc<crate::api::client::ApiClient>,
+    pub config: Arc<crate::config::store::ConfigStore>,
+}
 
 impl PawnsIntegration {
     fn partner_dir() -> PathBuf {
@@ -123,12 +130,32 @@ impl PawnsIntegration {
         Self::record_consent_event("withdrawal");
     }
 
-    fn credentials() -> Option<(String, String)> {
-        let email = std::env::var("PAWNS_EMAIL").ok().filter(|s| !s.is_empty())?;
-        let password = std::env::var("PAWNS_PASSWORD")
-            .ok()
-            .filter(|s| !s.is_empty())?;
-        Some((email, password))
+    /// Pawns.app shares every device under Fry Networks' own account, so the
+    /// credential is delivered by hardwareapi over `/credentials/{miner_key}`
+    /// (scoped to this device's own token) rather than typed in by the user.
+    /// Asking the owner to set PAWNS_EMAIL/PAWNS_PASSWORD was never
+    /// satisfiable: there is no Settings field for either, so the integration
+    /// could only ever fail with "sign-in details are missing".
+    async fn credentials(&self) -> Result<(String, String), String> {
+        let cfg = self.config.get();
+        let miner_key = cfg.miner_key.as_deref().ok_or_else(|| {
+            "Device registration is not complete yet — Pawns.app starts once this device is registered."
+                .to_string()
+        })?;
+        let creds = crate::api::credentials::lookup(&self.api_client, miner_key)
+            .await
+            .map_err(|e| format!("Could not fetch device credentials: {}", e))?;
+        match (
+            creds.pawns_account_email.filter(|s| !s.is_empty()),
+            creds.pawns_account_password.filter(|s| !s.is_empty()),
+        ) {
+            (Some(email), Some(password)) => Ok((email, password)),
+            _ => Err(
+                "Pawns.app account is still being provisioned for this device — \
+                 no action needed, it will start automatically."
+                    .to_string(),
+            ),
+        }
     }
 
     fn host_label() -> String {
@@ -454,12 +481,9 @@ impl Integration for PawnsIntegration {
             );
         }
 
-        let (email, password) = match Self::credentials() {
-            Some(creds) => creds,
-            None => anyhow::bail!(
-                "Pawns.app sign-in details are missing. Set PAWNS_EMAIL and PAWNS_PASSWORD for the \
-                 Pawns.app account this device shares under, then enable the integration again."
-            ),
+        let (email, password) = match self.credentials().await {
+            Ok(creds) => creds,
+            Err(reason) => anyhow::bail!("{}", reason),
         };
 
         super::docker_manager::ensure_docker().await?;
@@ -534,11 +558,10 @@ impl Integration for PawnsIntegration {
                 CONSENT_DISCLOSURE
             ));
         }
-        if Self::credentials().is_none() {
-            return HealthStatus::Unhealthy(
-                "Pawns.app sign-in details are missing — set PAWNS_EMAIL and PAWNS_PASSWORD."
-                    .to_string(),
-            );
+        if let Err(reason) = self.credentials().await {
+            // Provisioning state, not a user-action demand: nothing the device
+            // owner can do about it and nothing for them to enter.
+            return HealthStatus::Unhealthy(reason);
         }
         if !Self::docker_available() {
             return HealthStatus::Unhealthy(super::docker_manager::status_user_message(
@@ -747,7 +770,18 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs Docker, network and real Pawns.app credentials"]
     async fn pawns_live_poa_tracks_the_agent() {
-        let pawns = PawnsIntegration;
+        use std::sync::Arc;
+        let config = Arc::new(crate::config::store::ConfigStore::new(
+            std::env::temp_dir().join("fem-pawns-live-test"),
+        ));
+        let cfg = config.get();
+        let pawns = PawnsIntegration {
+            api_client: Arc::new(crate::api::client::ApiClient::new(
+                cfg.api_base_url.clone(),
+                cfg.effective_api_token(),
+            )),
+            config: config.clone(),
+        };
         assert!(
             PawnsIntegration::install_marker().exists(),
             "agent not installed — run the lifecycle test first"
@@ -778,12 +812,24 @@ mod tests {
 
     /// Drives the real lifecycle against the real Docker engine and the real
     /// Pawns.app account. Opt-in (`cargo test -- --ignored pawns_live`) because
-    /// it needs Docker, network, and `PAWNS_EMAIL`/`PAWNS_PASSWORD` in the
-    /// environment — CI has none of those.
+    /// it needs Docker, network, and a registered device whose own token can
+    /// fetch the shared Pawns.app account from hardwareapi — CI has none of
+    /// those.
     #[tokio::test]
-    #[ignore = "needs Docker, network and real Pawns.app credentials"]
+    #[ignore = "needs Docker, network and a registered device"]
     async fn pawns_live_lifecycle() {
-        let pawns = PawnsIntegration;
+        use std::sync::Arc;
+        let config = Arc::new(crate::config::store::ConfigStore::new(
+            std::env::temp_dir().join("fem-pawns-live-test"),
+        ));
+        let cfg = config.get();
+        let pawns = PawnsIntegration {
+            api_client: Arc::new(crate::api::client::ApiClient::new(
+                cfg.api_base_url.clone(),
+                cfg.effective_api_token(),
+            )),
+            config: config.clone(),
+        };
 
         pawns.install().await.expect("install should pull the agent image");
         assert_eq!(pawns.installed_version().as_deref(), Some("latest"));
@@ -832,6 +878,59 @@ mod tests {
         );
         let consent_log = std::fs::read_to_string(PawnsIntegration::consent_log()).unwrap();
         assert!(consent_log.contains("\"action\":\"withdrawal\""));
+    }
+}
+
+#[cfg(test)]
+mod account_credential_tests {
+    use crate::api::types::CredentialInfo;
+
+    /// E5: the device owner was told to set two environment variables that no
+    /// Settings field could ever satisfy. Devices share Fry Networks' own
+    /// Pawns.app account, delivered by hardwareapi, so the client must never
+    /// read those variables again.
+    #[test]
+    fn the_integration_never_reads_pawns_credentials_from_the_environment() {
+        let source = include_str!("pawns.rs");
+        assert!(!source.contains("std::env::var(\"PAWNS_EMAIL\")"));
+        assert!(!source.contains("std::env::var(\"PAWNS_PASSWORD\")"));
+        assert!(!source.contains("env::var(\"PAWNS_EMAIL\")"));
+        assert!(!source.contains("env::var(\"PAWNS_PASSWORD\")"));
+    }
+
+    /// The dead-end wording is gone; a device with no account provisioned yet
+    /// is told it needs to do nothing.
+    #[test]
+    fn no_user_action_wording_survives() {
+        let source = include_str!("pawns.rs");
+        // Assembled at runtime: a contiguous literal here would appear in this
+        // very file and the guard would match itself.
+        let dead_end = format!("{} PAWNS_EMAIL and PAWNS_PASSWORD", "Set");
+        assert!(!source.contains(&dead_end));
+        assert!(source.contains("no action needed"));
+    }
+
+    #[test]
+    fn credentials_response_carries_the_shared_pawns_account() {
+        let body = r#"{
+            "miner_key": "FEM-TEST",
+            "algo_address": "ADDR",
+            "pawns_account_email": "shared@example.test",
+            "pawns_account_password": "s3cret-value"
+        }"#;
+        let info: CredentialInfo = serde_json::from_str(body).expect("deserialises");
+        assert_eq!(info.pawns_account_email.as_deref(), Some("shared@example.test"));
+        assert_eq!(info.pawns_account_password.as_deref(), Some("s3cret-value"));
+    }
+
+    /// A shared or bootstrap token gets a response without those fields; the
+    /// client must treat that as "not provisioned", not as a parse failure.
+    #[test]
+    fn credentials_response_without_the_account_still_parses() {
+        let body = r#"{"miner_key":"FEM-TEST","algo_address":"ADDR"}"#;
+        let info: CredentialInfo = serde_json::from_str(body).expect("deserialises");
+        assert!(info.pawns_account_email.is_none());
+        assert!(info.pawns_account_password.is_none());
     }
 }
 
