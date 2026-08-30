@@ -18,6 +18,23 @@ impl StorjIntegration {
         partners_base_dir().join("storj")
     }
 
+    /// Whether a storagenode dashboard answers successfully at `url`.
+    ///
+    /// Split out so the health-detection path can be exercised against a real
+    /// HTTP responder. Reaching this state for real still requires a Storj
+    /// account: `start()` launches nothing, and the dashboard only exists once
+    /// the user has completed node identity with an account-issued auth token.
+    async fn dashboard_responds(url: &str) -> bool {
+        matches!(
+            reqwest::Client::new()
+                .get(url)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await,
+            Ok(resp) if resp.status().is_success()
+        )
+    }
+
     fn binary_path() -> PathBuf {
         #[cfg(target_os = "windows")]
         return Self::partner_dir().join("storagenode.exe");
@@ -270,18 +287,15 @@ impl Integration for StorjIntegration {
         if !binary.exists() {
             return HealthStatus::Stopped;
         }
+        // (probe extracted to StorjIntegration::dashboard_responds so the
+        //  detection path can be exercised against a real HTTP responder)
 
         // Check if dashboard is accessible on localhost:14002
-        match reqwest::Client::new()
-            .get(format!("http://127.0.0.1:{}", STORJ_DASHBOARD_PORT))
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
+        match Self::dashboard_responds(&format!("http://127.0.0.1:{}", STORJ_DASHBOARD_PORT)).await {
+            true => {
                 HealthStatus::Healthy
             }
-            _ => {
+            false => {
                 // TODO-COVERAGE-GAP: node-online state requires Storj account auth token (email signup).
                 // Install + eligibility + exclusivity work without the token; this state guides the
                 // user to paste their token for full activation. F4: the toggle "not staying on" is
@@ -376,5 +390,66 @@ mod tests {
     #[test]
     fn none_when_only_an_updater_is_published() {
         assert_eq!(picked(&["storagenode-updater_windows_amd64.zip"]), None);
+    }
+}
+
+#[cfg(test)]
+mod dashboard_detection_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// Serves a real HTTP 200 until the test drops it.
+    fn spawn_dashboard() -> (u16, std::sync::mpsc::Sender<()>) {
+        // Prefer the real dashboard port; fall back to an ephemeral one if the
+        // environment will not allow binding it (another process, or policy).
+        let listener = TcpListener::bind(("127.0.0.1", STORJ_DASHBOARD_PORT))
+            .or_else(|_| TcpListener::bind(("127.0.0.1", 0)))
+            .expect("bind a loopback listener");
+        let port = listener.local_addr().unwrap().port();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if stop_rx.try_recv().is_ok() {
+                    break;
+                }
+                if let Ok(mut sock) = stream {
+                    let mut buf = [0u8; 1024];
+                    let _ = sock.read(&mut buf);
+                    let _ = sock.write_all(
+                        b"HTTP/1.1 200 OK
+Content-Length: 2
+Connection: close
+
+ok",
+                    );
+                    let _ = sock.flush();
+                }
+            }
+        });
+        (port, stop_tx)
+    }
+
+    /// Binds a REAL HTTP responder and confirms the detection path reports
+    /// success when a dashboard genuinely answers.
+    ///
+    /// This verifies FEM's health-DETECTION logic only. It is not evidence that
+    /// Storj works: `start()` launches no storagenode, and a real node still
+    /// requires an account-issued auth token and completed node identity.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_responding_dashboard_is_detected() {
+        let (port, stop) = spawn_dashboard();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let detected =
+            StorjIntegration::dashboard_responds(&format!("http://127.0.0.1:{port}")).await;
+        let _ = stop.send(());
+        assert!(detected, "a live HTTP 200 on the dashboard port must be detected");
+    }
+
+    /// Nothing listening must NOT be reported as a working dashboard — this is
+    /// the state every device without a Storj account is actually in.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dead_port_is_not_detected() {
+        assert!(!StorjIntegration::dashboard_responds("http://127.0.0.1:1").await);
     }
 }
