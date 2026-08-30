@@ -126,6 +126,13 @@ fn main() {
                 config: config_store.clone(),
             }));
 
+            // Warm the SpaceAcres SSD probe before anything can call
+            // check_requirements() on a hot path. The first probe spawns up to
+            // two PowerShell processes, and check_requirements() runs inside
+            // available_count() under the registry mutex — a cold probe there
+            // would freeze the UI and stall the PoC reporter behind the lock.
+            integrations::space_acres::warm_ssd_probe();
+
             // Restore enabled states from config. Skip ids no longer registered
             // (e.g. the removed Presearch) — a stale key would otherwise inflate
             // enabled_count()/proportion() with a ghost entry.

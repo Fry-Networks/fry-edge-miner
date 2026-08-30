@@ -9,6 +9,28 @@ use tracing::{info, warn};
 
 const SPACE_ACRES_MIN_GB: u64 = 50;
 
+/// Whether this machine meets SpaceAcres' published minimums, from already
+/// memoised probe results. Pure so the thresholds are testable without
+/// shelling out to PowerShell — same split Iagon uses.
+///
+/// Fails OPEN on `None`: an unmeasurable machine must never be silently marked
+/// unavailable, because `check_requirements()` drives `available_count()`,
+/// which is the denominator of the multiplier this device submits.
+fn evaluate_requirements(ssd: Option<bool>, free_gb: Option<f64>) -> Result<(), String> {
+    if ssd == Some(false) {
+        return Err("No SSD detected — SpaceAcres requires solid-state storage".to_string());
+    }
+    if let Some(gb) = free_gb {
+        if gb < SPACE_ACRES_MIN_GB as f64 {
+            return Err(format!(
+                "Insufficient disk space — SpaceAcres needs {} GB free, this device has {:.0} GB available",
+                SPACE_ACRES_MIN_GB, gb
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The release artifact chosen for this platform.
 pub struct ReleaseAsset {
     pub version: String,
@@ -360,6 +382,18 @@ impl Integration for SpaceAcresIntegration {
         "space_acres"
     }
 
+    /// SpaceAcres needs an SSD and headroom to plot. Without this the farmer
+    /// counted toward `available_count()` on machines that can never run it,
+    /// which shrinks every other integration's share of the multiplier this
+    /// device submits — i.e. under-provisioned devices were paid less than
+    /// they earned. Reads only memoised probes, per the trait's cheapness rule.
+    fn check_requirements(&self) -> Result<(), String> {
+        evaluate_requirements(
+            ssd_state_for_requirements(),
+            crate::system_info::available_disk_gb(&partners_base_dir()),
+        )
+    }
+
     fn display_name(&self) -> &str {
         "SpaceAcres"
     }
@@ -664,48 +698,94 @@ async fn check_free_space() -> anyhow::Result<u64> {
 ///
 /// Primary: Get-PhysicalDisk | Where MediaType -eq 'SSD'
 /// Fallback: MSFT_PhysicalDisk with SeekPenalty==false (indicates SSD)
+/// SSD presence as a tri-state: `None` means the probe could not measure it.
+///
+/// `check_requirements()` must fail OPEN on an unmeasurable machine (the rule
+/// `system_info` states: a transient probe error must never silently disable a
+/// working integration), so "no SSD" and "could not tell" cannot share a value.
 #[cfg(target_os = "windows")]
-fn has_ssd() -> bool {
-    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CACHE.get_or_init(|| {
-        // Primary check: explicit SSD MediaType
-        let primary_check = crate::supervisor::platform::command("powershell")
+fn ssd_state() -> Option<bool> {
+    *SSD_CACHE.get_or_init(|| {
+        // Primary probe answers definitively when it succeeds.
+        let primary = crate::supervisor::platform::command("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
                 "Get-PhysicalDisk | Where MediaType -eq 'SSD' | Measure-Object | Select -Expand Count",
             ])
             .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
-            .map(|o| {
+            .ok()
+            .and_then(|o| {
                 String::from_utf8_lossy(&o.stdout)
                     .trim()
                     .parse::<u32>()
-                    .unwrap_or(0)
-                    > 0
-            })
-            .unwrap_or(false);
-
-        if primary_check {
-            return true;
+                    .ok()
+            });
+        if let Some(count) = primary {
+            if count > 0 {
+                return Some(true);
+            }
         }
-
-        // Fallback: MSFT_PhysicalDisk with SeekPenalty==false indicates SSD
-        crate::supervisor::platform::command("powershell")
+        // Fallback: SeekPenalty == false also indicates an SSD.
+        let fallback = crate::supervisor::platform::command("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
                 "(Get-WmiObject -Namespace \"root/Microsoft/Windows/Storage\" -Class MSFT_PhysicalDisk | Where-Object SeekPenalty -EQ $false | Measure-Object).Count -gt 0",
             ])
             .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+            .ok()
             .map(|o| {
                 String::from_utf8_lossy(&o.stdout)
                     .trim()
                     .to_lowercase()
                     .contains("true")
-            })
-            .unwrap_or(false)
+            });
+        match (primary, fallback) {
+            // Fallback saw an SSD.
+            (_, Some(true)) => Some(true),
+            // At least one probe ran and neither found one.
+            (Some(_), Some(false)) | (Some(_), None) | (None, Some(false)) => Some(false),
+            // Nothing could be measured.
+            (None, None) => None,
+        }
     })
 }
+
+/// Unmeasurable is reported as "no SSD" here to preserve the pre-existing
+/// behaviour of every caller that predates `ssd_state()`.
+#[cfg(target_os = "windows")]
+fn has_ssd() -> bool {
+    ssd_state().unwrap_or(false)
+}
+
+/// Warm the SSD probe before anything on a hot path can trigger it. The first
+/// call spawns up to two PowerShell processes (~20s each at PROBE_TIMEOUT), and
+/// `check_requirements()` runs inside `available_count()` under the registry
+/// mutex — a cold probe there would freeze the UI and stall the PoC reporter.
+pub fn warm_ssd_probe() {
+    let _ = ssd_state_for_requirements();
+}
+
+/// Tri-state SSD signal for the requirements gate. Non-Windows reports `None`
+/// (unmeasurable) rather than `false`: `has_ssd()` returns a bare `false`
+/// there because detection was never implemented, and treating that as "no
+/// SSD" would mark SpaceAcres permanently unavailable for every Linux and
+/// macOS user.
+fn ssd_state_for_requirements() -> Option<bool> {
+    #[cfg(target_os = "windows")]
+    {
+        ssd_state()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "windows")]
+static SSD_CACHE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+
 
 #[cfg(not(target_os = "windows"))]
 fn has_ssd() -> bool {
@@ -822,5 +902,48 @@ mod discovery_tests {
     fn staged_installer_with_no_install_found_yields_nothing_to_launch() {
         let staged = PathBuf::from(r"C:\staged\space-acres.exe");
         assert_eq!(pick_binary(Some(staged), true, None), None);
+    }
+}
+
+#[cfg(test)]
+mod requirement_tests {
+    use super::*;
+
+    /// E11: SpaceAcres inherited the trait's default `Ok(())`, so a machine
+    /// that can never run it still counted in `available_count()` — the
+    /// denominator of the multiplier the device submits. Under-provisioned
+    /// devices were therefore paid LESS than they earned.
+    #[test]
+    fn a_machine_without_an_ssd_is_unavailable() {
+        let err = evaluate_requirements(Some(false), Some(500.0)).unwrap_err();
+        assert!(err.contains("SSD"), "unexpected reason: {err}");
+    }
+
+    #[test]
+    fn a_machine_below_the_disk_minimum_is_unavailable() {
+        let err = evaluate_requirements(Some(true), Some(10.0)).unwrap_err();
+        assert!(err.contains("10"), "reason should quote the free space: {err}");
+        assert!(err.contains(&SPACE_ACRES_MIN_GB.to_string()));
+    }
+
+    #[test]
+    fn a_correctly_provisioned_machine_passes() {
+        assert!(evaluate_requirements(Some(true), Some(500.0)).is_ok());
+    }
+
+    #[test]
+    fn exactly_at_the_threshold_is_accepted() {
+        assert!(evaluate_requirements(Some(true), Some(SPACE_ACRES_MIN_GB as f64)).is_ok());
+    }
+
+    /// Fail-open: an unmeasurable probe must never silently disable a working
+    /// integration (the rule `system_info` documents, and what Iagon does).
+    /// Non-Windows reports `None` for the SSD signal, so this also keeps
+    /// SpaceAcres available on Linux/macOS instead of permanently unavailable.
+    #[test]
+    fn unmeasurable_specs_fail_open() {
+        assert!(evaluate_requirements(None, None).is_ok());
+        assert!(evaluate_requirements(None, Some(10.0)).is_err(), "a measured shortfall still fails");
+        assert!(evaluate_requirements(Some(true), None).is_ok());
     }
 }

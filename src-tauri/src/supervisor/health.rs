@@ -211,6 +211,98 @@ pub async fn health_check_loop<C, R, E>(
 }
 
 #[cfg(test)]
+mod loop_timing_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    /// Drives the REAL `health_check_loop` with the SHIPPED default config
+    /// (30s interval × 6 ticks = 180s) against an integration that never
+    /// leaves `Starting`, and waits out the actual window on the wall clock.
+    ///
+    /// Deliberately not a virtual-clock or shortened-interval test: a rapid
+    /// proxy is what let the missing startup timeout ship unnoticed once
+    /// already. Opt-in because it takes ~3.5 real minutes:
+    ///   cargo test --bin fry-edge-miner -- --ignored startup_timeout_fires
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "takes ~3.5 minutes of real time (the shipped 180s window)"]
+    async fn startup_timeout_fires_after_the_real_configured_window() {
+        let (tx, mut rx) = mpsc::channel::<HealthEvent>(64);
+        let restarts = Arc::new(AtomicU32::new(0));
+        let restarts_seen = restarts.clone();
+
+        let cfg = HealthCheckConfig::default();
+        assert_eq!(cfg.check_interval, Duration::from_secs(30));
+        assert_eq!(cfg.starting_timeout_ticks, 6);
+
+        tokio::spawn(health_check_loop(
+            "stuck-integration".to_string(),
+            cfg,
+            || HealthStatus::Starting,               // never becomes healthy
+            move || {
+                restarts.fetch_add(1, Ordering::SeqCst);
+                true
+            },
+            || true,                                  // enabled
+            tx,
+        ));
+
+        let started = std::time::Instant::now();
+        let mut timeout_event: Option<HealthEvent> = None;
+        // 6 ticks × 30s = 180s, plus the restart backoff and slack.
+        let deadline = Duration::from_secs(260);
+        while started.elapsed() < deadline {
+            match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+                Ok(Some(ev)) => {
+                    if let HealthStatus::Unhealthy(ref reason) = ev.status {
+                        if reason.contains("Did not finish starting") {
+                            timeout_event = Some(ev);
+                            break;
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => continue,
+            }
+        }
+
+        let elapsed = started.elapsed();
+        let ev = timeout_event.unwrap_or_else(|| {
+            panic!("startup timeout never fired within {}s", elapsed.as_secs())
+        });
+        match ev.status {
+            HealthStatus::Unhealthy(reason) => {
+                assert!(reason.contains("Did not finish starting"), "reason: {reason}");
+            }
+            other => panic!("expected Unhealthy, got {other:?}"),
+        }
+        // It must wait the real window, not fire early.
+        assert!(
+            elapsed >= Duration::from_secs(150),
+            "fired too early ({}s) — the 180s window was not honoured",
+            elapsed.as_secs()
+        );
+        // Recovery runs after the event, behind the first backoff (5s), so give
+        // it room rather than asserting the instant the event lands.
+        for _ in 0..20 {
+            if restarts_seen.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        assert!(
+            restarts_seen.load(Ordering::SeqCst) >= 1,
+            "a timed-out startup must also be recovered, not just reported"
+        );
+        println!(
+            "startup timeout fired after {}s of real time; restarts attempted = {}",
+            elapsed.as_secs(),
+            restarts_seen.load(Ordering::SeqCst)
+        );
+    }
+}
+
+#[cfg(test)]
 mod recovery_tests {
     use super::*;
 

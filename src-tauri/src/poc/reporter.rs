@@ -161,10 +161,15 @@ pub fn build_poc_doc(
     // hardware rules out, so shipping one nobody can run would quietly cut
     // every user's multiplier.
     let available_count = registry.available_count();
+    // healthy_count spans every integration, but the denominator excludes the
+    // ones this machine cannot run — so a still-Healthy integration whose
+    // requirements have since lapsed (a farmer on a volume that dropped below
+    // its minimum) could push this above 1.0. The server clamps to [0,1]
+    // anyway; submitting a number above 1.0 would just be a false claim.
     let proportion = if available_count == 0 {
         0.0
     } else {
-        healthy_count as f64 / available_count as f64
+        (healthy_count as f64 / available_count as f64).min(1.0)
     };
 
     // Display fields — enabled-based (unchanged)
