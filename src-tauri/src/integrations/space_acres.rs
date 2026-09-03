@@ -106,6 +106,32 @@ fn file_is_burn_bundle(path: &std::path::Path) -> bool {
     }
 }
 
+/// The `MZ` DOS-header magic every valid PE image (installer or farmer)
+/// starts with. A staged file that lacks it is not "the installer instead of
+/// the farmer" (that's `head_is_burn_bundle`'s job) — it is corrupted:
+/// truncated, bit-flipped, or garbage from a partial/interrupted write (disk
+/// full, power loss mid-write, antivirus quarantine-and-restore). Pure, same
+/// idiom as `head_is_burn_bundle`, so it is testable without touching the
+/// filesystem.
+fn head_is_valid_pe(head: &[u8]) -> bool {
+    head.len() >= 2 && &head[0..2] == b"MZ"
+}
+
+/// File-level counterpart to `head_is_valid_pe`, mirroring
+/// `file_is_burn_bundle` exactly (same read pattern, same failure-to-false).
+#[cfg(target_os = "windows")]
+fn file_is_valid_pe(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut buf = [0u8; 8192];
+    match std::fs::File::open(path) {
+        Ok(mut f) => match f.read(&mut buf) {
+            Ok(n) => head_is_valid_pe(&buf[..n]),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
+}
+
 /// Pick the binary to launch, given the staged copy and whatever path discovery
 /// found. FEM <= 0.4.20 saved the downloaded Burn bootstrapper as
 /// `space-acres.exe` in its own partner directory and then preferred that copy
@@ -162,6 +188,15 @@ impl SpaceAcresIntegration {
         let staged = Self::binary_path();
         let staged_exists = staged.exists();
         let staged_is_installer = staged_exists && file_is_burn_bundle(&staged);
+        // Bug 4: a staged file that is neither the farmer nor a recognised
+        // Burn bundle is not "safe by elimination" — it may be a corrupted
+        // partial write. Trusting and spawning it unvalidated surfaced as a
+        // raw Windows "Unsupported 16-Bit Application" dialog instead of any
+        // FEM-owned error, and — worse — it was PREFERRED over a known-good
+        // discovered Program Files install. Route it through the same
+        // "don't trust the staged copy" branch `pick_binary` already has.
+        let staged_is_corrupt = staged_exists && !staged_is_installer && !file_is_valid_pe(&staged);
+        let staged_untrusted = staged_is_installer || staged_is_corrupt;
         let staged = staged_exists.then_some(staged);
         let mut roots: Vec<PathBuf> = Vec::new();
         for var in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
@@ -170,7 +205,7 @@ impl SpaceAcresIntegration {
             }
         }
         let discovered = binary_candidates(&roots).into_iter().find(|c| c.exists());
-        pick_binary(staged, staged_is_installer, discovered)
+        pick_binary(staged, staged_untrusted, discovered)
     }
 
     /// Move a mis-staged Burn bootstrapper out of the farmer's filename so it
@@ -902,6 +937,59 @@ mod discovery_tests {
     fn staged_installer_with_no_install_found_yields_nothing_to_launch() {
         let staged = PathBuf::from(r"C:\staged\space-acres.exe");
         assert_eq!(pick_binary(Some(staged), true, None), None);
+    }
+
+    /// Bug 4: `head_is_valid_pe` is the trust gate a corrupted staged file
+    /// must fail before it can ever reach `pick_binary`.
+    #[test]
+    fn head_is_valid_pe_requires_the_mz_magic() {
+        assert!(head_is_valid_pe(b"MZ\x90\x00.text\x00\x00\x00.rdata\x00\x00"));
+        // WP6/WP3-style corruption: plain ASCII, no MZ header.
+        assert!(!head_is_valid_pe(b"WP6-TEST-CORRUPTION-NOT-A-VALID-EXECUTABLE"));
+        assert!(!head_is_valid_pe(b""));
+        // Too short to even carry the 2-byte magic.
+        assert!(!head_is_valid_pe(b"M"));
+    }
+
+    /// Bug 4 regression: a staged file that is corrupted (truncated/garbage,
+    /// no MZ header — WP3's exact repro) must NOT be preferred over a
+    /// known-good discovered install, mirroring the existing
+    /// `staged_installer_is_skipped_in_favour_of_the_real_install` test for
+    /// the Burn-bundle case. `pick_binary`'s own signature is unchanged —
+    /// only what `installed_binary()` passes as the second argument changes
+    /// (staged_is_installer || staged_is_corrupt), so this exercises the
+    /// exact combined flag the production call site now computes.
+    #[test]
+    fn a_non_pe_staged_file_is_not_trusted_over_a_real_install() {
+        let staged = PathBuf::from(r"C:\Users\u\AppData\Roaming\FryEdgeMiner\partners\space_acres\space-acres.exe");
+        let discovered = PathBuf::from(r"C:\Program Files\Space Acres\bin\space-acres.exe");
+        let staged_is_installer = false; // not a Burn bundle — the OLD check would have trusted it
+        let staged_is_corrupt = !head_is_valid_pe(b"WP6-TEST-CORRUPTION-NOT-A-VALID-EXECUTABLE");
+        let staged_untrusted = staged_is_installer || staged_is_corrupt;
+        assert!(staged_untrusted, "a non-PE staged file must be untrusted");
+        assert_eq!(
+            pick_binary(Some(staged), staged_untrusted, Some(discovered.clone())),
+            Some(discovered)
+        );
+    }
+
+    /// Negative control: a staged file WITH a valid MZ header (a real farmer
+    /// binary) must still win over the discovered copy, exactly as
+    /// `staged_farmer_still_wins_when_it_is_a_real_binary` already proves for
+    /// the Burn-bundle flag — confirms this fix does not make the trust gate
+    /// stricter than intended.
+    #[test]
+    fn a_valid_pe_staged_farmer_is_still_preferred() {
+        let staged = PathBuf::from(r"C:\staged\space-acres.exe");
+        let discovered = PathBuf::from(r"C:\Program Files\Space Acres\bin\space-acres.exe");
+        let staged_is_installer = false;
+        let staged_is_corrupt = !head_is_valid_pe(b"MZ\x90\x00real-farmer-bytes");
+        let staged_untrusted = staged_is_installer || staged_is_corrupt;
+        assert!(!staged_untrusted, "a valid PE staged file must be trusted");
+        assert_eq!(
+            pick_binary(Some(staged.clone()), staged_untrusted, Some(discovered)),
+            Some(staged)
+        );
     }
 }
 

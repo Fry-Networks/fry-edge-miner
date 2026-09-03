@@ -773,6 +773,7 @@ mod tests {
         use std::sync::Arc;
         let config = Arc::new(crate::config::store::ConfigStore::new(
             std::env::temp_dir().join("fem-pawns-live-test"),
+            None,
         ));
         let cfg = config.get();
         let pawns = PawnsIntegration {
@@ -821,6 +822,7 @@ mod tests {
         use std::sync::Arc;
         let config = Arc::new(crate::config::store::ConfigStore::new(
             std::env::temp_dir().join("fem-pawns-live-test"),
+            None,
         ));
         let cfg = config.get();
         let pawns = PawnsIntegration {
