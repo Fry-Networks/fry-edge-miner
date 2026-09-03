@@ -27,6 +27,34 @@ pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20
 /// install — the point is only that it cannot hang forever.
 pub const LONG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
 
+/// Poll `is_done` (analogous to `Child::try_wait().map(|o| o.is_some())`)
+/// until it reports true, or `budget` elapses — whichever comes first.
+/// NEVER blocks past `budget` even when `is_done` never becomes true.
+///
+/// Extracted so the deadline behavior itself is unit-testable without a real
+/// (and, on Windows, essentially unmanufacturable) "process that ignores
+/// `TerminateProcess`" — this is the one thing both the main wait loop and
+/// the post-kill reap step below actually need to get right.
+fn bounded_wait<F: FnMut() -> bool>(mut is_done: F, budget: std::time::Duration, poll: std::time::Duration) -> bool {
+    let started = std::time::Instant::now();
+    loop {
+        if is_done() {
+            return true;
+        }
+        if started.elapsed() >= budget {
+            return false;
+        }
+        std::thread::sleep(poll);
+    }
+}
+
+/// Grace period to let a just-killed child get reaped before we give up and
+/// return anyway. `kill()` itself is fire-and-forget (it can fail silently —
+/// already exited, permission denied, a wedged handle) and the OS does not
+/// guarantee instant reaping even after a successful `TerminateProcess`, so
+/// this must stay bounded too, not become a second unconditional `wait()`.
+const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Run a command to completion with a hard deadline.
 ///
 /// `Command::output()` blocks forever if the child never exits — a dead Docker
@@ -34,6 +62,15 @@ pub const LONG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900
 /// health checks run inside the PoC reporting tick, one such call froze the
 /// whole app for hours (v0.4.8 field incident). This spawns, polls, and kills
 /// the child at the deadline instead, returning a TimedOut error.
+///
+/// The post-kill reap is itself bounded (`REAP_GRACE`): the original
+/// implementation called `child.wait()` unconditionally after `kill()`, which
+/// is *also* an unbounded blocking call if `kill()` failed silently or the
+/// child was slow to actually exit — turning a "bounded" probe into an
+/// indefinite hang on whatever thread called it. If the child still hasn't
+/// been reaped after the grace period, we log it and return TimedOut anyway,
+/// accepting a leaked handle rather than hanging the caller — this function's
+/// own contract ("cannot hang forever") was previously false for this branch.
 ///
 /// NOTE: like `Command::output()`, this forces piped stdout/stderr — any
 /// stdio the caller configured is overwritten.
@@ -52,7 +89,19 @@ pub fn output_bounded(
             None => {
                 if started.elapsed() >= timeout {
                     let _ = child.kill();
-                    let _ = child.wait();
+                    let reaped = bounded_wait(
+                        || matches!(child.try_wait(), Ok(Some(_))),
+                        REAP_GRACE,
+                        POLL,
+                    );
+                    if !reaped {
+                        tracing::warn!(
+                            timeout_s = timeout.as_secs(),
+                            grace_s = REAP_GRACE.as_secs(),
+                            "output_bounded: child did not reap within the grace period after kill() — \
+                             leaking the handle rather than hanging the caller"
+                        );
+                    }
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         format!("command timed out after {}s", timeout.as_secs()),
@@ -98,6 +147,47 @@ pub fn force_kill(child: &mut Child) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// Bug 2 regression: `bounded_wait` must return by its budget even when
+    /// the condition NEVER becomes true — this is the exact shape of the
+    /// defect (`output_bounded`'s post-kill `child.wait()` was unconditional,
+    /// i.e. equivalent to a budget of infinity). A real "process that
+    /// survives TerminateProcess" cannot be manufactured portably in a unit
+    /// test, so this targets the extracted, generic polling primitive
+    /// directly with a closure that always returns `false`. Non-vacuity was
+    /// confirmed via a mutation check (asserted the wrong way, observed
+    /// FAILED, restored) — pasted in bug2.md, since bounded_wait is new code
+    /// with no pre-fix version to diff against directly.
+    #[test]
+    fn bounded_wait_never_blocks_past_its_budget_even_when_the_condition_never_becomes_true() {
+        let started = Instant::now();
+        let done = bounded_wait(|| false, Duration::from_millis(50), Duration::from_millis(5));
+        let elapsed = started.elapsed();
+        assert!(!done, "condition never became true — must report not-done");
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "returned after {elapsed:?} — budget (50ms) not enforced"
+        );
+    }
+
+    #[test]
+    fn bounded_wait_returns_true_promptly_once_the_condition_flips() {
+        let mut calls = 0u32;
+        let started = Instant::now();
+        let done = bounded_wait(
+            || {
+                calls += 1;
+                calls >= 3
+            },
+            Duration::from_secs(5),
+            Duration::from_millis(5),
+        );
+        assert!(done);
+        assert!(
+            started.elapsed() < Duration::from_millis(300),
+            "should not wait anywhere near the 5s budget once the condition is true"
+        );
+    }
 
     /// Repro of the v0.4.8 freeze: a child that never exits must not block the
     /// caller forever. `Command::output()` would hang here indefinitely.
