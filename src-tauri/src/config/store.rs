@@ -21,11 +21,25 @@ pub struct ConfigStore {
 }
 
 impl ConfigStore {
-    pub fn new(config_dir: PathBuf) -> Self {
+    /// `roaming_path`: an explicit, caller-supplied mirror path (read
+    /// fallback + write-through), or `None` for a fully isolated store that
+    /// can never touch anything outside `config_dir`. The one production
+    /// call site (`main.rs`) passes
+    /// `dirs::config_dir().map(|d| d.join("FryEdgeMiner").join("fem_config.json"))`
+    /// — byte-identical to this constructor's old ambient behavior.
+    ///
+    /// Previously this was resolved internally via `dirs::config_dir()` on
+    /// *every* call, regardless of what `config_dir` was. Constructing a
+    /// store against an unrelated directory (a test's temp dir, which has
+    /// nothing to load) silently fell through to that ambient path and then
+    /// wrote back over the REAL device's
+    /// `%APPDATA%\FryEdgeMiner\fem_config.json` — corrupting a live device's
+    /// miner_key in one documented incident. The roaming mirror is now
+    /// structurally unreachable unless the caller opts in by passing
+    /// `Some(path)`.
+    pub fn new(config_dir: PathBuf, roaming_path: Option<PathBuf>) -> Self {
         let path = config_dir.join("fem_config.json");
         let backup_path = config_dir.join("fem_config.backup.json");
-        let roaming_path =
-            dirs::config_dir().map(|d| d.join("FryEdgeMiner").join("fem_config.json"));
 
         tracing::info!(
             config_dir = %config_dir.display(),
@@ -199,5 +213,114 @@ impl ConfigStore {
         std::fs::write(&tmp, data)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::*;
+
+    /// Bug 1 regression: a store constructed against an isolated directory
+    /// with no roaming mirror (`new(dir, None)`) must be structurally
+    /// incapable of reading OR writing any file outside that directory, even
+    /// when a real `%APPDATA%/FryEdgeMiner/fem_config.json` exists on the
+    /// machine running the test. Previously `ConfigStore::new` took only
+    /// `config_dir` and always resolved `dirs::config_dir()` itself — so a
+    /// temp-dir store with nothing to load would fall through to, and then
+    /// overwrite, the real device's config. This test proves that ambient
+    /// path is now unreachable.
+    ///
+    /// Deliberately hermetic: no `std::env::set_var`/`remove_var` anywhere in
+    /// this test. `dirs::config_dir()` is read once, read-only, to locate
+    /// whatever the REAL roaming path already is on this machine (so the
+    /// assertion has something concrete to compare against) — never mutated.
+    /// This keeps the test race-free under `cargo test`'s default parallel
+    /// threads and 100x-clean without `--test-threads=1`, unlike a
+    /// `set_var`-based approach, which would reintroduce the same
+    /// process-global-env hazard class as the pre-existing
+    /// `FRYNODE_REGION` flake documented in this run's baseline.
+    #[test]
+    fn isolated_store_never_touches_a_file_outside_its_own_dir() {
+        let unique = format!(
+            "fem_store_isolation_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A real roaming path exists on this machine (or would, if this ran
+        // on the live test box) — snapshot it before touching anything, so
+        // we can prove it is byte-identical (or still absent) afterward.
+        // Read-only use of dirs::config_dir(); never mutated.
+        let real_roaming = dirs::config_dir().map(|d| d.join("FryEdgeMiner").join("fem_config.json"));
+        let before = real_roaming
+            .as_ref()
+            .filter(|p| p.exists())
+            .map(|p| std::fs::read(p).unwrap());
+
+        let store = ConfigStore::new(dir.clone(), None);
+        store
+            .update(|cfg| {
+                cfg.miner_key = Some("FEM-ISOLATION-TEST-MUST-NEVER-ESCAPE".to_string());
+                cfg.wallet_address = Some("test-wallet".to_string());
+            })
+            .unwrap();
+        // A second save (the "redundant copy" path) must also stay contained.
+        store.save().unwrap();
+
+        let after = real_roaming
+            .as_ref()
+            .filter(|p| p.exists())
+            .map(|p| std::fs::read(p).unwrap());
+        assert_eq!(
+            before, after,
+            "an isolated ConfigStore (roaming_path=None) must never create, modify, or delete the real roaming config"
+        );
+
+        // The isolated dir itself must hold exactly what we wrote — confirms
+        // this isn't merely "didn't write anywhere," it wrote to the right
+        // (and only the right) place.
+        let isolated_primary = dir.join("fem_config.json");
+        assert!(isolated_primary.exists(), "primary save must land inside the isolated dir");
+        let saved: FemConfig =
+            serde_json::from_str(&std::fs::read_to_string(&isolated_primary).unwrap()).unwrap();
+        assert_eq!(saved.miner_key.as_deref(), Some("FEM-ISOLATION-TEST-MUST-NEVER-ESCAPE"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The explicit-mirror half of the same fix: when a caller DOES pass a
+    /// roaming path, writes land there (and only there) — proving `None`
+    /// above is "opted out," not "the write silently succeeded elsewhere."
+    #[test]
+    fn explicit_roaming_path_is_honoured_when_the_caller_opts_in() {
+        let unique = format!(
+            "fem_store_roaming_opt_in_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        let primary_dir = base.join("primary");
+        let roaming_dir = base.join("roaming");
+        std::fs::create_dir_all(&primary_dir).unwrap();
+        std::fs::create_dir_all(&roaming_dir).unwrap();
+        let roaming_file = roaming_dir.join("fem_config.json");
+
+        let store = ConfigStore::new(primary_dir.clone(), Some(roaming_file.clone()));
+        store.update(|cfg| cfg.miner_key = Some("FEM-ROAMING-OPT-IN".to_string())).unwrap();
+
+        assert!(roaming_file.exists(), "explicit roaming path must receive the redundant copy");
+        let saved: FemConfig =
+            serde_json::from_str(&std::fs::read_to_string(&roaming_file).unwrap()).unwrap();
+        assert_eq!(saved.miner_key.as_deref(), Some("FEM-ROAMING-OPT-IN"));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn test_fryvpn_id() {
         let integration = FryVpnIntegration {
-            config: Arc::new(crate::config::store::ConfigStore::new(std::path::PathBuf::from("/tmp"))),
+            config: Arc::new(crate::config::store::ConfigStore::new(std::path::PathBuf::from("/tmp"), None)),
             supervisor: Arc::new(Mutex::new(crate::supervisor::Supervisor::new(
                 std::path::PathBuf::from("/tmp"),
             ))),
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn test_fryvpn_display_name() {
         let integration = FryVpnIntegration {
-            config: Arc::new(crate::config::store::ConfigStore::new(std::path::PathBuf::from("/tmp"))),
+            config: Arc::new(crate::config::store::ConfigStore::new(std::path::PathBuf::from("/tmp"), None)),
             supervisor: Arc::new(Mutex::new(crate::supervisor::Supervisor::new(
                 std::path::PathBuf::from("/tmp"),
             ))),
