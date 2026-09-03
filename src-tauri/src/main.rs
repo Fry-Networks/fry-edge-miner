@@ -62,7 +62,9 @@ fn main() {
                 .path()
                 .app_data_dir()
                 .expect("failed to resolve app data dir");
-            let config_store = ConfigStore::new(config_dir.clone());
+            let roaming_path =
+                dirs::config_dir().map(|d| d.join("FryEdgeMiner").join("fem_config.json"));
+            let config_store = ConfigStore::new(config_dir.clone(), roaming_path);
             let config_store = Arc::new(config_store);
 
             // API client (initial bearer token is the configured token; per-device token applied after registration)
