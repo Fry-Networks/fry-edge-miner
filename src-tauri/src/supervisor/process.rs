@@ -309,32 +309,70 @@ mod wp6_spawn_tests {
         assert!(elapsed < Duration::from_secs(2), "spawn_bounded returned only after {elapsed:?}");
     }
 
+    /// Test-only: liveness of the late child is judged on a SYNCHRONIZE handle
+    /// opened while the child is certainly alive. Windows cannot recycle a PID
+    /// while a handle to the process object is open, so the probe can never
+    /// mistake an unrelated newcomer for the late child (a `tasklist`-by-PID
+    /// probe did exactly that on 2026-09-07: OpenConsole.exe reused the killed
+    /// child's PID within 2 s on a loaded box).
+    #[cfg(windows)]
+    mod late_child_handle {
+        #[link(name = "kernel32")]
+        extern "system" {
+            pub fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> isize;
+            pub fn WaitForSingleObject(handle: isize, milliseconds: u32) -> u32;
+            pub fn CloseHandle(handle: isize) -> i32;
+        }
+        pub const SYNCHRONIZE: u32 = 0x0010_0000;
+        pub const WAIT_OBJECT_0: u32 = 0;
+    }
+
     /// A child that comes into existence after the caller gave up must be
     /// killed by the spawn thread, never left running untracked.
     #[cfg(windows)]
     #[test]
     fn a_child_created_after_the_caller_gave_up_is_killed_not_adopted() {
-        let late_pid = std::sync::Arc::new(std::sync::Mutex::new(None::<u32>));
-        let pid_slot = late_pid.clone();
+        let late = std::sync::Arc::new(std::sync::Mutex::new(None::<(u32, isize)>));
+        let slot = late.clone();
         let r = spawn_bounded("wp6-late", Duration::from_millis(200), move || {
             std::thread::sleep(Duration::from_millis(700));
             let child = super::super::platform::command("cmd.exe")
                 .args(["/c", "ping -n 60 127.0.0.1 >nul"])
                 .spawn()?;
-            *pid_slot.lock().unwrap() = Some(child.id());
+            // Pin the PID before handing the child back: from here on the
+            // process object outlives the kill until the test closes it.
+            let handle = unsafe { late_child_handle::OpenProcess(late_child_handle::SYNCHRONIZE, 0, child.id()) };
+            *slot.lock().unwrap() = Some((child.id(), handle));
             Ok(child)
         });
         assert!(matches!(&r, Err(e) if e.kind() == io::ErrorKind::TimedOut), "{r:?}");
-        std::thread::sleep(Duration::from_millis(2000));
-        let pid = late_pid.lock().unwrap().expect("the late child was created");
-        let listing = std::process::Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-            .output()
-            .expect("tasklist");
-        let text = String::from_utf8_lossy(&listing.stdout);
-        assert!(
-            !text.contains(&pid.to_string()),
-            "late child pid {pid} is still alive after the caller timed out:\n{text}"
+        let (pid, handle) = {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            loop {
+                if let Some(v) = *late.lock().unwrap() {
+                    break v;
+                }
+                assert!(std::time::Instant::now() < deadline, "the late child was never created");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        assert_ne!(handle, 0, "OpenProcess failed for the late child pid {pid}");
+        // Same 2 s bound as before, now waited on the process object itself.
+        let wait = unsafe { late_child_handle::WaitForSingleObject(handle, 2_000) };
+        let diagnostics = if wait == late_child_handle::WAIT_OBJECT_0 {
+            String::new()
+        } else {
+            let listing = std::process::Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+                .output()
+                .expect("tasklist");
+            String::from_utf8_lossy(&listing.stdout).to_string()
+        };
+        unsafe { late_child_handle::CloseHandle(handle) };
+        assert_eq!(
+            wait,
+            late_child_handle::WAIT_OBJECT_0,
+            "late child pid {pid} is still alive 2 s after the caller timed out (wait=0x{wait:x}):\n{diagnostics}"
         );
     }
 }
