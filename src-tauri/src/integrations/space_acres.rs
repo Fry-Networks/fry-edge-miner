@@ -124,12 +124,47 @@ fn file_is_valid_pe(path: &std::path::Path) -> bool {
     use std::io::Read;
     let mut buf = [0u8; 8192];
     match std::fs::File::open(path) {
-        Ok(mut f) => match f.read(&mut buf) {
-            Ok(n) => head_is_valid_pe(&buf[..n]),
-            Err(_) => false,
-        },
+        Ok(mut f) => {
+            let file_len = match f.metadata() {
+                Ok(m) => m.len(),
+                Err(_) => return false,
+            };
+            match f.read(&mut buf) {
+                Ok(n) => head_is_valid_pe(&buf[..n]) && pe_head_fits_file(&buf[..n], file_len),
+                Err(_) => false,
+            }
+        }
         Err(_) => false,
     }
+}
+
+/// Bug 4 follow-up (WP3 live trial, 2026-09-07): `head_is_valid_pe` only proves
+/// the 2-byte MZ magic, which a farmer binary TRUNCATED mid-write (disk full,
+/// power loss, AV quarantine-and-restore) still carries — so the truncated
+/// staged copy passed the gate and was spawned in preference to the real
+/// install. Walk the PE headers that fit in the first 8 KiB and require every
+/// section's raw data to lie inside the file. Anything malformed or cut short
+/// is not trusted. Overlay bytes past the last section are not covered.
+fn pe_head_fits_file(head: &[u8], file_len: u64) -> bool {
+    let u16_at = |o: usize| head.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+    let u32_at = |o: usize| head.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let Some(e_lfanew) = u32_at(0x3C).map(|v| v as usize) else {
+        return false;
+    };
+    if head.get(e_lfanew..e_lfanew + 4) != Some(&b"PE\0\0"[..]) {
+        return false;
+    }
+    let (Some(sections), Some(opt_size)) = (u16_at(e_lfanew + 6), u16_at(e_lfanew + 20)) else {
+        return false;
+    };
+    let table = e_lfanew + 24 + opt_size as usize;
+    (0..sections as usize).all(|i| {
+        let s = table + i * 40;
+        match (u32_at(s + 16), u32_at(s + 20)) {
+            (Some(raw_size), Some(raw_ptr)) => raw_ptr as u64 + raw_size as u64 <= file_len,
+            _ => false,
+        }
+    })
 }
 
 /// Pick the binary to launch, given the staged copy and whatever path discovery
@@ -990,6 +1025,91 @@ mod discovery_tests {
             pick_binary(Some(staged.clone()), staged_untrusted, Some(discovered)),
             Some(staged)
         );
+    }
+}
+
+#[cfg(test)]
+mod pe_completeness_tests {
+    //! WP3 (2026-09-07) live finding: the shipped Bug-4 gate is a 2-byte "MZ"
+    //! check, so a staged farmer that was TRUNCATED mid-write (the exact
+    //! corruption reproduced on 2026-08-31) keeps its MZ magic, passes the
+    //! gate, and is still preferred over the Program Files install — FEM then
+    //! spawns a 200-byte file. These tests exercise `file_is_valid_pe`, the
+    //! file-level predicate `installed_binary()` actually calls.
+    use super::*;
+    use std::io::Write;
+
+    /// Minimal synthetic PE: 64-byte DOS header with e_lfanew = 0x40, "PE\0\0",
+    /// a COFF header declaring ONE section and no optional header, and one
+    /// section header whose raw data spans [0x200, 0x1200). A complete file is
+    /// therefore exactly 0x1200 = 4608 bytes.
+    fn synthetic_pe(total_len: usize) -> Vec<u8> {
+        let mut v = vec![0u8; 0x40];
+        v[0] = b'M';
+        v[1] = b'Z';
+        v[0x3C..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+        v.extend_from_slice(b"PE\0\0");
+        let mut coff = [0u8; 20];
+        coff[2..4].copy_from_slice(&1u16.to_le_bytes()); // NumberOfSections
+        coff[16..18].copy_from_slice(&0u16.to_le_bytes()); // SizeOfOptionalHeader
+        v.extend_from_slice(&coff);
+        let mut sect = [0u8; 40];
+        sect[..5].copy_from_slice(b".text");
+        sect[16..20].copy_from_slice(&0x1000u32.to_le_bytes()); // SizeOfRawData
+        sect[20..24].copy_from_slice(&0x200u32.to_le_bytes()); // PointerToRawData
+        v.extend_from_slice(&sect);
+        v.resize(0x1200, 0xCC);
+        v.truncate(total_len);
+        v
+    }
+
+    fn write_temp(name: &str, bytes: &[u8]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fem-pe-completeness-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let p = dir.join(name);
+        std::fs::File::create(&p)
+            .and_then(|mut f| f.write_all(bytes))
+            .expect("write temp pe");
+        p
+    }
+
+    #[test]
+    fn a_complete_pe_file_is_a_valid_staged_binary() {
+        let p = write_temp("space-acres.exe", &synthetic_pe(0x1200));
+        assert!(file_is_valid_pe(&p), "a complete PE must stay trusted");
+    }
+
+    #[test]
+    fn a_truncated_pe_file_is_not_a_valid_staged_binary() {
+        // WP3 trial (a): the first 200 bytes of a real farmer binary — MZ magic
+        // intact, everything after the headers gone.
+        let p = write_temp("space-acres.exe", &synthetic_pe(200));
+        assert!(
+            !file_is_valid_pe(&p),
+            "a PE whose section table declares bytes beyond EOF was TRUNCATED and must not be trusted"
+        );
+    }
+
+    #[test]
+    fn a_pe_truncated_inside_its_section_data_is_not_a_valid_staged_binary() {
+        // Headers fully present, raw data cut short (disk-full / power-loss mid-write).
+        let p = write_temp("space-acres.exe", &synthetic_pe(0x900));
+        assert!(!file_is_valid_pe(&p));
+    }
+
+    #[test]
+    fn a_pe_whose_header_offsets_point_past_eof_is_not_a_valid_staged_binary() {
+        let mut bytes = synthetic_pe(0x1200);
+        bytes[0x3C..0x40].copy_from_slice(&0x7FFF_0000u32.to_le_bytes()); // e_lfanew far beyond the file
+        let p = write_temp("space-acres.exe", &bytes);
+        assert!(!file_is_valid_pe(&p));
     }
 }
 
