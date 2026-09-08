@@ -37,6 +37,11 @@ const PAWNS_CONTAINER: &str = "fem-pawns";
 /// Version of the disclosure wording below; recorded with every consent entry.
 const CONSENT_WORDING_VERSION: &str = "1";
 
+/// How long a superseded consent entry stays in the active log before it moves
+/// to the archive. Two years, matching the retention the CLI Addendum record is
+/// expected to cover.
+const CONSENT_RETENTION_DAYS: i64 = 730;
+
 /// The terms the device owner accepts along with the disclosure. Recorded with
 /// every consent entry so the record says what was agreed to, not just when
 /// (CLI Addendum §5.8).
@@ -86,6 +91,119 @@ impl PawnsIntegration {
 
     fn consent_log() -> PathBuf {
         Self::partner_dir().join("consent-log.jsonl")
+    }
+
+    /// Entries rotated out of the active log. They are kept, not deleted: the
+    /// consent record is the durable proof the CLI Addendum (§5.8) asks for and
+    /// this machine is the only place it exists.
+    fn consent_archive() -> PathBuf {
+        Self::partner_dir().join("consent-log-archive.jsonl")
+    }
+
+    /// Rotate this device consent log, best effort.
+    pub(crate) fn rotate_consent_log() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if now == 0 {
+            return;
+        }
+        let summary =
+            Self::rotate_consent_log_at(&Self::consent_log(), &Self::consent_archive(), now);
+        if summary.archived > 0 {
+            info!(
+                before = summary.before,
+                retained = summary.retained,
+                archived = summary.archived,
+                "Rotated Pawns consent log"
+            );
+        }
+    }
+
+    /// Move consent entries older than `CONSENT_RETENTION_DAYS` out of the
+    /// active log and into the archive.
+    ///
+    /// Kept whatever their age: the newest entry for each device, because that
+    /// entry is the state `consent_is_active` reads and archiving it would
+    /// silently withdraw a consent; and any line that does not parse or carries
+    /// an unreadable timestamp, for the same reason the reader skips rather than
+    /// discards them. Trimmed lines are appended to the archive BEFORE the
+    /// active log is rewritten: a crash in between can duplicate a line in the
+    /// archive, which is recoverable, rather than lose one, which is not.
+    fn rotate_consent_log_at(log: &Path, archive: &Path, now_secs: i64) -> ConsentRotation {
+        let Ok(body) = std::fs::read_to_string(log) else {
+            return ConsentRotation::default();
+        };
+        let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+        let cutoff = now_secs - CONSENT_RETENTION_DAYS * 86_400;
+
+        // The last line each device wrote; that one always stays.
+        let mut newest: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for (i, line) in lines.iter().enumerate() {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if let Some(id) = value.get("device_id").and_then(|v| v.as_str()) {
+                newest.insert(id.to_string(), i);
+            }
+        }
+
+        let mut keep: Vec<&str> = Vec::with_capacity(lines.len());
+        let mut trim: Vec<&str> = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if Self::consent_entry_is_stale(line, i, &newest, cutoff) {
+                trim.push(line);
+            } else {
+                keep.push(line);
+            }
+        }
+        let unchanged = ConsentRotation {
+            before: lines.len(),
+            retained: lines.len(),
+            archived: 0,
+        };
+        if trim.is_empty() {
+            return unchanged;
+        }
+        // Nothing may leave the log until it is safely in the archive.
+        if !append_lines(archive, &trim) {
+            return unchanged;
+        }
+        if !replace_lines(log, &keep) {
+            return unchanged;
+        }
+        ConsentRotation {
+            before: lines.len(),
+            retained: keep.len(),
+            archived: trim.len(),
+        }
+    }
+
+    /// A line is stale only if it parses, names a device, carries a readable
+    /// timestamp older than the cutoff, and is not that device newest entry.
+    fn consent_entry_is_stale(
+        line: &str,
+        index: usize,
+        newest: &std::collections::HashMap<String, usize>,
+        cutoff: i64,
+    ) -> bool {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            return false;
+        };
+        let Some(id) = value.get("device_id").and_then(|v| v.as_str()) else {
+            return false;
+        };
+        if newest.get(id) == Some(&index) {
+            return false;
+        }
+        let Some(at) = value.get("happened_at").and_then(|v| v.as_str()) else {
+            return false;
+        };
+        match chrono::DateTime::parse_from_rfc3339(at) {
+            Ok(t) => t.timestamp() < cutoff,
+            Err(_) => false,
+        }
     }
 
     /// Whether sharing is allowed to start: the headless override, or a consent
@@ -292,6 +410,14 @@ fn consent_from_env_value(value: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+/// What one rotation pass did to the consent log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ConsentRotation {
+    pub before: usize,
+    pub retained: usize,
+    pub archived: usize,
+}
+
 /// The last consent entry `device_id` wrote to the log at `path`.
 ///
 /// The log is append-only and one device per line, so the newest entry for this
@@ -329,6 +455,69 @@ fn consent_is_active(path: &Path, device_id: &str) -> bool {
     last_consent_entry_in(path, device_id)
         .map(|e| e.action == "consent")
         .unwrap_or(false)
+}
+
+/// Append `lines` to `path`, creating it and its parent. Returns whether every
+/// byte reached the file: the caller must not drop anything it could not
+/// archive.
+fn append_lines(path: &Path, lines: &[&str]) -> bool {
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            warn!(error = %e, "Could not create the Pawns consent archive directory");
+            return false;
+        }
+    }
+    let body = lines.iter().map(|l| format!("{}\n", l)).collect::<String>();
+    match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        Ok(mut f) => {
+            use std::io::Write;
+            if let Err(e) = f.write_all(body.as_bytes()) {
+                warn!(error = %e, "Could not append to the Pawns consent archive");
+                return false;
+            }
+            if let Err(e) = f.sync_all() {
+                warn!(error = %e, "Could not flush the Pawns consent archive");
+                return false;
+            }
+            true
+        }
+        Err(e) => {
+            warn!(error = %e, "Could not open the Pawns consent archive");
+            false
+        }
+    }
+}
+
+/// Rewrite `path` with exactly `lines`, through a temp file and a rename so a
+/// reader never sees a half-written log.
+fn replace_lines(path: &Path, lines: &[&str]) -> bool {
+    let tmp = path.with_extension("jsonl.tmp");
+    let body = lines.iter().map(|l| format!("{}\n", l)).collect::<String>();
+    match std::fs::File::create(&tmp) {
+        Ok(mut f) => {
+            use std::io::Write;
+            if let Err(e) = f.write_all(body.as_bytes()) {
+                warn!(error = %e, "Could not write the rotated Pawns consent log");
+                let _ = std::fs::remove_file(&tmp);
+                return false;
+            }
+            if let Err(e) = f.sync_all() {
+                warn!(error = %e, "Could not flush the rotated Pawns consent log");
+                let _ = std::fs::remove_file(&tmp);
+                return false;
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "Could not create the rotated Pawns consent log");
+            return false;
+        }
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        warn!(error = %e, "Could not swap in the rotated Pawns consent log");
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    true
 }
 
 /// Keep a device id to characters the API accepts.
@@ -638,6 +827,11 @@ impl Integration for PawnsIntegration {
 #[cfg(test)]
 #[path = "pawns_consent_tests.rs"]
 mod pawns_consent_tests;
+
+/// Retention/rotation of the same log, kept separate for the same reason.
+#[cfg(test)]
+#[path = "pawns_retention_tests.rs"]
+mod pawns_retention_tests;
 
 #[cfg(test)]
 mod tests {

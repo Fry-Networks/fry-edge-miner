@@ -482,6 +482,13 @@ fn main() {
                 }
             });
 
+            // Pawns consent-log retention: superseded entries older than two
+            // years move to consent-log-archive.jsonl. Once per launch, before
+            // the UI can toggle anything; best effort, never blocks startup.
+            tauri::async_runtime::spawn(async {
+                crate::integrations::pawns::PawnsIntegration::rotate_consent_log();
+            });
+
             // 401 token-recovery cooldown, shared with the reporting loop.
             let last_token_recovery: Arc<RwLock<Option<std::time::Instant>>> =
                 Arc::new(RwLock::new(None));
