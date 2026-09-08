@@ -145,6 +145,7 @@ fn file_is_valid_pe(path: &std::path::Path) -> bool {
 /// install. Walk the PE headers that fit in the first 8 KiB and require every
 /// section's raw data to lie inside the file. Anything malformed or cut short
 /// is not trusted. Overlay bytes past the last section are not covered.
+#[cfg(target_os = "windows")]
 fn pe_head_fits_file(head: &[u8], file_len: u64) -> bool {
     let u16_at = |o: usize| head.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
     let u32_at = |o: usize| head.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
@@ -1028,7 +1029,7 @@ mod discovery_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "windows"))]
 mod pe_completeness_tests {
     //! WP3 (2026-09-07) live finding: the shipped Bug-4 gate is a 2-byte "MZ"
     //! check, so a staged farmer that was TRUNCATED mid-write (the exact
