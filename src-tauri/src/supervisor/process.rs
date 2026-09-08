@@ -63,11 +63,17 @@ mod loader_error_mode {
 /// loader's modal error boxes suppressed, and wait at most `bound` for it.
 /// A creation that completes after the caller gave up is killed and logged —
 /// never adopted as an untracked child.
+///
+/// The hand-off is a rendezvous (`sync_channel(0)`): `send` only succeeds
+/// while the caller is actually receiving. With a buffered channel a child
+/// created in the instant between the caller's timeout and the receiver
+/// being dropped would be delivered into a buffer nobody reads, and the
+/// process would keep running untracked (`Child` does not kill on drop).
 fn spawn_bounded<F>(integration_id: &str, bound: Duration, create: F) -> io::Result<Child>
 where
     F: FnOnce() -> io::Result<Child> + Send + 'static,
 {
-    let (tx, rx) = std::sync::mpsc::channel::<io::Result<Child>>();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<io::Result<Child>>(0);
     let id = integration_id.to_string();
     std::thread::Builder::new()
         .name(format!("spawn-{id}"))
@@ -206,10 +212,14 @@ mod wp6_spawn_tests {
     //! although `toggle_integration` wraps `start()` in a 60 s
     //! `tokio::time::timeout`. The spawn is synchronous, so the task the
     //! timeout would cancel is parked inside `CreateProcess` and can never be
-    //! preempted. These tests pin the behaviour of the one choke point every
-    //! integration goes through: `ManagedProcess::spawn`.
+    //! preempted. These tests pin the behaviour of the choke point the
+    //! supervisor-managed integrations (Fry dVPN, Iagon, Mysterium, Titan) go
+    //! through: `ManagedProcess::spawn`. SpaceAcres and Olostep call
+    //! `Command::spawn` directly from their own `start()` and are NOT covered
+    //! by this bound.
     use super::*;
 
+    #[cfg(windows)]
     fn temp_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
             "fem-wp6-{tag}-{}-{}",
@@ -357,7 +367,8 @@ mod wp6_spawn_tests {
             }
         };
         assert_ne!(handle, 0, "OpenProcess failed for the late child pid {pid}");
-        // Same 2 s bound as before, now waited on the process object itself.
+        // 2 s bound, waited on the process object itself (the kill lands at
+        // creation time, so this is observed within milliseconds).
         let wait = unsafe { late_child_handle::WaitForSingleObject(handle, 2_000) };
         let diagnostics = if wait == late_child_handle::WAIT_OBJECT_0 {
             String::new()
@@ -374,5 +385,61 @@ mod wp6_spawn_tests {
             late_child_handle::WAIT_OBJECT_0,
             "late child pid {pid} is still alive 2 s after the caller timed out (wait=0x{wait:x}):\n{diagnostics}"
         );
+    }
+
+    /// Race the deadline from both sides: creations landing just before and
+    /// just after `bound`. Every child the closure created must end up either
+    /// returned to the caller (who then owns and kills it) or killed by the
+    /// spawn thread — never left running. Guards the rendezvous hand-off in
+    /// `spawn_bounded`: with a buffered channel a creation that lands in the
+    /// instant between the caller's timeout and the receiver drop is
+    /// delivered to nobody and the process survives untracked.
+    #[cfg(windows)]
+    #[test]
+    fn every_child_created_around_the_deadline_is_either_returned_or_killed() {
+        let mut leaked = Vec::new();
+        let mut returned = 0usize;
+        let mut timed_out = 0usize;
+        for i in 0..12u64 {
+            let slot = std::sync::Arc::new(std::sync::Mutex::new(None::<(u32, isize)>));
+            let slot_w = slot.clone();
+            let delay = Duration::from_millis(30 + (i % 5) * 5); // 30..50 ms around a 40 ms bound
+            let r = spawn_bounded("wp6-race", Duration::from_millis(40), move || {
+                std::thread::sleep(delay);
+                let child = super::super::platform::command("cmd.exe")
+                    .args(["/c", "ping -n 60 127.0.0.1 >nul"])
+                    .spawn()?;
+                let handle = unsafe { late_child_handle::OpenProcess(late_child_handle::SYNCHRONIZE, 0, child.id()) };
+                *slot_w.lock().unwrap() = Some((child.id(), handle));
+                Ok(child)
+            });
+            match r {
+                Ok(mut child) => {
+                    returned += 1;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => timed_out += 1,
+                Err(e) => panic!("unexpected spawn error: {e}"),
+            }
+            let (pid, handle) = {
+                let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                loop {
+                    if let Some(v) = *slot.lock().unwrap() {
+                        break v;
+                    }
+                    assert!(std::time::Instant::now() < deadline, "attempt {i}: the child was never created");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            };
+            assert_ne!(handle, 0, "attempt {i}: OpenProcess failed for pid {pid}");
+            let wait = unsafe { late_child_handle::WaitForSingleObject(handle, 2_000) };
+            unsafe { late_child_handle::CloseHandle(handle) };
+            if wait != late_child_handle::WAIT_OBJECT_0 {
+                leaked.push(pid);
+            }
+        }
+        eprintln!("deadline race: {returned} returned to the caller, {timed_out} timed out, {} leaked", leaked.len());
+        assert!(leaked.is_empty(), "children left running after spawn_bounded: {leaked:?}");
     }
 }
