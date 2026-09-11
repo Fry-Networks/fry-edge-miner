@@ -49,8 +49,11 @@ pub(crate) fn reconcile_commands(rule_name: &str, program: &str) -> Vec<Vec<Stri
 }
 
 /// Program currently bound to `rule_name`, if the rule exists (unelevated —
-/// `show rule` needs no admin).
-fn current_rule_program(rule_name: &str) -> Option<String> {
+/// `show rule` needs no admin). `pub(crate)` so callers outside this module
+/// (v0.4.29 canary fix: `security_setup::run_hardening_elevated`) can verify
+/// a rule genuinely landed rather than trusting an elevated script's exit
+/// code alone.
+pub(crate) fn current_rule_program(rule_name: &str) -> Option<String> {
     let out = crate::supervisor::platform::command("netsh")
         .args([
             "advfirewall", "firewall", "show", "rule",
