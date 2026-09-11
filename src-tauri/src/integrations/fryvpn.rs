@@ -9,9 +9,17 @@ use tracing::{info, warn};
 
 const FRYNODE_VERSION: &str = "0.1.0";
 
+/// BUG 6: dedicated Windows Firewall rule name for frynode.exe, same pattern
+/// as `firewall::OLOSTEP_RULE_NAME`.
+pub const FRYNODE_RULE_NAME: &str = "FEM-FryNode";
+
 pub struct FryVpnIntegration {
     pub config: Arc<ConfigStore>,
     pub supervisor: Arc<Mutex<crate::supervisor::Supervisor>>,
+    /// BUG 6: base log directory (same one the Supervisor writes
+    /// `<log_dir>/fryvpn/fryvpn_stderr.log` under) — needed so a crashed
+    /// process can report why instead of a bare "Stopped".
+    pub log_dir: PathBuf,
 }
 
 impl FryVpnIntegration {
@@ -80,6 +88,22 @@ impl FryVpnIntegration {
             std::env::var("FRYNODE_BIN").ok(),
             resource,
         ))
+    }
+}
+
+/// BUG 6: reason shown when frynode's process is not running, instead of a
+/// bare `HealthStatus::Stopped` (which the frontend's lifecycle derivation
+/// renders as "Starting" for an ENABLED integration — this is only ever
+/// called when the integration is enabled, so a not-running process here
+/// means it crashed or never started, not that it was intentionally
+/// stopped). Pure so it is testable without touching the filesystem; the
+/// caller passes an already-bounded stderr tail (or an empty string when
+/// there was nothing to read).
+fn process_not_running_reason(stderr_tail: &str) -> String {
+    if stderr_tail.trim().is_empty() {
+        "frynode process is not running".to_string()
+    } else {
+        format!("frynode process is not running: {stderr_tail}")
     }
 }
 
@@ -154,6 +178,19 @@ impl Integration for FryVpnIntegration {
     async fn start(&self) -> Result<()> {
         let binary = Self::binary_path()?;
 
+        // BUG 6: pre-create firewall rules for this exact binary path so
+        // Windows never shows the firewall prompt at all (georgeparis 8/28
+        // worked around this by hand with `New-NetFirewallRule`). Non-fatal:
+        // a declined UAC just means Windows prompts as before. Only when the
+        // resolved path is absolute — a bare PATH-lookup name has nothing
+        // concrete to bind the rule to.
+        let binary_path = std::path::Path::new(&binary);
+        if binary_path.is_absolute() {
+            if let Err(e) = super::firewall::ensure_program_rules(FRYNODE_RULE_NAME, binary_path) {
+                warn!(error = %e, "Fry dVPN firewall rule setup failed — continuing");
+            }
+        }
+
         // Build CLI flags for frynode
         let args = vec![
             "-registry-app-id".to_string(),
@@ -205,7 +242,15 @@ impl Integration for FryVpnIntegration {
         };
 
         if !process_alive {
-            return HealthStatus::Stopped;
+            // BUG 6: say why instead of a bare Stopped (see
+            // `process_not_running_reason`).
+            let stderr_path = self.log_dir.join("fryvpn").join("fryvpn_stderr.log");
+            let stderr_content = tokio::fs::read_to_string(&stderr_path)
+                .await
+                .unwrap_or_default();
+            let tail = super::stderr_tail(&stderr_content, 3);
+            let tail = if tail == "no error output" { String::new() } else { tail };
+            return HealthStatus::Unhealthy(process_not_running_reason(&tail));
         }
 
         // F5: the frynode HTTP endpoint and its on-chain registration both settle
@@ -261,6 +306,7 @@ mod tests {
             supervisor: Arc::new(Mutex::new(crate::supervisor::Supervisor::new(
                 std::path::PathBuf::from("/tmp"),
             ))),
+            log_dir: std::path::PathBuf::from("/tmp"),
         };
         assert_eq!(integration.id(), "fryvpn");
     }
@@ -272,6 +318,7 @@ mod tests {
             supervisor: Arc::new(Mutex::new(crate::supervisor::Supervisor::new(
                 std::path::PathBuf::from("/tmp"),
             ))),
+            log_dir: std::path::PathBuf::from("/tmp"),
         };
         assert_eq!(integration.display_name(), "Fry dVPN");
     }
@@ -360,5 +407,30 @@ mod tests {
         // Keeps a PATH-installed frynode working.
         let resolved = FryVpnIntegration::resolve_binary(None, None);
         assert_eq!(resolved, FryVpnIntegration::binary_name());
+    }
+
+    /// BUG 6: "Fry dVPN card 'STARTING' forever, dashboard 'Unhealthy', no
+    /// reason" — a not-running process must always carry a reason.
+    #[test]
+    fn a_dead_process_with_no_log_output_still_gets_a_concrete_reason() {
+        let reason = process_not_running_reason("");
+        assert_eq!(reason, "frynode process is not running");
+    }
+
+    #[test]
+    fn a_dead_process_with_log_output_includes_it_in_the_reason() {
+        let reason = process_not_running_reason("failed to load config: REGION is required");
+        assert!(reason.contains("frynode process is not running"), "{reason}");
+        assert!(reason.contains("REGION is required"), "{reason}");
+    }
+
+    #[test]
+    fn the_firewall_rule_name_is_dedicated_to_frynode() {
+        assert_eq!(FRYNODE_RULE_NAME, "FEM-FryNode");
+        assert_ne!(
+            FRYNODE_RULE_NAME,
+            super::super::firewall::OLOSTEP_RULE_NAME,
+            "must not collide with Olostep's rule"
+        );
     }
 }

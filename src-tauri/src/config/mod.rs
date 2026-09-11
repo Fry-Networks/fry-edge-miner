@@ -4,6 +4,8 @@ pub mod wallet;
 
 #[cfg(test)]
 mod preservation_tests;
+#[cfg(test)]
+mod version_upgrade_tests;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -36,6 +38,20 @@ pub struct FemConfig {
     pub notifications: bool,
     #[serde(default)]
     pub myst_lan_override: bool,
+    /// BUG 11/12: the app version this device last reported to the server
+    /// via `attempt_version_change_heartbeat`. `#[serde(default)]` so a
+    /// config saved by an older build (which never had this field) loads as
+    /// `None`, which itself forces one immediate report on the next launch
+    /// rather than silently staying stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reported_version: Option<String>,
+    /// BUG 1/2 (part d): the app version for which the one-time elevated
+    /// Defender-exclusion + frynode-firewall hardening setup last completed
+    /// successfully. `None`/a stale version means it should run again — once
+    /// per version, not once per launch, so a declined UAC prompt does not
+    /// re-nag on every single startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardening_applied_version: Option<String>,
     /// B3: every key in fem_config.json this build does not recognise.
     ///
     /// `ConfigStore` saves by serializing this whole struct over the file, so
@@ -86,6 +102,8 @@ impl Default for FemConfig {
             auto_update: true,
             notifications: true,
             myst_lan_override: false,
+            last_reported_version: None,
+            hardening_applied_version: None,
             extra: serde_json::Map::new(),
         }
     }

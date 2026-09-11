@@ -190,14 +190,52 @@ pub async fn install_update(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "No update available for Fry Edge Miner".to_string())?;
 
-        // B7: same release as the auto-updater — a manual install from the
-        // Updates page otherwise hits the frynode.exe locked-file NSIS error.
-        crate::updater_auto::release_install_tree(&state.supervisor).await;
+        // BUG 1/2 (was B7's plain `release_install_tree`): same full
+        // pre-install sequence as the background auto-updater — MSI check,
+        // partner release + restart-suspend, pre-update binary backup,
+        // persisted from/to state — so a manual install from the Updates
+        // page gets the same safety net as the automatic path.
+        use tauri::Manager;
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| e.to_string())?;
+        let exe_path =
+            std::env::current_exe().map_err(|e| format!("Could not resolve own exe path: {e}"))?;
+        let frynode_path = exe_path
+            .parent()
+            .map(|d| d.join("resources").join("frynode.exe"));
+        let current = env!("CARGO_PKG_VERSION");
+        let guard = match crate::updater_auto::prepare_for_update_install(
+            &state.supervisor,
+            &state.config,
+            &app_data_dir,
+            &exe_path,
+            frynode_path.as_deref(),
+            current,
+            &update.version,
+        )
+        .await
+        {
+            crate::updater_auto::PrepareOutcome::MsiBlocked(entry) => {
+                return Err(format!(
+                    "An MSI install of Fry Edge Miner is registered ({}). Uninstall it from Apps & Features, then update.",
+                    entry.display_name
+                ));
+            }
+            crate::updater_auto::PrepareOutcome::Ready(guard) => guard,
+        };
 
+        // C1 review fix: `guard` stays in scope across this call. On
+        // failure, `?` returns early and `guard` drops here, resetting
+        // UPDATE_IN_PROGRESS — a failed manual install must not permanently
+        // disable every integration's restart capability. On success, it is
+        // explicitly kept alive below (the app is about to restart).
         update
             .download_and_install(|_chunk, _total| {}, || {})
             .await
             .map_err(|e| e.to_string())?;
+        guard.keep_suspended_forever();
 
         tracing::info!(version = %update.version, "FEM update downloaded and installed");
         Ok("restart required".to_string())

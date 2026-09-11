@@ -1,9 +1,14 @@
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
+use serde::{Deserialize, Serialize};
 use tauri_plugin_updater::UpdaterExt;
 use tracing::{info, warn};
 
 use crate::config::store::ConfigStore;
+use crate::security_setup;
 use crate::supervisor::platform::BoundedOutput;
 use crate::supervisor::{ProcessInfo, Supervisor};
 
@@ -12,10 +17,220 @@ use crate::supervisor::{ProcessInfo, Supervisor};
 /// after every tracked process has been stopped.
 const ORPHAN_IMAGES: [&str; 1] = ["frynode.exe"];
 
+/// BUG 4c: purely supervisor-managed binaries to sweep for leftover
+/// UNTRACKED copies at every app LAUNCH (not just before an update install).
+/// FEM is the only thing that ever starts these, so a copy still running
+/// that this fresh process didn't spawn can only be a leftover from a
+/// crashed or killed previous session — left alone, it races the new copy
+/// startup recovery is about to start. SpaceAcres (`space-acres.exe`) and
+/// Olostep (`OlostepBrowser.exe`) are deliberately EXCLUDED here: both are
+/// spawned untracked by design and a leftover copy should be ADOPTED, not
+/// killed (see BUG 3 / BUG 10) — killing an active farmer mid-plot, or a
+/// browser window the user has open, on every FEM launch would be actively
+/// harmful, not a fix.
+pub const STARTUP_ORPHAN_IMAGES: [&str; 2] = ["sdk_client.exe", "titan-edge.exe"];
+
+/// Sweep `STARTUP_ORPHAN_IMAGES` at boot. Same "exit non-zero == nothing
+/// matched, and that's success" contract as `kill_orphan_partners`.
+pub(crate) fn kill_startup_orphans() {
+    for image in STARTUP_ORPHAN_IMAGES {
+        match crate::supervisor::platform::command("taskkill")
+            .args(["/IM", image, "/T", "/F"])
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+        {
+            Ok(o) if o.status.success() => {
+                info!(image, "Killed leftover untracked partner process at startup")
+            }
+            Ok(_) => info!(image, "No leftover untracked partner process was running at startup"),
+            Err(e) => warn!(image, error = %e, "Startup orphan cleanup could not run — continuing"),
+        }
+    }
+}
+
 /// Settle time after the last partner process exits, before the updater
 /// replaces the install tree. Process exit and Windows releasing the file
 /// handle are not the same instant.
 const PARTNER_STOP_SETTLE: Duration = Duration::from_secs(2);
+
+/// BUG 1/2 ordering hazard: `release_install_tree` stops partner processes
+/// but historically never told the health loop to stay off — so the 30s
+/// health tick could see a partner it just stopped as `Unhealthy`/`Stopped`
+/// and restart it mid-download, re-locking a file the update is about to
+/// overwrite (or racing `download_and_install`'s own file replacement).
+/// `RecoveryAction::Unhealthy` restarts unconditionally regardless of the
+/// per-integration `enabled` flag, so this needs its own global gate rather
+/// than reusing `enabled_fn`. Set true for the remainder of THIS process's
+/// life once an update install begins — on Windows `download_and_install`
+/// never returns (ShellExecuteW handoff + `std::process::exit(0)`), so there
+/// is no in-process "update failed, resume restarts" path to wire back up;
+/// a fresh launch after either outcome starts with the flag naturally false
+/// again.
+pub static UPDATE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Whether the health loop's restart_fn closures must no-op right now.
+pub fn restarts_suspended() -> bool {
+    UPDATE_IN_PROGRESS.load(Ordering::SeqCst)
+}
+
+/// C1 review fix: RAII guard for `UPDATE_IN_PROGRESS`. `arm()` sets the flag
+/// true; `Drop` resets it to false UNLESS `keep_suspended_forever()` was
+/// called first. This is what makes the suspension correct on EVERY
+/// non-success exit path — an explicit `Err` return, an early `?`
+/// propagation, a panic during unwind — without requiring every call site
+/// to remember an explicit reset. That was exactly C1's defect: the
+/// original code set the flag with a bare `.store(true, ...)` and never
+/// reset it anywhere, so a failed `download_and_install` (network blip,
+/// disk full, antivirus interference — the exact failure class BUG 1/2
+/// exists to defend against) permanently disabled every integration's
+/// restart capability for the rest of that running session.
+pub(crate) struct UpdateInProgressGuard {
+    reset_on_drop: bool,
+}
+
+impl UpdateInProgressGuard {
+    fn arm() -> Self {
+        UPDATE_IN_PROGRESS.store(true, Ordering::SeqCst);
+        Self { reset_on_drop: true }
+    }
+
+    /// Call ONLY after `download_and_install` has genuinely succeeded — the
+    /// app is about to restart into the new version, so the suspension must
+    /// outlive this guard rather than resetting the instant this function
+    /// returns, which would re-open a restart race during the jitter delay
+    /// before the actual process restart fires.
+    pub(crate) fn keep_suspended_forever(mut self) {
+        self.reset_on_drop = false;
+    }
+}
+
+impl Drop for UpdateInProgressGuard {
+    fn drop(&mut self) {
+        if self.reset_on_drop {
+            UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
+/// State persisted across the update's app-restart boundary so the NEW
+/// process launch can confirm the update actually took effect.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UpdateState {
+    pub from: String,
+    pub to: String,
+    pub ts: u64,
+}
+
+fn update_state_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("update-state.json")
+}
+
+fn prev_binaries_dir(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join(".prev")
+}
+
+/// Outcome of comparing a persisted `UpdateState` to the version actually
+/// running after restart. Pure — no filesystem access.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateOutcome {
+    /// The new process reports the version the update targeted.
+    Succeeded,
+    /// The new process is running some OTHER version than what the update
+    /// targeted — an MSI abort, Defender quarantine, or a silently-declined
+    /// install can all land here.
+    Mismatched { expected: String, actual: String },
+}
+
+/// Pure decision: did the update that produced `state` actually take effect,
+/// given the version this launch is running as `current_version`?
+pub fn evaluate_update_outcome(state: &UpdateState, current_version: &str) -> UpdateOutcome {
+    if state.to == current_version {
+        UpdateOutcome::Succeeded
+    } else {
+        UpdateOutcome::Mismatched {
+            expected: state.to.clone(),
+            actual: current_version.to_string(),
+        }
+    }
+}
+
+fn write_update_state(path: &Path, state: &UpdateState) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(state)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(json.as_bytes())
+}
+
+fn read_update_state(path: &Path) -> Option<UpdateState> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+/// Copy the binaries an update is about to overwrite into a `.prev` holding
+/// directory, so a failed update (MSI abort, Defender quarantine, crash
+/// mid-copy) leaves a known-good fallback the operator can restore by hand.
+/// Best-effort per file — a missing `frynode.exe` (never installed on this
+/// device) must not fail the whole backup.
+pub fn backup_pre_update_binaries(
+    files: &[(&Path, &str)],
+    prev_dir: &Path,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(prev_dir)?;
+    for (src, dest_name) in files {
+        if !src.exists() {
+            continue;
+        }
+        std::fs::copy(src, prev_dir.join(dest_name))?;
+    }
+    Ok(())
+}
+
+/// Called once, early in `setup()`, before this launch does anything else
+/// that assumes a clean state. Reads `update-state.json` if a previous
+/// launch of this app was in the middle of an update:
+/// - Version matches `to` → the update succeeded. Clean up `.prev` and the
+///   state file so this check is a no-op on every subsequent normal launch.
+/// - Version does not match → surface it. `.prev` and the state file are
+///   left in place for manual recovery / diagnosis; nothing here auto-rolls
+///   back, since an unattended rollback of a partially-applied Windows
+///   install carries its own risk.
+pub fn check_update_outcome_on_launch(
+    app_data_dir: &Path,
+    current_version: &str,
+) -> Option<UpdateOutcome> {
+    let state_path = update_state_path(app_data_dir);
+    let state = read_update_state(&state_path)?;
+    let outcome = evaluate_update_outcome(&state, current_version);
+    match &outcome {
+        UpdateOutcome::Succeeded => {
+            info!(
+                from = %state.from,
+                to = %state.to,
+                "Update completed successfully — clearing update state"
+            );
+            let _ = std::fs::remove_file(&state_path);
+            let _ = std::fs::remove_dir_all(prev_binaries_dir(app_data_dir));
+        }
+        UpdateOutcome::Mismatched { expected, actual } => {
+            warn!(
+                expected = %expected,
+                actual = %actual,
+                "Update did not take effect — this launch is running a different version than the update targeted"
+            );
+            crate::events::emit(
+                "update-failed",
+                serde_json::json!({
+                    "expected": expected,
+                    "actual": actual,
+                    "reason": "The app restarted after an update, but is running a different version than expected. The previous version's files are preserved for recovery.",
+                }),
+            );
+        }
+    }
+    Some(outcome)
+}
 
 /// Which supervisor-managed processes must be stopped before the Tauri updater
 /// replaces the application files.
@@ -90,6 +305,10 @@ pub(crate) fn kill_orphan_partners() {
 /// ManagedProcess::stop blocks up to 10s per process, so both halves run
 /// under block_in_place rather than directly on an async worker.
 pub(crate) async fn release_install_tree(supervisor: &Arc<Mutex<Supervisor>>) -> Vec<String> {
+    // C1 review fix: flag lifecycle is now owned by `UpdateInProgressGuard`,
+    // constructed by `prepare_for_update_install` (this fn's only caller)
+    // BEFORE calling this — see that function and the guard's own docs.
+    // This function itself no longer sets/clears the flag directly.
     let stopped = tokio::task::block_in_place(|| stop_partner_processes(supervisor));
     tokio::task::block_in_place(kill_orphan_partners);
     if !stopped.is_empty() {
@@ -100,6 +319,183 @@ pub(crate) async fn release_install_tree(supervisor: &Arc<Mutex<Supervisor>>) ->
         tokio::time::sleep(PARTNER_STOP_SETTLE).await;
     }
     stopped
+}
+
+/// An HKLM `Uninstall` registry entry for a Windows Installer (MSI) package
+/// matching Fry Edge Miner. Its presence means a THIRD install mechanism
+/// (msiexec) owns some or all of this install, and NSIS silently overwriting
+/// those files can leave the MSI's own uninstall entry pointing at a tree it
+/// no longer fully owns — or, worse, the next `msiexec /x` a support runbook
+/// runs can delete files the NSIS-updated app now depends on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MsiUninstallEntry {
+    pub display_name: String,
+    pub publisher: String,
+    pub uninstall_string: String,
+}
+
+/// Parse the JSON `ConvertTo-Json` emits for the Uninstall registry query.
+/// PowerShell emits a bare object for exactly one match, an array for
+/// zero-or-many, and nothing/empty for zero. Pure — no registry/process I/O.
+pub fn parse_msi_uninstall_json(json: &str) -> Option<MsiUninstallEntry> {
+    let trimmed = json.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let obj = match &value {
+        serde_json::Value::Array(items) => items.first()?,
+        serde_json::Value::Object(_) => &value,
+        _ => return None,
+    };
+    let display_name = obj.get("DisplayName")?.as_str()?.to_string();
+    let publisher = obj
+        .get("Publisher")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let uninstall_string = obj
+        .get("UninstallString")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    // Only an msiexec-driven entry is the concern here — an NSIS uninstall
+    // entry for this same app is normal and must not trip this check.
+    if !uninstall_string.to_lowercase().contains("msiexec") {
+        return None;
+    }
+    Some(MsiUninstallEntry {
+        display_name,
+        publisher,
+        uninstall_string,
+    })
+}
+
+/// Query HKLM `Uninstall` for an msiexec-owned Fry Edge Miner entry.
+/// Best-effort: any PowerShell/registry failure is treated as "none found"
+/// rather than blocking the update — a query error is far more likely than a
+/// genuine MSI install existing alongside the NSIS one.
+pub(crate) fn find_msi_uninstall_entry() -> Option<MsiUninstallEntry> {
+    let script = "Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'Fry Edge Miner*' } | Select-Object DisplayName,Publisher,UninstallString | ConvertTo-Json -Compress";
+    let out = crate::supervisor::platform::command("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_msi_uninstall_json(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Result of the pre-install preparation step. The caller uses this to decide
+/// whether to proceed to `download_and_install` at all.
+pub enum PrepareOutcome {
+    /// Safe to proceed — partners stopped, binaries backed up, state written.
+    /// Carries the `UPDATE_IN_PROGRESS` guard: the caller MUST hold this
+    /// across its own `download_and_install` call and call
+    /// `keep_suspended_forever()` only in the `Ok` arm — letting it drop in
+    /// any other arm (including via `?`/early return) correctly resets the
+    /// suspension (C1 review fix).
+    Ready(UpdateInProgressGuard),
+    /// An msiexec-owned install of this app is registered; auto-updating
+    /// over it silently is unsafe (see `MsiUninstallEntry` docs). The caller
+    /// must skip `download_and_install` entirely. The flag was never set
+    /// true for this outcome (the MSI check runs before `release_install_tree`),
+    /// so there is nothing to reset here.
+    MsiBlocked(MsiUninstallEntry),
+}
+
+/// Single choke point both the background auto-updater and the manual
+/// Updates-page path call before `download_and_install`. Order matters:
+/// MSI check (cheap, and must abort BEFORE anything else if it trips) →
+/// release the install tree (stops partners, suspends restarts) → back up
+/// the binaries about to be overwritten → persist the from/to state so the
+/// next launch can confirm the update actually landed.
+pub(crate) async fn prepare_for_update_install(
+    supervisor: &Arc<Mutex<Supervisor>>,
+    config: &Arc<ConfigStore>,
+    app_data_dir: &Path,
+    exe_path: &Path,
+    frynode_path: Option<&Path>,
+    from_version: &str,
+    to_version: &str,
+) -> PrepareOutcome {
+    if let Some(entry) = tokio::task::block_in_place(find_msi_uninstall_entry) {
+        warn!(
+            display_name = %entry.display_name,
+            publisher = %entry.publisher,
+            "MSI-owned install detected — refusing to auto-update over it"
+        );
+        crate::events::emit(
+            "update-blocked-msi",
+            serde_json::json!({
+                "displayName": entry.display_name,
+                "publisher": entry.publisher,
+                "message": "An MSI install of Fry Edge Miner is registered on this machine. \
+                    Uninstall it from Apps & Features, then update again.",
+            }),
+        );
+        return PrepareOutcome::MsiBlocked(entry);
+    }
+
+    // C1 review fix: arm the guard BEFORE touching any partner process —
+    // everything from here to the caller's `download_and_install` call is
+    // covered, and any early return (including the backup/state-write
+    // warn-and-continue paths below, which never early-return, but also any
+    // FUTURE early return added here) resets the flag automatically via
+    // Drop unless the caller later calls `keep_suspended_forever()`.
+    let guard = UpdateInProgressGuard::arm();
+
+    release_install_tree(supervisor).await;
+
+    let prev_dir = prev_binaries_dir(app_data_dir);
+    let mut files: Vec<(&Path, &str)> = vec![(exe_path, "fry-edge-miner.exe")];
+    if let Some(frynode) = frynode_path {
+        files.push((frynode, "frynode.exe"));
+    }
+    if let Err(e) = backup_pre_update_binaries(&files, &prev_dir) {
+        warn!(error = %e, "Could not back up pre-update binaries — continuing anyway");
+    }
+
+    let state = UpdateState {
+        from: from_version.to_string(),
+        to: to_version.to_string(),
+        ts: SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    };
+    if let Err(e) = write_update_state(&update_state_path(app_data_dir), &state) {
+        warn!(error = %e, "Could not persist update-state.json — continuing anyway");
+    }
+
+    // BUG 1/2 (part d): re-assert the Defender exclusion + firewall
+    // hardening for the version we're ABOUT to install, before Defender can
+    // scan the freshly-downloaded binary. Best-effort — a decline/failure
+    // here must never block the update itself.
+    let recorded = config.get().hardening_applied_version;
+    if security_setup::should_run_hardening(recorded.as_deref(), to_version) {
+        if let Some(install_dir) = exe_path.parent() {
+            let exe_names = ["fry-edge-miner.exe", "frynode.exe"];
+            let frynode = frynode_path
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| install_dir.join("resources").join("frynode.exe"));
+            match tokio::task::block_in_place(|| {
+                security_setup::run_hardening_elevated(install_dir, &exe_names, &frynode)
+            }) {
+                Ok(()) => {
+                    if let Err(e) = config.update(|c| {
+                        c.hardening_applied_version = Some(to_version.to_string());
+                    }) {
+                        warn!(error = %e, "Could not persist hardening_applied_version before update");
+                    }
+                }
+                Err(e) => warn!(error = %e, "Pre-update hardening declined or failed — continuing update anyway"),
+            }
+        }
+    }
+
+    PrepareOutcome::Ready(guard)
 }
 
 /// Background auto-updater task. Spawned once at app startup.
@@ -182,18 +578,46 @@ async fn check_and_install_update(
         "Update available — downloading and installing"
     );
 
-    // B7: release the install tree before the updater rewrites it. The
-    // partners are restarted by the startup recovery pass after the restart
-    // below, so nothing here needs to put them back.
-    release_install_tree(supervisor).await;
+    // BUG 1/2: MSI-ownership check → release install tree (suspends
+    // restarts) → back up the binaries about to be overwritten → persist
+    // from/to state for the next launch to confirm. Replaces the bare
+    // `release_install_tree` call (B7) with the full pre-install sequence.
+    use tauri::Manager;
+    let app_data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir());
+    let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fry-edge-miner.exe"));
+    let frynode_path = exe_path
+        .parent()
+        .map(|d| d.join("resources").join("frynode.exe"));
+    let guard = match prepare_for_update_install(
+        supervisor,
+        config,
+        &app_data_dir,
+        &exe_path,
+        frynode_path.as_deref(),
+        current,
+        &update.version,
+    )
+    .await
+    {
+        PrepareOutcome::MsiBlocked(_) => {
+            return Ok(Some(
+                "Update skipped — an MSI install is registered; uninstall it first".to_string(),
+            ));
+        }
+        PrepareOutcome::Ready(guard) => guard,
+    };
 
-    // Download and install
+    // Download and install. `guard` stays in scope across this call — a
+    // failure below drops it at the `return`/end-of-match, resetting
+    // UPDATE_IN_PROGRESS automatically (C1 review fix); only the Ok arm
+    // explicitly keeps the suspension alive past this function returning.
     match update
         .download_and_install(|_chunk, _total| {}, || {})
         .await
     {
         Ok(()) => {
             info!(version = %update.version, "Update installed successfully");
+            guard.keep_suspended_forever();
 
             // Compute jitter (0–10 min) based on install_id or SystemTime nanos
             // This ensures fleets don't all restart simultaneously
@@ -212,6 +636,9 @@ async fn check_and_install_update(
             Ok(Some("Update installed; restart scheduled".to_string()))
         }
         Err(e) => {
+            // C1 review fix: `guard` drops here (end of this arm/function),
+            // resetting UPDATE_IN_PROGRESS — a failed download must not
+            // permanently disable every integration's restart capability.
             Err(format!("Download/install failed: {}", e).into())
         }
     }
@@ -362,11 +789,283 @@ mod partner_stop_tests {
         assert!(ORPHAN_IMAGES.contains(&"frynode.exe"));
     }
 
+    /// BUG 4c: the startup sweep covers Myst and Titan's purely
+    /// supervisor-managed binaries...
+    #[test]
+    fn the_startup_sweep_covers_purely_supervisor_managed_binaries() {
+        assert!(STARTUP_ORPHAN_IMAGES.contains(&"sdk_client.exe"));
+        assert!(STARTUP_ORPHAN_IMAGES.contains(&"titan-edge.exe"));
+    }
+
+    /// ...and deliberately never includes the two binaries FEM spawns
+    /// untracked by design, where a leftover copy must be adopted rather
+    /// than killed out from under an active farmer or an open browser
+    /// window (BUG 3 / BUG 10).
+    #[test]
+    fn the_startup_sweep_never_kills_untracked_by_design_processes() {
+        assert!(!STARTUP_ORPHAN_IMAGES.contains(&"space-acres.exe"));
+        assert!(!STARTUP_ORPHAN_IMAGES.contains(&"OlostepBrowser.exe"));
+    }
+
     #[test]
     fn the_settle_wait_is_bounded_and_short() {
         // Long enough for Windows to release the handle, short enough that it
         // cannot stall the 6-hour check loop in any meaningful way.
         assert!(PARTNER_STOP_SETTLE >= Duration::from_secs(1));
         assert!(PARTNER_STOP_SETTLE <= Duration::from_secs(10));
+    }
+}
+
+/// C1 review fix: `UpdateInProgressGuard` regression tests. These DO touch
+/// the real process-global `UPDATE_IN_PROGRESS` — safe now specifically
+/// because the guard GUARANTEES a reset via `Drop` unless explicitly told
+/// not to, so every test here restores the flag to `false` before it ends.
+/// Grep confirms no other test in this codebase reads/writes this static, so
+/// the only ordering risk is these tests racing EACH OTHER under default
+/// (parallel) `cargo test` — guarded by `GUARD_TEST_LOCK` for that reason.
+#[cfg(test)]
+mod update_in_progress_guard_tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    static GUARD_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+
+    /// The exact regression C1 reported: a failed `download_and_install`
+    /// (network blip, disk full, antivirus interference) must not
+    /// permanently disable the health loop's restart capability for the
+    /// rest of the running session.
+    #[test]
+    fn a_dropped_guard_without_keep_suspended_forever_resets_the_flag() {
+        let _lock = GUARD_TEST_LOCK.lock().unwrap();
+        assert!(!restarts_suspended(), "flag must start false");
+
+        {
+            let guard = UpdateInProgressGuard::arm();
+            assert!(restarts_suspended(), "arm() must suspend restarts");
+            // Simulates the Err arm of `download_and_install` — the guard
+            // simply falls out of scope without `keep_suspended_forever()`.
+            drop(guard);
+        }
+
+        assert!(
+            !restarts_suspended(),
+            "a dropped guard (failed download) must reset the suspension — this is the exact C1 regression"
+        );
+    }
+
+    #[test]
+    fn a_successful_update_keeps_the_suspension_alive_past_the_guards_scope() {
+        let _lock = GUARD_TEST_LOCK.lock().unwrap();
+        assert!(!restarts_suspended(), "flag must start false");
+
+        let guard = UpdateInProgressGuard::arm();
+        guard.keep_suspended_forever();
+
+        assert!(
+            restarts_suspended(),
+            "a successful update must keep restarts suspended past the guard's own scope \
+             (the app is about to restart; resetting here would re-open the mid-restart race)"
+        );
+
+        // Restore steady state for any other test sharing this process.
+        UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn an_early_return_via_question_mark_still_drops_and_resets() {
+        // Mirrors the exact shape both call sites use: bind the guard from
+        // a match, then `?`/early-return out of a fallible operation before
+        // ever calling `keep_suspended_forever()`.
+        fn simulate_failed_install() -> Result<(), String> {
+            let _guard = UpdateInProgressGuard::arm();
+            Err::<(), String>("Download/install failed".to_string())?;
+            unreachable!()
+        }
+
+        let _lock = GUARD_TEST_LOCK.lock().unwrap();
+        assert!(!restarts_suspended());
+        let result = simulate_failed_install();
+        assert!(result.is_err());
+        assert!(
+            !restarts_suspended(),
+            "an early return via ? must still drop the guard and reset the flag"
+        );
+    }
+}
+
+/// BUG 1/2: updater safety-net tests. None of these touch `UPDATE_IN_PROGRESS`
+/// (a process-global `AtomicBool`) — `release_install_tree`/
+/// `prepare_for_update_install` are deliberately NOT exercised here, since
+/// flipping that flag would leak into every other test sharing this test
+/// binary's process.
+#[cfg(test)]
+mod update_safety_tests {
+    use super::*;
+
+    fn tmp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fem-updater-test-{}-{}-{}",
+            name,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // --- evaluate_update_outcome -------------------------------------------
+
+    #[test]
+    fn a_matching_version_after_restart_is_success() {
+        let state = UpdateState { from: "0.4.27".into(), to: "0.4.28".into(), ts: 0 };
+        assert_eq!(evaluate_update_outcome(&state, "0.4.28"), UpdateOutcome::Succeeded);
+    }
+
+    #[test]
+    fn a_different_version_after_restart_is_a_mismatch_with_both_versions_named() {
+        let state = UpdateState { from: "0.4.27".into(), to: "0.4.28".into(), ts: 0 };
+        let outcome = evaluate_update_outcome(&state, "0.4.27");
+        assert_eq!(
+            outcome,
+            UpdateOutcome::Mismatched { expected: "0.4.28".into(), actual: "0.4.27".into() }
+        );
+    }
+
+    // --- update-state.json round trip (real filesystem, tempdir) -----------
+
+    #[test]
+    fn update_state_round_trips_through_disk() {
+        let dir = tmp_dir("state-roundtrip");
+        let path = update_state_path(&dir);
+        let state = UpdateState { from: "0.4.27".into(), to: "0.4.28".into(), ts: 12345 };
+        write_update_state(&path, &state).expect("write must succeed");
+        let read_back = read_update_state(&path).expect("state file must be readable");
+        assert_eq!(read_back, state);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_state_file_reads_as_none_not_an_error() {
+        let dir = tmp_dir("state-missing");
+        let path = update_state_path(&dir);
+        assert!(read_update_state(&path).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- backup_pre_update_binaries ------------------------------------------
+
+    #[test]
+    fn present_binaries_are_copied_into_the_prev_dir() {
+        let dir = tmp_dir("backup-present");
+        let exe_src = dir.join("fry-edge-miner.exe");
+        std::fs::write(&exe_src, b"fake exe bytes").unwrap();
+        let prev = dir.join(".prev");
+
+        backup_pre_update_binaries(&[(&exe_src, "fry-edge-miner.exe")], &prev)
+            .expect("backup must succeed");
+
+        let copied = prev.join("fry-edge-miner.exe");
+        assert!(copied.exists());
+        assert_eq!(std::fs::read(&copied).unwrap(), b"fake exe bytes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_optional_binary_like_frynode_never_seen_on_this_device_is_skipped_not_an_error() {
+        let dir = tmp_dir("backup-missing-optional");
+        let missing = dir.join("frynode.exe"); // never created
+        let prev = dir.join(".prev");
+
+        let result = backup_pre_update_binaries(&[(&missing, "frynode.exe")], &prev);
+        assert!(result.is_ok(), "a never-installed optional binary must not fail the backup");
+        assert!(!prev.join("frynode.exe").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- check_update_outcome_on_launch (fs-only; does not touch the atomic) -
+
+    #[test]
+    fn a_successful_outcome_cleans_up_state_and_prev_dir() {
+        let dir = tmp_dir("launch-success");
+        let state = UpdateState { from: "0.4.27".into(), to: "0.4.28".into(), ts: 0 };
+        write_update_state(&update_state_path(&dir), &state).unwrap();
+        std::fs::create_dir_all(prev_binaries_dir(&dir)).unwrap();
+        std::fs::write(prev_binaries_dir(&dir).join("fry-edge-miner.exe"), b"old").unwrap();
+
+        let outcome = check_update_outcome_on_launch(&dir, "0.4.28");
+        assert_eq!(outcome, Some(UpdateOutcome::Succeeded));
+        assert!(!update_state_path(&dir).exists(), "state file must be cleared on success");
+        assert!(!prev_binaries_dir(&dir).exists(), ".prev must be cleared on success");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_mismatched_outcome_leaves_prev_dir_and_state_for_manual_recovery() {
+        let dir = tmp_dir("launch-mismatch");
+        let state = UpdateState { from: "0.4.27".into(), to: "0.4.28".into(), ts: 0 };
+        write_update_state(&update_state_path(&dir), &state).unwrap();
+        std::fs::create_dir_all(prev_binaries_dir(&dir)).unwrap();
+        std::fs::write(prev_binaries_dir(&dir).join("fry-edge-miner.exe"), b"old").unwrap();
+
+        // Running 0.4.27 after an update that targeted 0.4.28 — e.g. an MSI
+        // abort or Defender quarantine silently kept the old binary in place.
+        let outcome = check_update_outcome_on_launch(&dir, "0.4.27");
+        assert_eq!(
+            outcome,
+            Some(UpdateOutcome::Mismatched { expected: "0.4.28".into(), actual: "0.4.27".into() })
+        );
+        assert!(update_state_path(&dir).exists(), "state file must survive for diagnosis");
+        assert!(
+            prev_binaries_dir(&dir).join("fry-edge-miner.exe").exists(),
+            ".prev must survive so the operator can restore the last-known-good binary"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_state_file_present_is_a_normal_launch_not_an_error() {
+        let dir = tmp_dir("launch-normal");
+        assert_eq!(check_update_outcome_on_launch(&dir, "0.4.28"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- MSI uninstall entry parsing (pure) ---------------------------------
+
+    #[test]
+    fn a_single_msiexec_owned_entry_parses_as_blocked() {
+        let json = r#"{"DisplayName":"Fry Edge Miner","Publisher":"frynetworks","UninstallString":"MsiExec.exe /X{GUID}"}"#;
+        let entry = parse_msi_uninstall_json(json).expect("must parse a single object");
+        assert_eq!(entry.display_name, "Fry Edge Miner");
+        assert_eq!(entry.publisher, "frynetworks");
+    }
+
+    #[test]
+    fn an_nsis_owned_entry_for_the_same_app_is_not_msi_blocked() {
+        // The NSIS installer ALSO registers an Uninstall entry for "Fry Edge
+        // Miner" — its UninstallString runs the NSIS uninstaller, not
+        // msiexec. That must never trip the MSI-block path.
+        let json = r#"{"DisplayName":"Fry Edge Miner","Publisher":"frynetworks","UninstallString":"C:\\Users\\x\\AppData\\Local\\Fry Edge Miner\\uninstall.exe"}"#;
+        assert!(parse_msi_uninstall_json(json).is_none());
+    }
+
+    #[test]
+    fn an_array_of_matches_uses_the_first_msiexec_owned_entry() {
+        let json = r#"[{"DisplayName":"Fry Edge Miner","Publisher":"frynetworks","UninstallString":"MsiExec.exe /X{GUID}"},{"DisplayName":"Fry Edge Miner Helper","Publisher":"frynetworks","UninstallString":"MsiExec.exe /X{GUID2}"}]"#;
+        let entry = parse_msi_uninstall_json(json).expect("must parse an array");
+        assert_eq!(entry.display_name, "Fry Edge Miner");
+    }
+
+    #[test]
+    fn empty_output_means_no_entry_found() {
+        assert!(parse_msi_uninstall_json("").is_none());
+        assert!(parse_msi_uninstall_json("   ").is_none());
+    }
+
+    #[test]
+    fn malformed_json_is_treated_as_no_entry_rather_than_a_panic() {
+        assert!(parse_msi_uninstall_json("not json").is_none());
     }
 }

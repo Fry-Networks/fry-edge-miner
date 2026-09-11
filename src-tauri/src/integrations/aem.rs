@@ -1,15 +1,29 @@
 use crate::supervisor::platform::BoundedOutput;
 use super::download::{download_file, partners_base_dir};
-use super::{HealthStatus, Integration, PocGateData};
+use super::{tracked_child_probe, HealthStatus, Integration, PocGateData};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use tracing::{info, warn};
 
 const OLOSTEP_DOWNLOAD_URL: &str =
     "https://olostepbrowser.s3.us-east-1.amazonaws.com/setup.exe";
 
-pub struct AemIntegration;
+/// BUG 10 (Discord: ~380 ghost tray icons). OlostepBrowser was spawned via a
+/// bare `Command::spawn()` with the returned `Child` immediately discarded —
+/// FEM had no way to tell its own spawned instance apart from one Windows
+/// itself autostarted at login (the staged config sets
+/// `auto-start-enabled: true`) or one left over from a previous session.
+/// Every liveness check, start-guard, and stop went through an untargeted
+/// `tasklist`/`taskkill /IM` image-name scan that ALSO failed OPEN on a
+/// probe timeout (`.unwrap_or(false)`) — exactly the combination that lets
+/// a slow/failed probe read as "not running" and spawn a duplicate on top
+/// of a browser that never fully released its tray icon.
+#[derive(Default)]
+pub struct AemIntegration {
+    child: Mutex<Option<std::process::Child>>,
+}
 
 impl AemIntegration {
     /// Find OlostepBrowser.exe under %LOCALAPPDATA%\Olostep-Browser\app-*\
@@ -45,7 +59,15 @@ impl AemIntegration {
             .filter(|p| p.exists())
     }
 
-    fn is_running() -> bool {
+    /// Image-name tasklist probe — fallback for an adopted/untracked
+    /// instance (Windows autostarted it, or a previous FEM session spawned
+    /// it and this process restarted). BUG 10: previously failed OPEN
+    /// (`.unwrap_or(false)`) — a tasklist timeout or error read as "not
+    /// running" and could spawn a duplicate on top of a browser that was
+    /// actually alive, which is exactly how ~380 ghost tray icons
+    /// accumulated. Fails CLOSED now: assume running when the probe itself
+    /// could not complete.
+    fn image_name_probe() -> bool {
         #[cfg(target_os = "windows")]
         {
             crate::supervisor::platform::command("tasklist")
@@ -55,12 +77,24 @@ impl AemIntegration {
                         .to_lowercase()
                         .contains("olostepbrowser")
                 })
-                .unwrap_or(false)
+                .unwrap_or(true)
         }
         #[cfg(not(target_os = "windows"))]
         {
             false
         }
+    }
+
+    /// Whether OlostepBrowser is running. Prefers the tracked child (fast,
+    /// exact, no shell-out) and falls back to the image-name probe for an
+    /// adopted instance FEM did not spawn itself.
+    fn is_running(&self) -> bool {
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(running) = tracked_child_probe(&mut guard) {
+                return running;
+            }
+        }
+        Self::image_name_probe()
     }
 
     fn olostep_config_path() -> Option<PathBuf> {
@@ -308,7 +342,7 @@ impl Integration for AemIntegration {
     }
 
     async fn start(&self) -> Result<()> {
-        if Self::is_running() {
+        if self.is_running() {
             info!("OlostepBrowser already running");
             return Ok(());
         }
@@ -331,29 +365,60 @@ impl Integration for AemIntegration {
             warn!(error = %e, "Olostep firewall rule setup failed — continuing");
         }
         info!(binary = ?binary, "Starting OlostepBrowser");
-        crate::supervisor::platform::command(&binary).spawn()?;
+        let child = crate::supervisor::platform::command(&binary).spawn()?;
+        // BUG 10: track the child so is_running()/stop() can target it
+        // directly instead of only an untargeted image-name scan.
+        if let Ok(mut guard) = self.child.lock() {
+            *guard = Some(child);
+        }
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
+        // BUG 10 (Discord: ~380 ghost tray icons — a graceless `/F` kill
+        // left the tray-icon shell notification undelivered, so Explorer
+        // kept a stale icon around per kill). Graceful first: `/T` (whole
+        // process tree — Chromium's renderer/GPU/utility children) WITHOUT
+        // `/F`, giving the app a chance to run its own shutdown/tray-cleanup
+        // path; wait up to 10s polling `is_running()`; escalate to `/T /F`
+        // only if it is still alive after that window.
         #[cfg(target_os = "windows")]
         {
-            // OlostepBrowser is Chromium-based and spawns a tree of renderer /
-            // GPU / utility children. Killing only the parent (no /T) left those
-            // children alive, holding the profile lock and the browser's own
-            // ports — field reports of "Olostep refuses to shut down, requires a
-            // full reboot". /T kills the whole tree.
+            let _ = crate::supervisor::platform::command("taskkill")
+                .args(["/IM", "OlostepBrowser.exe", "/T"])
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
+
+            let mut still_running = self.is_running();
+            for _ in 0..10 {
+                if !still_running {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                still_running = self.is_running();
+            }
+
+            if !still_running {
+                info!("Stopped OlostepBrowser (graceful)");
+                return Ok(());
+            }
+
+            // Escalate: OlostepBrowser is Chromium-based and spawns a tree
+            // of renderer/GPU/utility children. Killing only the parent
+            // (no /T) left those alive, holding the profile lock and the
+            // browser's own ports — field reports of "Olostep refuses to
+            // shut down, requires a full reboot". /T kills the whole tree.
+            warn!("OlostepBrowser did not exit gracefully within 10s — force-killing");
             let killed = crate::supervisor::platform::command("taskkill")
                 .args(["/IM", "OlostepBrowser.exe", "/T", "/F"])
                 .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
             match killed {
                 // taskkill exits non-zero with "process not found" when nothing
                 // was running, which is a successful stop, not a failure.
-                Ok(o) if o.status.success() => info!("Stopped OlostepBrowser"),
+                Ok(o) if o.status.success() => info!("Stopped OlostepBrowser (forced)"),
                 Ok(o) => {
                     let err = String::from_utf8_lossy(&o.stderr);
-                    if Self::is_running() {
+                    if self.is_running() {
                         anyhow::bail!(
                             "OlostepBrowser is still running after taskkill: {}",
                             err.trim()
@@ -362,7 +427,7 @@ impl Integration for AemIntegration {
                     info!("OlostepBrowser was not running");
                 }
                 Err(e) => {
-                    if Self::is_running() {
+                    if self.is_running() {
                         anyhow::bail!("Failed to stop OlostepBrowser: {e}");
                     }
                     warn!(error = %e, "taskkill failed but OlostepBrowser is not running");
@@ -373,21 +438,31 @@ impl Integration for AemIntegration {
         {
             info!("Stopped OlostepBrowser");
         }
+        // Whatever path stopped it, the tracked child (if any) is gone now.
+        if let Ok(mut guard) = self.child.lock() {
+            *guard = None;
+        }
         Ok(())
     }
 
     async fn health_check(&self) -> HealthStatus {
-        if Self::is_running() {
-            // Resource caps (v0.4.8): field reports of OlostepBrowser
-            // consuming all RAM / ~100% CPU. A breach reports Unhealthy so
-            // the supervisor restart path (stop → taskkill → start) bounces
-            // the process; the reason lands on the card.
+        if self.is_running() {
+            // BUG 10: resource caps (v0.4.8) used to report Unhealthy on a
+            // breach, which the supervisor's restart path (stop → taskkill
+            // → start) turned into a bounce — combined with the untracked
+            // spawn/graceless-kill defects above, THIS was the mechanism
+            // that produced ~380 ghost tray icons: a legitimate resource
+            // spike triggered a kill the app didn't cleanly absorb, then a
+            // respawn, repeatedly, at 30s health-tick cadence. Log only now
+            // — never restart on a resource breach alone. The tracked child
+            // + graceful stop above make an ACTUAL restart (e.g. a real
+            // crash) safe when one is genuinely needed elsewhere; this path
+            // specifically must not fire one.
             // block_in_place: the probe shells out to PowerShell (~<1s, but
             // it must not pin a tokio worker if PowerShell ever hangs).
             let breach = tokio::task::block_in_place(Self::resource_breach);
             if let Some(reason) = breach {
-                warn!(reason = %reason, "OlostepBrowser resource cap breached — restarting");
-                return HealthStatus::Unhealthy(reason);
+                warn!(reason = %reason, "OlostepBrowser resource cap breached — logging only, not restarting");
             }
             HealthStatus::Healthy
         } else if Self::olostep_binary().is_some() {
@@ -414,7 +489,7 @@ impl Integration for AemIntegration {
     }
 
     fn collect_poc_data(&self) -> PocGateData {
-        let running = Self::is_running();
+        let running = self.is_running();
         // Self-heal: only reached for ENABLED integrations (poc/gates.rs filters
         // on is_enabled). If Olostep self-updated and wiped its config, restore
         // the previously granted opt-in before reading it, so poa doesn't zero
@@ -475,5 +550,121 @@ mod tests {
         assert!(AemIntegration::config_needs_restage(Some(
             r#"{"mellowtel_opt_in_status":"yes"}"#
         )));
+    }
+}
+
+/// BUG 10 (Discord: ~380 ghost tray icons) — tracked-child start guard,
+/// fail-closed probe, graceful-then-forced stop.
+#[cfg(test)]
+mod bug10_tracked_child_tests {
+    use super::*;
+
+    fn spawn_long_lived() -> std::process::Child {
+        #[cfg(target_os = "windows")]
+        {
+            crate::supervisor::platform::command("cmd")
+                .args(["/C", "timeout /T 30 /NOBREAK >NUL"])
+                .spawn()
+                .expect("spawn cmd")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::process::Command::new("sleep").arg("30").spawn().expect("spawn sleep")
+        }
+    }
+
+    fn spawn_short_lived() -> std::process::Child {
+        #[cfg(target_os = "windows")]
+        {
+            crate::supervisor::platform::command("cmd")
+                .args(["/C", "exit 0"])
+                .spawn()
+                .expect("spawn cmd")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::process::Command::new("true").spawn().expect("spawn true")
+        }
+    }
+
+    /// This is the guard `start()` relies on to never double-spawn: if the
+    /// tracked child is still alive, `is_running()` must report `true`
+    /// through the INSTANCE method (not just the shared free function) —
+    /// proves AemIntegration's own wiring, not just `tracked_child_probe`
+    /// in isolation.
+    #[test]
+    fn a_tracked_running_child_makes_is_running_true_so_start_would_not_double_spawn() {
+        let integration = AemIntegration::default();
+        let child = spawn_long_lived();
+        *integration.child.lock().unwrap() = Some(child);
+
+        assert!(integration.is_running(), "a live tracked child must report running");
+
+        // Clean up so the test doesn't leak a 30s sleep process.
+        let taken = integration.child.lock().unwrap().take();
+        if let Some(mut c) = taken {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+
+    #[test]
+    fn an_exited_tracked_child_clears_and_falls_back_to_the_image_name_probe() {
+        let integration = AemIntegration::default();
+        let mut child = spawn_short_lived();
+        let _ = child.wait();
+        *integration.child.lock().unwrap() = Some(child);
+
+        // No real OlostepBrowser instance exists in this test environment,
+        // so the image-name fallback should report not-running here —
+        // proves the exited child does not get stuck reporting "running"
+        // forever.
+        let running = integration.is_running();
+        assert!(!running, "an exited tracked child with no real instance running must report false");
+        assert!(
+            integration.child.lock().unwrap().is_none(),
+            "the exited child must be cleared from the tracked slot"
+        );
+    }
+
+    /// Regression tripwire (same source-scan technique as
+    /// commands/updates.rs::manual_install_tests): a probe timeout or error
+    /// must read as "assume running", never "assume not running" — the
+    /// exact combination that let a slow/failed tasklist probe spawn a
+    /// duplicate OlostepBrowser on top of one that was actually alive.
+    #[test]
+    fn the_image_name_probe_fails_closed_not_open() {
+        let src = include_str!("aem.rs");
+        let after_probe_fn = src
+            .split("fn image_name_probe()")
+            .nth(1)
+            .expect("image_name_probe must exist");
+        let probe_body = after_probe_fn.split("fn is_running").next().unwrap_or(after_probe_fn);
+        assert!(
+            probe_body.contains("unwrap_or(true)"),
+            "image_name_probe must fail CLOSED (unwrap_or(true)) on a probe error/timeout"
+        );
+        assert!(
+            !probe_body.contains("unwrap_or(false)"),
+            "image_name_probe must not fail OPEN (unwrap_or(false)) — the exact defect BUG 10 fixed"
+        );
+    }
+
+    /// Regression tripwire: a resource breach must never return `Unhealthy`
+    /// (which the supervisor's health loop turns into a restart) — that
+    /// restart-on-breach cycle, combined with the untracked spawn/graceless
+    /// kill this same bug fixed, is what produced ~380 ghost tray icons.
+    #[test]
+    fn health_check_never_returns_unhealthy_for_a_resource_breach() {
+        let src = include_str!("aem.rs");
+        let health_check_fn = src
+            .split("async fn health_check(&self)")
+            .nth(1)
+            .expect("health_check must exist");
+        let fn_body = health_check_fn.split("async fn check_update").next().unwrap_or(health_check_fn);
+        assert!(
+            !fn_body.contains("return HealthStatus::Unhealthy(reason)"),
+            "a resource breach must be logged only, never trigger a restart via Unhealthy"
+        );
     }
 }

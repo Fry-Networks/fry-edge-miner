@@ -1,9 +1,10 @@
 use crate::supervisor::platform::BoundedOutput;
 use super::download::{download_file_with_options, partners_base_dir};
-use super::{HealthStatus, Integration, PocGateData};
+use super::{tracked_child_probe, HealthStatus, Integration, PocGateData};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -38,7 +39,62 @@ pub struct ReleaseAsset {
     pub download_url: String,
 }
 
-pub struct SpaceAcresIntegration;
+/// BUG 3: SpaceAcres was spawned via `.spawn()` with the returned `Child`
+/// immediately dropped (`let _ = ...spawn()...`), so FEM had no way to tell
+/// ITS OWN spawned process apart from an adopted/pre-existing one — every
+/// liveness check, `stop()`, and restart went through an untargeted
+/// `tasklist`/`taskkill /IM` image-name scan. Tracking the `Child` gives a
+/// fast, reliable, no-shell-out liveness check for the common case (FEM
+/// started it) while the image-name probe remains the fallback for adoption
+/// (an instance FEM did not start, e.g. one Windows autostarted at login).
+#[derive(Default)]
+pub struct SpaceAcresIntegration {
+    child: Mutex<Option<std::process::Child>>,
+}
+
+/// Whether the version string read off a staged partners-dir copy signals it
+/// is stale relative to the version the OS-managed (Program Files/LocalAppData)
+/// install reports. Pure — simple inequality, not a semver comparison (the
+/// upstream tag format is not guaranteed semver-clean), matching the BUG 3
+/// requirement to quarantine a staged copy "whose version differs from the
+/// Program Files farmer". `None` on either side means "can't tell" and never
+/// triggers quarantine — an unmeasurable version must not evict a working
+/// staged farmer (same fail-open principle as `evaluate_requirements`).
+fn staged_is_stale(staged_version: Option<&str>, discovered_version: Option<&str>) -> bool {
+    match (staged_version, discovered_version) {
+        (Some(s), Some(d)) => s != d,
+        _ => false,
+    }
+}
+
+/// BUG 7: parse a loose version string ("v0.2.21", "0.2.21.0") into numeric
+/// components for ordered comparison. A non-numeric/malformed component
+/// reads as 0 rather than failing the whole parse — best-effort, matching
+/// this codebase's fail-open-on-uncertain-data style elsewhere.
+fn parse_version_components(v: &str) -> Vec<u32> {
+    v.trim_start_matches(|c: char| !c.is_ascii_digit())
+        .split('.')
+        .map(|p| p.parse::<u32>().unwrap_or(0))
+        .collect()
+}
+
+/// Whether `latest` (a GitHub release tag, e.g. "v0.2.21") is genuinely
+/// newer than `installed` (a PE ProductVersion resource, e.g. "0.2.21.0") —
+/// compares numeric components pairwise, zero-padded to the longer length,
+/// so a trailing ".0" the version resource adds never causes a false
+/// "update available". `None` installed (unmeasurable) fails OPEN toward
+/// offering the update — an offer is reversible; silently withholding one
+/// is not, and matches `check_update`'s prior always-available behavior for
+/// that specific case.
+fn update_available(installed: Option<&str>, latest: &str) -> bool {
+    let Some(installed) = installed else { return true };
+    let mut a = parse_version_components(installed);
+    let mut b = parse_version_components(latest);
+    let n = a.len().max(b.len());
+    a.resize(n, 0);
+    b.resize(n, 0);
+    b > a
+}
 
 const GITHUB_API_URL: &str = "https://api.github.com/repos/autonomys/space-acres/releases/latest";
 const USER_AGENT: &str = concat!("FryEdgeMiner/", env!("CARGO_PKG_VERSION"));
@@ -232,8 +288,6 @@ impl SpaceAcresIntegration {
         // discovered Program Files install. Route it through the same
         // "don't trust the staged copy" branch `pick_binary` already has.
         let staged_is_corrupt = staged_exists && !staged_is_installer && !file_is_valid_pe(&staged);
-        let staged_untrusted = staged_is_installer || staged_is_corrupt;
-        let staged = staged_exists.then_some(staged);
         let mut roots: Vec<PathBuf> = Vec::new();
         for var in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
             if let Ok(base) = std::env::var(var) {
@@ -241,7 +295,51 @@ impl SpaceAcresIntegration {
             }
         }
         let discovered = binary_candidates(&roots).into_iter().find(|c| c.exists());
+        // BUG 3: a staged copy that is neither the installer nor corrupt can
+        // still be STALE relative to the OS-managed install — the version
+        // the Program Files/LocalAppData farmer actually reports. Best-effort
+        // (an unmeasurable version never evicts a working staged farmer —
+        // `staged_is_stale`'s fail-open contract).
+        let staged_is_stale_copy = staged_exists
+            && !staged_is_installer
+            && !staged_is_corrupt
+            && discovered
+                .as_ref()
+                .map(|d| staged_is_stale(Self::file_product_version(&staged).as_deref(), Self::file_product_version(d).as_deref()))
+                .unwrap_or(false);
+        let staged_untrusted = staged_is_installer || staged_is_corrupt || staged_is_stale_copy;
+        let staged = staged_exists.then_some(staged);
         pick_binary(staged, staged_untrusted, discovered)
+    }
+
+    /// Read a file's PE VersionInfo.ProductVersion via PowerShell.
+    /// Best-effort: ANY failure (file missing, PowerShell error, no version
+    /// resource embedded) reads as `None` — matches `staged_is_stale`'s
+    /// fail-open contract (an unmeasurable version must never evict a
+    /// working staged farmer).
+    #[cfg(target_os = "windows")]
+    fn file_product_version(path: &std::path::Path) -> Option<String> {
+        let ps_quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
+        let out = crate::supervisor::platform::command("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "(Get-Item {}).VersionInfo.ProductVersion",
+                    ps_quote(&path.to_string_lossy())
+                ),
+            ])
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if v.is_empty() {
+            None
+        } else {
+            Some(v)
+        }
     }
 
     /// Move a mis-staged Burn bootstrapper out of the farmer's filename so it
@@ -257,6 +355,40 @@ impl SpaceAcresIntegration {
         match std::fs::rename(&staged, &dest) {
             Ok(()) => info!(from = ?staged, to = ?dest, "Quarantined mis-staged SpaceAcres installer"),
             Err(e) => warn!(error = %e, path = ?staged, "Could not quarantine mis-staged SpaceAcres installer"),
+        }
+    }
+
+    /// BUG 3: move a staged copy whose version differs from the discovered
+    /// OS-managed farmer out of the way, mirroring
+    /// `quarantine_staged_installer`'s rename-not-delete pattern exactly. A
+    /// no-op when there is nothing to compare against, the staged copy is
+    /// already handled by the installer/corrupt quarantine, or the versions
+    /// happen to match.
+    #[cfg(target_os = "windows")]
+    fn quarantine_stale_staged_copy() {
+        let staged = Self::binary_path();
+        if !staged.exists() || file_is_burn_bundle(&staged) || !file_is_valid_pe(&staged) {
+            return;
+        }
+        let mut roots: Vec<PathBuf> = Vec::new();
+        for var in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
+            if let Ok(base) = std::env::var(var) {
+                roots.extend(roots_for_base(std::path::Path::new(&base)));
+            }
+        }
+        let Some(discovered) = binary_candidates(&roots).into_iter().find(|c| c.exists()) else {
+            return;
+        };
+        if !staged_is_stale(
+            Self::file_product_version(&staged).as_deref(),
+            Self::file_product_version(&discovered).as_deref(),
+        ) {
+            return;
+        }
+        let dest = Self::partner_dir().join("space-acres-stale.exe");
+        match std::fs::rename(&staged, &dest) {
+            Ok(()) => info!(from = ?staged, to = ?dest, discovered = ?discovered, "Quarantined stale staged SpaceAcres copy"),
+            Err(e) => warn!(error = %e, path = ?staged, "Could not quarantine stale staged SpaceAcres copy"),
         }
     }
 
@@ -396,7 +528,16 @@ impl SpaceAcresIntegration {
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Failed to fetch latest release after all retries")))
     }
 
-    fn is_running() -> bool {
+    /// Image-name tasklist probe — fallback for an adopted/untracked
+    /// instance (one FEM did not spawn itself, e.g. Windows autostarted it
+    /// at login). BUG 3: previously failed OPEN (`.unwrap_or(false)`) — a
+    /// tasklist timeout or error read as "not running" and could trigger a
+    /// duplicate spawn on top of a farmer that was actually alive. Fails
+    /// CLOSED now: assume running when the probe itself could not complete,
+    /// the same fail-safe-toward-availability principle already used
+    /// elsewhere in this codebase (mysterium/fryvpn dead-process reasons,
+    /// `evaluate_requirements`'s fail-open unmeasurable handling).
+    fn image_name_probe() -> bool {
         #[cfg(target_os = "windows")]
         {
             crate::supervisor::platform::command("tasklist")
@@ -406,12 +547,24 @@ impl SpaceAcresIntegration {
                         .to_lowercase()
                         .contains("space-acres.exe")
                 })
-                .unwrap_or(false)
+                .unwrap_or(true)
         }
         #[cfg(not(target_os = "windows"))]
         {
             false
         }
+    }
+
+    /// Whether SpaceAcres is running. Prefers the tracked child (fast,
+    /// exact, no shell-out) and falls back to the image-name probe for an
+    /// instance FEM did not spawn itself.
+    fn is_running(&self) -> bool {
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(running) = tracked_child_probe(&mut guard) {
+                return running;
+            }
+        }
+        Self::image_name_probe()
     }
 
     /// Check if system meets SpaceAcres eligibility requirements:
@@ -473,6 +626,7 @@ impl Integration for SpaceAcresIntegration {
         #[cfg(target_os = "windows")]
         {
             Self::quarantine_staged_installer();
+            Self::quarantine_stale_staged_copy();
             let binary_found = match Self::installed_binary() {
                 Some(existing) => {
                     info!(path = ?existing, "SpaceAcres already installed");
@@ -480,7 +634,7 @@ impl Integration for SpaceAcresIntegration {
                 }
                 None => false,
             };
-            if !install_needed(Self::is_running(), binary_found) {
+            if !install_needed(self.is_running(), binary_found) {
                 if !binary_found {
                     info!("SpaceAcres process already running — treating as installed");
                 }
@@ -596,7 +750,7 @@ impl Integration for SpaceAcresIntegration {
             anyhow::bail!("SpaceAcres binary not found at {:?}", binary);
         }
 
-        if Self::is_running() {
+        if self.is_running() {
             info!("SpaceAcres already running");
             return Ok(());
         }
@@ -607,13 +761,25 @@ impl Integration for SpaceAcresIntegration {
         let base_dir = Self::partner_dir().join("data");
         std::fs::create_dir_all(&base_dir)?;
 
-        let _ = crate::supervisor::platform::command(&binary)
-            .arg("--base-directory")
-            .arg(&base_dir)
+        // BUG 3: run with the farmer's own bin directory as CWD, not FEM's.
+        // A WiX Burn-managed app can rely on its CWD to locate sibling
+        // resources it expects next to itself — a wrong CWD is one of the
+        // documented triggers for that kind of app's own self-verification
+        // kicking off its Repair/Modify UI.
+        let mut cmd = crate::supervisor::platform::command(&binary);
+        cmd.arg("--base-directory").arg(&base_dir);
+        if let Some(bin_dir) = binary.parent() {
+            cmd.current_dir(bin_dir);
+        }
+        let child = cmd
             .spawn()
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to start SpaceAcres: {}", e)
-            })?;
+            .map_err(|e| anyhow::anyhow!("Failed to start SpaceAcres: {}", e))?;
+
+        // BUG 3: track the child so is_running()/stop() can target it
+        // directly instead of only an untargeted image-name scan.
+        if let Ok(mut guard) = self.child.lock() {
+            *guard = Some(child);
+        }
 
         // Give it a moment to start
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -622,7 +788,19 @@ impl Integration for SpaceAcresIntegration {
     }
 
     async fn stop(&self) -> Result<()> {
-        // Kill any running space-acres process
+        // BUG 3: prefer killing the exact tracked child when FEM spawned it
+        // — targeted, no risk of taking down an unrelated process someone
+        // else launched under the same image name. Falls back to the
+        // image-name sweep for an adopted/untracked instance.
+        let tracked = self.child.lock().ok().and_then(|mut g| g.take());
+        if let Some(mut child) = tracked {
+            let _ = child.kill();
+            let _ = tokio::task::spawn_blocking(move || child.wait()).await;
+            info!("Stopped SpaceAcres (tracked child)");
+            return Ok(());
+        }
+
+        // Kill any running space-acres process (adoption fallback)
         #[cfg(target_os = "windows")]
         {
             let _ = crate::supervisor::platform::command("taskkill")
@@ -636,7 +814,7 @@ impl Integration for SpaceAcresIntegration {
                 .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
         }
 
-        info!("Stopped SpaceAcres");
+        info!("Stopped SpaceAcres (image-name sweep — no tracked child)");
         Ok(())
     }
 
@@ -656,7 +834,7 @@ impl Integration for SpaceAcresIntegration {
                 "No SSD detected — SpaceAcres performance degraded".to_string(),
             );
         }
-        if Self::is_running() {
+        if self.is_running() {
             HealthStatus::Healthy
         } else {
             HealthStatus::Stopped
@@ -666,8 +844,20 @@ impl Integration for SpaceAcresIntegration {
     async fn check_update(&self) -> Result<Option<String>> {
         match Self::fetch_latest_release().await {
             Ok(release) => {
-                info!(version = %release.version, "Found SpaceAcres update available");
-                Ok(Some(release.version))
+                // BUG 7: `installed_version()` used to return the literal
+                // string "installed" (never a real version), so this always
+                // looked like an update was available — "Installed → v0.2.21"
+                // on every check, even on the latest release, and clicking
+                // Update did nothing observable because there was nothing to
+                // change. Compare against the REAL installed version now.
+                let installed = self.installed_version();
+                if update_available(installed.as_deref(), &release.version) {
+                    info!(version = %release.version, installed = ?installed, "Found SpaceAcres update available");
+                    Ok(Some(release.version))
+                } else {
+                    info!(installed = ?installed, latest = %release.version, "SpaceAcres already on the latest version");
+                    Ok(None)
+                }
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to check SpaceAcres updates");
@@ -697,19 +887,28 @@ impl Integration for SpaceAcresIntegration {
         // main.rs treats an installed farmer as "not installed" and re-runs the
         // installer on every launch.
         #[cfg(target_os = "windows")]
-        let present = Self::installed_binary().is_some();
+        {
+            let binary = Self::installed_binary()?;
+            // BUG 7: read the REAL version off the binary actually in use,
+            // instead of the literal placeholder string "installed" — that
+            // placeholder compared unequal to every real release tag, so
+            // `check_update()` (pre-fix) always reported an update
+            // available even when already current.
+            Self::file_product_version(&binary).or_else(|| Some("installed".into()))
+        }
         #[cfg(not(target_os = "windows"))]
-        let present = Self::binary_path().exists();
-        if present {
-            Some("installed".into())
-        } else {
-            None
+        {
+            if Self::binary_path().exists() {
+                Some("installed".into())
+            } else {
+                None
+            }
         }
     }
 
     fn collect_poc_data(&self) -> PocGateData {
         PocGateData {
-            poa: Self::is_running(),
+            poa: self.is_running(),
             ..Default::default()
         }
     }
@@ -1154,5 +1353,134 @@ mod requirement_tests {
         assert!(evaluate_requirements(None, None).is_ok());
         assert!(evaluate_requirements(None, Some(10.0)).is_err(), "a measured shortfall still fails");
         assert!(evaluate_requirements(Some(true), None).is_ok());
+    }
+}
+
+/// BUG 3: SpaceAcres repair-loop tests — tracked-child liveness, fail-closed
+/// image-name probe, and staged-vs-discovered version quarantine.
+#[cfg(test)]
+mod bug3_tracked_child_tests {
+    use super::*;
+
+    /// A real, short-lived child process — exercises `tracked_child_probe`'s
+    /// actual `try_wait()` semantics rather than a mock.
+    fn spawn_short_lived() -> std::process::Child {
+        #[cfg(target_os = "windows")]
+        {
+            crate::supervisor::platform::command("cmd")
+                .args(["/C", "exit 0"])
+                .spawn()
+                .expect("spawn cmd")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::process::Command::new("true").spawn().expect("spawn true")
+        }
+    }
+
+    fn spawn_long_lived() -> std::process::Child {
+        #[cfg(target_os = "windows")]
+        {
+            crate::supervisor::platform::command("cmd")
+                .args(["/C", "timeout /T 30 /NOBREAK >NUL"])
+                .spawn()
+                .expect("spawn cmd")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::process::Command::new("sleep").arg("30").spawn().expect("spawn sleep")
+        }
+    }
+
+    #[test]
+    fn no_tracked_child_means_fall_back_to_the_image_name_probe() {
+        let mut slot: Option<std::process::Child> = None;
+        assert_eq!(tracked_child_probe(&mut slot), None);
+    }
+
+    #[test]
+    fn a_still_running_tracked_child_reports_running_without_a_probe_fallback() {
+        let mut slot = Some(spawn_long_lived());
+        assert_eq!(tracked_child_probe(&mut slot), Some(true));
+        // Clean up so the test doesn't leak a 30s sleep process.
+        if let Some(mut c) = slot.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+
+    #[test]
+    fn an_exited_tracked_child_reports_not_running_and_clears_the_slot() {
+        let mut child = spawn_short_lived();
+        // Give it a moment to actually exit before probing.
+        let _ = child.wait();
+        let mut slot = Some(child);
+        assert_eq!(tracked_child_probe(&mut slot), Some(false));
+        assert!(slot.is_none(), "an exited child must be cleared from the slot");
+    }
+
+    // --- staged_is_stale (pure) ----------------------------------------------
+
+    #[test]
+    fn matching_versions_are_not_stale() {
+        assert!(!staged_is_stale(Some("0.2.21"), Some("0.2.21")));
+    }
+
+    #[test]
+    fn differing_versions_are_stale() {
+        assert!(staged_is_stale(Some("0.2.20"), Some("0.2.21")));
+    }
+
+    #[test]
+    fn an_unmeasurable_version_on_either_side_never_triggers_quarantine() {
+        assert!(!staged_is_stale(None, Some("0.2.21")));
+        assert!(!staged_is_stale(Some("0.2.21"), None));
+        assert!(!staged_is_stale(None, None));
+    }
+}
+
+/// BUG 7 (Discord: "Installed → v0.2.21" shown on every check, Update
+/// button does nothing): `check_update`/`installed_version` version-aware
+/// comparison.
+#[cfg(test)]
+mod bug7_update_check_tests {
+    use super::*;
+
+    #[test]
+    fn the_same_version_on_both_sides_offers_no_update() {
+        assert!(!update_available(Some("0.2.21"), "v0.2.21"));
+    }
+
+    #[test]
+    fn a_trailing_zero_component_from_the_pe_resource_does_not_cause_a_false_update() {
+        // Windows ProductVersion resources commonly carry a 4th ".0"
+        // component a git tag never has — this is EXACTLY the shape that
+        // made the pre-fix "installed" placeholder string always compare
+        // unequal to a real tag.
+        assert!(!update_available(Some("0.2.21.0"), "v0.2.21"));
+    }
+
+    #[test]
+    fn a_genuinely_newer_release_is_offered() {
+        assert!(update_available(Some("0.2.20"), "v0.2.21"));
+    }
+
+    #[test]
+    fn a_genuinely_older_installed_version_string_is_not_offered_a_downgrade() {
+        assert!(!update_available(Some("0.3.0"), "v0.2.21"));
+    }
+
+    #[test]
+    fn an_unmeasurable_installed_version_fails_open_toward_offering_the_update() {
+        // Matches the pre-fix behavior for this specific case — an offer is
+        // reversible (Update does nothing harmful if already current),
+        // silently withholding one on an unmeasurable machine is worse.
+        assert!(update_available(None, "v0.2.21"));
+    }
+
+    #[test]
+    fn version_component_parsing_strips_a_leading_v_and_pads_nothing_itself() {
+        assert_eq!(parse_version_components("v0.2.21"), vec![0, 2, 21]);
+        assert_eq!(parse_version_components("0.2.21.0"), vec![0, 2, 21, 0]);
     }
 }

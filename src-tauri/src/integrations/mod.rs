@@ -97,6 +97,31 @@ pub(crate) fn stderr_tail(stderr: &str, n: usize) -> String {
     }
 }
 
+/// BUG 3/10: pure state check on a tracked child process. `Some(true)` =
+/// confirmed still running, `Some(false)` = confirmed exited (caller should
+/// clear the slot), `None` = nothing tracked, caller must fall back to an
+/// image-name probe. Shared by SpaceAcres (BUG 3) and Olostep (BUG 10) —
+/// both are spawned via a bare `Command::spawn()` with the `Child` handle
+/// previously discarded, so neither integration could tell its OWN spawned
+/// process apart from one it merely adopted (already running, started by
+/// Windows autostart or a previous FEM session).
+pub(crate) fn tracked_child_probe(slot: &mut Option<std::process::Child>) -> Option<bool> {
+    match slot {
+        None => None,
+        Some(child) => match child.try_wait() {
+            Ok(None) => Some(true),
+            Ok(Some(_)) => {
+                *slot = None;
+                Some(false)
+            }
+            // A probe error on OUR OWN tracked child is exactly the
+            // "unmeasurable" case an image-name probe already fails closed
+            // on — assume still running rather than risking a double-spawn.
+            Err(_) => Some(true),
+        },
+    }
+}
+
 /// Tier for a registered integration id. Static by design — the tier is a
 /// commercial fact about the partner, not runtime state. Unknown ids are
 /// `Sdk`: a new integration must be promoted deliberately, never by default.
@@ -223,6 +248,38 @@ impl IntegrationRegistry {
 
     pub fn is_enabled(&self, id: &str) -> bool {
         self.enabled.get(id).copied().unwrap_or(false)
+    }
+
+    /// BUG 4a (Discord reports of SpaceAcres/MystNodes cards "showing off
+    /// until the user re-enables"): restore each integration's enabled flag
+    /// from the persisted config at boot WITHOUT permanently disabling it
+    /// just because `check_requirements()` fails on THIS launch. Previously a
+    /// boot-time failure (a cold SSD probe, a disk briefly full) flipped the
+    /// registry to disabled forever — the health loop's `enabled_fn` gate
+    /// then never retried it again even once the machine started meeting the
+    /// requirements, because nothing else ever re-enables it. `unavailable_reason`
+    /// is already recomputed live on every `get_integrations` poll and tells
+    /// the user why, independent of this flag, so disabling here only
+    /// duplicated that signal while also breaking self-healing. Ids no longer
+    /// registered (e.g. a removed integration) are skipped rather than
+    /// inflating `enabled_count()`/`proportion()` with a ghost entry.
+    pub fn restore_enabled_states(&mut self, configured: &HashMap<String, bool>) {
+        for (id, &enabled) in configured {
+            let Some(integration) = self.get(id) else {
+                tracing::info!(id = id.as_str(), "Config references a removed integration — ignoring");
+                continue;
+            };
+            if enabled {
+                if let Err(reason) = integration.check_requirements() {
+                    tracing::info!(
+                        id = id.as_str(),
+                        reason = reason.as_str(),
+                        "Integration does not currently meet its minimum requirements at boot — leaving it enabled so the health loop retries automatically"
+                    );
+                }
+            }
+            self.set_enabled(id, enabled);
+        }
     }
 
     pub fn list(&self) -> Vec<Arc<dyn Integration>> {
@@ -420,5 +477,111 @@ mod tier_tests {
             serde_json::to_string(&IntegrationTier::Sdk).unwrap(),
             "\"sdk\""
         );
+    }
+}
+
+/// BUG 4a: a boot-time requirements failure must not permanently disable an
+/// integration the user configured as enabled.
+#[cfg(test)]
+mod restore_enabled_states_tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct AlwaysFailsRequirements;
+
+    #[async_trait]
+    impl Integration for AlwaysFailsRequirements {
+        fn id(&self) -> &str {
+            "always_fails"
+        }
+        fn display_name(&self) -> &str {
+            "Always Fails"
+        }
+        async fn install(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn start(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn stop(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn health_check(&self) -> HealthStatus {
+            HealthStatus::Unknown
+        }
+        async fn check_update(&self) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn check_requirements(&self) -> Result<(), String> {
+            Err("cold SSD probe: no SSD detected".to_string())
+        }
+    }
+
+    struct AlwaysMeetsRequirements;
+
+    #[async_trait]
+    impl Integration for AlwaysMeetsRequirements {
+        fn id(&self) -> &str {
+            "always_ok"
+        }
+        fn display_name(&self) -> &str {
+            "Always OK"
+        }
+        async fn install(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn start(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn stop(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn health_check(&self) -> HealthStatus {
+            HealthStatus::Healthy
+        }
+        async fn check_update(&self) -> Result<Option<String>> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn an_enabled_integration_stays_enabled_after_a_boot_time_requirements_failure() {
+        let mut reg = IntegrationRegistry::new();
+        reg.register(Arc::new(AlwaysFailsRequirements));
+
+        let mut configured = HashMap::new();
+        configured.insert("always_fails".to_string(), true);
+
+        reg.restore_enabled_states(&configured);
+
+        assert!(
+            reg.is_enabled("always_fails"),
+            "an integration the user enabled must stay enabled even if check_requirements() fails at boot, \
+             so the health loop can retry it automatically once the machine meets requirements again"
+        );
+    }
+
+    #[test]
+    fn a_disabled_integration_stays_disabled_regardless_of_requirements() {
+        let mut reg = IntegrationRegistry::new();
+        reg.register(Arc::new(AlwaysMeetsRequirements));
+
+        let mut configured = HashMap::new();
+        configured.insert("always_ok".to_string(), false);
+
+        reg.restore_enabled_states(&configured);
+
+        assert!(!reg.is_enabled("always_ok"));
+    }
+
+    #[test]
+    fn an_id_no_longer_registered_is_skipped_without_panicking() {
+        let mut reg = IntegrationRegistry::new();
+        let mut configured = HashMap::new();
+        configured.insert("removed_integration".to_string(), true);
+
+        reg.restore_enabled_states(&configured);
+
+        assert!(!reg.is_enabled("removed_integration"));
     }
 }

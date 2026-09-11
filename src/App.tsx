@@ -9,7 +9,7 @@ import SettingsPage from './pages/SettingsPage'
 import Updates from './pages/Updates'
 import Wizard from './wizard/Wizard'
 import { useIntegrations } from './hooks/useIntegrations'
-import { sdkActiveLine, sdkCounts } from './lib/tierSplit'
+import { sdkActiveLine, sdkActiveCount } from './lib/tierSplit'
 import { countActive } from './lib/rewardModel'
 import { REQUIRED_INTEGRATIONS } from './lib/integrationMeta'
 import { deriveConnectivity } from './lib/connectivity'
@@ -155,7 +155,9 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
   // uses — deriving these two independently is how the badge came to read
   // N/10 while the Dashboard read N/5.
   const requiredActive = countActive(integrations).required
-  const sdkLine = sdkActiveLine(sdkCounts(integrations).activeCount)
+  // BUG 13: enabled+healthy ("active"), not merely enabled — see
+  // `sdkActiveCount` for why this must not be `sdkCounts(...).activeCount`.
+  const sdkLine = sdkActiveLine(sdkActiveCount(integrations))
   const hasUnhealthy = integrations.some((i) => i.enabled && !i.healthy)
   // Badge reflects reachability of the Fry backend only. Docker state is a
   // local prerequisite surfaced via the TopBar Docker chip + per-card errors,

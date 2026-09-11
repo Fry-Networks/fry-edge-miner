@@ -46,6 +46,19 @@
   DetailPrint "Stopping partner processes that hold the install folder..."
   nsExec::Exec 'taskkill /F /T /IM frynode.exe'
   Pop $1
+
+  ; BUG 1/2: the same class of locked-file failure applies to every OTHER
+  ; supervisor/untracked partner binary FEM ships resources for or installs
+  ; alongside itself. The running app's own release_install_tree/orphan-sweep
+  ; cover the normal update path, but a manual installer run (or an update
+  ; from a version that predates those sweeps) can still hit a locked file
+  ; here. Best-effort, same "non-zero = nothing matched" contract.
+  nsExec::Exec 'taskkill /F /T /IM titan-edge.exe'
+  Pop $1
+  nsExec::Exec 'taskkill /F /T /IM sdk_client.exe'
+  Pop $1
+  nsExec::Exec 'taskkill /F /T /IM space-acres.exe'
+  Pop $1
   Sleep 2000
 
   !if "${WEBVIEW2BOOTSTRAPPERPATH}" != ""
@@ -73,4 +86,49 @@
       Delete "$TEMP\WebView2Repair.exe"
     ${EndIf}
   !endif
+!macroend
+
+!macro NSIS_HOOK_POSTINSTALL
+  ; BUG 1/2: verify the main binary actually landed and is not a truncated/
+  ; missing copy. The observed failure mode is Windows Defender quarantining
+  ; the freshly-extracted file mid-install ("file contains a virus or
+  ; potentially unwanted software") — the installer reported success while
+  ; the app itself was gone or broken. A 1 MB floor is well below the real
+  ; binary's size and well above an empty/stub file.
+  ${If} ${FileExists} "$INSTDIR\fry-edge-miner.exe"
+    FileOpen $3 "$INSTDIR\fry-edge-miner.exe" r
+    FileSeek $3 0 END $4
+    FileClose $3
+  ${Else}
+    StrCpy $4 0
+  ${EndIf}
+
+  IntOp $5 1024 * 1024
+
+  ${If} $4 < $5
+    DetailPrint "fry-edge-miner.exe missing or truncated after install (size: $4 bytes) — likely quarantined by antivirus"
+    FileOpen $6 "$INSTDIR\update-failed.txt" w
+    FileWrite $6 "Fry Edge Miner failed to install correctly.$\r$\n"
+    FileWrite $6 "The most likely cause is antivirus/Defender quarantining the new file during install.$\r$\n"
+    FileWrite $6 "$\r$\n"
+    FileWrite $6 "To recover:$\r$\n"
+    FileWrite $6 "  1. Open Windows Security > Virus & threat protection > Protection history, find the quarantined fry-edge-miner.exe, and restore it.$\r$\n"
+    FileWrite $6 "  2. Or restore the previous version from: %LOCALAPPDATA%\Fry Edge Miner\.prev\fry-edge-miner.exe$\r$\n"
+    FileWrite $6 "  3. Add an exclusion for this folder in Windows Security so future updates are unaffected: $INSTDIR$\r$\n"
+    FileClose $6
+    MessageBox MB_ICONEXCLAMATION "Fry Edge Miner did not install correctly — the application file is missing or was blocked by antivirus.$\r$\n$\r$\nSee $INSTDIR\update-failed.txt for recovery steps, or restore the previous version from %LOCALAPPDATA%\Fry Edge Miner\.prev\"
+  ${Else}
+    DetailPrint "fry-edge-miner.exe verified present ($4 bytes)"
+  ${EndIf}
+
+  ; Defender exclusion + frynode firewall rule are deliberately NOT attempted
+  ; here. Measured on a real dev box: `Add-MpPreference` alone took ~19s to
+  ; return (Defender PowerShell module load), even though it is GUARANTEED
+  ; to fail anyway — this installer runs UNELEVATED by design (installMode
+  ; "currentUser", see the WebView2 comment above), and Add-MpPreference
+  ; requires admin. Two sequential calls would add ~30-40s of dead time to
+  ; EVERY install for a command that cannot succeed in this context. The
+  ; real mechanism is the app's own one-time ELEVATED setup
+  ; (security_setup.rs), which runs both together under a single UAC prompt
+  ; on first launch and before each update, and actually succeeds.
 !macroend

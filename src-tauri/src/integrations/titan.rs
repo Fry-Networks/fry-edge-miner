@@ -3,10 +3,135 @@ use super::download::{download_file_with_options, partners_base_dir};
 use super::{HealthStatus, Integration, PocGateData};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 use crate::supervisor::Supervisor;
+
+/// BUG 8 (Discord: four Scorpion63 screenshots — VCRUNTIME140.dll /
+/// VCRUNTIME140_1.dll / MSVCP140.dll / MSVCP140_ATOMIC_WAIT.dll not found).
+/// titan-edge.exe is a Go+cgo binary that links the VC++ 2015-2022 runtime;
+/// without it Windows fails the process launch fast (STATUS_DLL_NOT_FOUND)
+/// and `health_check()` had no way to say why — same defect class as BUG 6/9.
+/// `msvcp140_atomic_wait.dll` is the newest member of that runtime family
+/// (added ≥14.29) and ships only when a modern-enough redist is installed,
+/// so its presence is a reliable single-file proxy for "the whole family is
+/// there" without a registry read.
+const VC_REDIST_MARKER_DLL: &str = "msvcp140_atomic_wait.dll";
+
+const VC_REDIST_DOWNLOAD_URL: &str = "https://aka.ms/vs/17/release/vc_redist.x64.exe";
+
+/// Pure: does `system_root`'s System32 contain the VC++ 2015-2022 marker
+/// DLL? Parameterized so it is testable against a tempdir instead of the
+/// real `%SystemRoot%`.
+fn vc_redist_dll_present(system_root: &Path) -> bool {
+    system_root.join("System32").join(VC_REDIST_MARKER_DLL).exists()
+}
+
+/// Whether the VC++ 2015-2022 x64 runtime titan-edge.exe needs is missing on
+/// this machine.
+pub(crate) fn vc_redist_missing() -> bool {
+    let system_root = std::env::var("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(r"C:\Windows"));
+    !vc_redist_dll_present(&system_root)
+}
+
+/// H2 review fix: `crate::supervisor::platform::PROBE_TIMEOUT` (20s) is the
+/// generic short-lived-CLI-probe deadline (`tasklist`, `netsh show`, one-line
+/// PowerShell queries) — nowhere near enough for a real Microsoft VC++
+/// redistributable install (`/quiet` still commonly takes well over 20s),
+/// and that budget also has to absorb however long the user takes to notice
+/// and click the UAC prompt. Bounded but materially longer: 10 minutes.
+const VC_REDIST_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Outcome of one elevated VC++ redist install attempt. A dedicated enum
+/// rather than folding everything into `Result` because `StillInstalling`
+/// is NOT a failure — `output_bounded`'s timeout only kills the OUTER
+/// unelevated `powershell.exe` that launched `Start-Process -Verb RunAs`;
+/// the real elevated installer is a separate process in a different
+/// security context that kill cannot reach, so it very plausibly keeps
+/// running and can succeed moments later. Reporting that as a hard failure
+/// (the pre-fix behavior) defeats BUG 8's auto-remediation for the "slow but
+/// working" case, which is the realistic case, not an edge case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VcRedistInstallOutcome {
+    Installed,
+    /// The wait budget elapsed before the outer wrapper returned. The real
+    /// installer may still be running; the caller should NOT treat this as
+    /// a failure requiring user action — `health_check()`'s next tick
+    /// re-checks `vc_redist_missing()` for real.
+    StillInstalling,
+    Failed(Option<i32>),
+}
+
+/// H2 review fix, pure & testable: map the raw attempt outcome to what to
+/// report. `timed_out` takes priority over the exit code/success bits
+/// because a timeout means we never actually observed the elevated
+/// installer's own outcome — only that the OUTER wrapper didn't return
+/// in time.
+fn vc_redist_install_outcome(timed_out: bool, success: bool, exit_code: Option<i32>) -> VcRedistInstallOutcome {
+    if timed_out {
+        return VcRedistInstallOutcome::StillInstalling;
+    }
+    // 3010 = success, restart required — still a success for our purposes.
+    if success || exit_code == Some(3010) {
+        VcRedistInstallOutcome::Installed
+    } else {
+        VcRedistInstallOutcome::Failed(exit_code)
+    }
+}
+
+/// Download and silently install the VC++ 2015-2022 x64 redistributable
+/// through ONE elevated prompt (same `Start-Process -Verb RunAs -Wait`
+/// pattern as `security_setup::run_hardening_elevated` /
+/// `firewall::ensure_program_rules`). `Err` is reserved for genuine
+/// unexpected failures (download failed, task panicked); a completed-but-declined
+/// install and a still-in-progress one are both `Ok` with a distinguishing
+/// `VcRedistInstallOutcome` — see that type's docs for why timeout ≠ failure.
+pub(crate) async fn install_vc_redist_elevated() -> Result<VcRedistInstallOutcome> {
+    let installer_path = std::env::temp_dir().join("vc_redist.x64.exe");
+    download_file_with_options(VC_REDIST_DOWNLOAD_URL, &installer_path, USER_AGENT, None).await?;
+
+    let installer_str = installer_path.to_string_lossy().to_string();
+    let outer = format!(
+        "$p = Start-Process -FilePath '{}' -ArgumentList '/install','/quiet','/norestart' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
+        installer_str.replace('\'', "''")
+    );
+
+    let result = tokio::task::spawn_blocking(move || {
+        crate::supervisor::platform::command("powershell")
+            .args(["-NoProfile", "-Command", &outer])
+            .output_bounded(VC_REDIST_INSTALL_TIMEOUT)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("VC++ redist installer task panicked: {e}"))?;
+
+    let outcome = match &result {
+        Ok(out) => vc_redist_install_outcome(false, out.status.success(), out.status.code()),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => vc_redist_install_outcome(true, false, None),
+        Err(e) => return Err(anyhow::anyhow!("VC++ redist install could not run: {e}")),
+    };
+
+    match outcome {
+        VcRedistInstallOutcome::Installed => {
+            info!("VC++ 2015-2022 x64 redistributable installed");
+            Ok(outcome)
+        }
+        VcRedistInstallOutcome::StillInstalling => {
+            warn!(
+                timeout_s = VC_REDIST_INSTALL_TIMEOUT.as_secs(),
+                "VC++ redist installer exceeded the wait budget — it may still be installing \
+                 in the background (the outer wait wrapper was stopped, not the elevated \
+                 installer itself); will re-check on the next health tick"
+            );
+            Ok(outcome)
+        }
+        VcRedistInstallOutcome::Failed(code) => {
+            anyhow::bail!("VC++ redist install declined or failed (exit {:?})", code)
+        }
+    }
+}
 
 const DOWNLOAD_URL: &str = "https://github.com/Titannet-dao/titan-node/releases/download/v0.1.20/titan-edge_v0.1.20_246b9dd_widnows_amd64.tar.gz";
 const EXPECTED_SHA256: &str = "6f37eea5cfcd6f799cd629d6e02a5636fb5c92995f73f0791ec0ff473afb558c";
@@ -90,6 +215,25 @@ mod log_level_tests {
         ] {
             assert!(line_indicates_error(line), "should be a failure: {line}");
         }
+    }
+}
+
+/// BUG 8: reason shown for a dead titan-edge process, preferring the
+/// specific VC++-runtime diagnosis (directly verifiable via
+/// `vc_redist_dll_present`) over the generic log-tail fallback shared with
+/// BUG 6 (fryvpn) / BUG 9 (mysterium) — a missing DLL means the process
+/// likely never got far enough to write anything useful to its own logs.
+fn process_not_running_reason(vc_redist_missing: bool, stderr_tail: &str) -> String {
+    if vc_redist_missing {
+        return "titan-edge process is not running: missing VC++ 2015-2022 x64 runtime \
+                (VCRUNTIME140.dll / MSVCP140.dll not found) — install the Visual C++ \
+                Redistributable to fix this"
+            .to_string();
+    }
+    if stderr_tail == "no error output" {
+        "titan-edge process is not running".to_string()
+    } else {
+        format!("titan-edge process is not running: {stderr_tail}")
     }
 }
 
@@ -203,6 +347,35 @@ impl Integration for TitanIntegration {
         // Clean up archive
         let _ = tokio::fs::remove_file(&archive_path).await;
 
+        // BUG 8: titan-edge.exe needs the VC++ 2015-2022 x64 runtime to even
+        // launch. Install it now (one elevated prompt) rather than waiting
+        // for the daemon to fail fast on first start — best-effort: a
+        // decline/failure here must not fail the whole integration install,
+        // since `health_check()` still reports the concrete reason if it
+        // turns out to be missing at start time.
+        if vc_redist_missing() {
+            match install_vc_redist_elevated().await {
+                Ok(VcRedistInstallOutcome::Installed) => {}
+                Ok(VcRedistInstallOutcome::StillInstalling) => {
+                    // H2 review fix: not a failure — health_check() re-checks
+                    // vc_redist_missing() on the next tick once the process
+                    // has had more time to finish.
+                    info!("VC++ redist install still in progress — will confirm on a later health check");
+                }
+                // `install_vc_redist_elevated` currently always converts a
+                // Failed outcome into an Err before returning to the caller
+                // (see its own match), but VcRedistInstallOutcome is part of
+                // the public return type — handle this defensively the same
+                // as Err rather than relying on that internal detail.
+                Ok(VcRedistInstallOutcome::Failed(code)) => {
+                    warn!(exit_code = ?code, "VC++ redist install declined or failed — titan-edge may fail to start until it is installed manually");
+                }
+                Err(e) => {
+                    warn!(error = %e, "VC++ redist install declined or failed — titan-edge may fail to start until it is installed manually");
+                }
+            }
+        }
+
         info!(binary = ?binary, "Titan Network installed successfully");
         Ok(())
     }
@@ -249,7 +422,17 @@ impl Integration for TitanIntegration {
         };
 
         if !process_alive {
-            return HealthStatus::Stopped;
+            // BUG 8: same defect class as BUG 6/9 — a bare `Stopped` for an
+            // enabled-but-dead integration renders as "Starting" forever
+            // with no reason. titan-edge is a cgo binary, so a missing VC++
+            // runtime is the single most common cause and is directly
+            // verifiable (no exit-code plumbing needed).
+            let stderr_path = self.log_dir.join("titan").join("titan_stderr.log");
+            let stderr_content = tokio::fs::read_to_string(&stderr_path)
+                .await
+                .unwrap_or_default();
+            let tail = super::stderr_tail(&stderr_content, 3);
+            return HealthStatus::Unhealthy(process_not_running_reason(vc_redist_missing(), &tail));
         }
 
         // Read both log files (stdout and stderr)
@@ -311,5 +494,137 @@ impl Integration for TitanIntegration {
             poa: matches!(status, HealthStatus::Healthy),
             ..Default::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod bug8_vc_redist_tests {
+    use super::*;
+
+    fn tmp_system_root(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fem-titan-test-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("System32")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_marker_dll_present_means_the_runtime_is_installed() {
+        let root = tmp_system_root("present");
+        std::fs::write(root.join("System32").join(VC_REDIST_MARKER_DLL), b"fake dll").unwrap();
+        assert!(vc_redist_dll_present(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_missing_marker_dll_means_the_runtime_is_not_installed() {
+        let root = tmp_system_root("missing");
+        assert!(!vc_redist_dll_present(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // --- process_not_running_reason (pure) ----------------------------------
+
+    #[test]
+    fn a_missing_runtime_gets_a_specific_actionable_reason_regardless_of_log_content() {
+        let reason = process_not_running_reason(true, "no error output");
+        assert!(reason.contains("VC++ 2015-2022"));
+        assert!(reason.contains("VCRUNTIME140") || reason.contains("MSVCP140"));
+    }
+
+    #[test]
+    fn a_missing_runtime_reason_takes_priority_over_a_generic_log_tail() {
+        // Even if SOME stderr happened to be captured, the VC++ diagnosis is
+        // the more actionable and more likely correct root cause for a cgo
+        // binary that failed to launch at all.
+        let reason = process_not_running_reason(true, "some unrelated log line");
+        assert!(reason.contains("VC++ 2015-2022"));
+        assert!(!reason.contains("some unrelated log line"));
+    }
+
+    #[test]
+    fn a_present_runtime_falls_back_to_the_generic_stderr_tail_reason() {
+        let reason = process_not_running_reason(false, "panic: disk full");
+        assert!(reason.contains("panic: disk full"));
+        assert!(!reason.contains("VC++"));
+    }
+
+    #[test]
+    fn a_present_runtime_with_no_log_output_still_gets_a_non_empty_reason() {
+        let reason = process_not_running_reason(false, "no error output");
+        assert_eq!(reason, "titan-edge process is not running");
+    }
+}
+
+/// H2 review fix: the elevated VC++ redist install's timeout budget and
+/// timeout-vs-failure outcome mapping.
+#[cfg(test)]
+mod bug8_h2_vc_redist_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn the_install_timeout_is_materially_longer_than_the_generic_probe_timeout() {
+        // The pre-fix bug: reusing PROBE_TIMEOUT (20s) for a real
+        // Microsoft installer, which routinely takes well over 20s even
+        // in quiet mode.
+        assert!(
+            VC_REDIST_INSTALL_TIMEOUT > crate::supervisor::platform::PROBE_TIMEOUT,
+            "VC_REDIST_INSTALL_TIMEOUT must be materially longer than the generic 20s probe timeout"
+        );
+        assert_eq!(VC_REDIST_INSTALL_TIMEOUT, std::time::Duration::from_secs(600), "bounded at 10 minutes");
+    }
+
+    #[test]
+    fn a_timeout_is_reported_as_still_installing_never_as_a_failure() {
+        // The pre-fix bug: output_bounded's TimedOut only kills the OUTER
+        // unelevated wrapper — the real elevated installer runs in a
+        // separate security context the kill cannot reach, so it may well
+        // succeed moments later. Treating this as a hard failure defeats
+        // BUG 8's auto-remediation for the realistic "slow but working" case.
+        assert_eq!(
+            vc_redist_install_outcome(true, false, None),
+            VcRedistInstallOutcome::StillInstalling
+        );
+        // Even a would-be-successful exit code must not override a timeout
+        // — a timeout means we never actually observed it.
+        assert_eq!(
+            vc_redist_install_outcome(true, true, Some(0)),
+            VcRedistInstallOutcome::StillInstalling
+        );
+    }
+
+    #[test]
+    fn a_clean_success_within_budget_is_installed() {
+        assert_eq!(
+            vc_redist_install_outcome(false, true, Some(0)),
+            VcRedistInstallOutcome::Installed
+        );
+    }
+
+    #[test]
+    fn exit_code_3010_restart_required_is_still_installed() {
+        assert_eq!(
+            vc_redist_install_outcome(false, false, Some(3010)),
+            VcRedistInstallOutcome::Installed
+        );
+    }
+
+    #[test]
+    fn a_genuine_non_timeout_failure_is_failed_with_its_exit_code() {
+        assert_eq!(
+            vc_redist_install_outcome(false, false, Some(1603)),
+            VcRedistInstallOutcome::Failed(Some(1603))
+        );
+        assert_eq!(
+            vc_redist_install_outcome(false, false, None),
+            VcRedistInstallOutcome::Failed(None)
+        );
     }
 }

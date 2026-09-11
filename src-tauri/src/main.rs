@@ -10,6 +10,7 @@ mod integrations;
 mod logging;
 mod migration;
 mod poc;
+mod security_setup;
 mod supervisor;
 mod system_info;
 mod updater_auto;
@@ -40,6 +41,106 @@ pub struct AppState {
     pub cached_verified_status: Arc<RwLock<Option<crate::api::types::VerifiedStatus>>>,
     pub reporting_status: Arc<RwLock<crate::api::types::ReportingStatus>>,
     pub last_token_recovery: Arc<RwLock<Option<std::time::Instant>>>,
+}
+
+/// BUG 12: apply one forwarded health-loop event to the shared `last_health`
+/// map that `commands::integration::get_integrations` reads on every poll.
+/// Factored out of the event-forwarding loop in `setup()` so the invariant —
+/// every event the frontend's `health-event` listener receives must ALSO be
+/// persisted, not merely broadcast once — is directly testable without
+/// spinning up the whole app. Before this fix, the health loop's bounded
+/// startup timeout synthesized a concrete `Unhealthy("Did not finish
+/// starting…")` reason and sent it ONLY through the event channel; a poll
+/// immediately after (the 30s fallback poll, or any page remount) read
+/// straight from `last_health` and saw whatever the next raw `check_fn` tick
+/// computed instead — typically a bare `Starting` again — so the card
+/// showed the real reason for an instant and reverted to "Starting" forever
+/// after.
+fn record_forwarded_health_event(
+    last_health: &RwLock<HashMap<String, HealthStatus>>,
+    event: &supervisor::health::HealthEvent,
+) {
+    if let Ok(mut map) = last_health.write() {
+        map.insert(event.integration_id.clone(), event.status.clone());
+    }
+}
+
+#[cfg(test)]
+mod bug12_health_persistence_tests {
+    use super::*;
+    use supervisor::health::HealthEvent;
+
+    #[test]
+    fn a_forwarded_event_is_persisted_into_the_polled_map() {
+        let last_health: RwLock<HashMap<String, HealthStatus>> = RwLock::new(HashMap::new());
+        let event = HealthEvent {
+            integration_id: "titan".to_string(),
+            status: HealthStatus::Unhealthy("Did not finish starting within 180s — retrying".to_string()),
+            restart_count: 1,
+        };
+
+        record_forwarded_health_event(&last_health, &event);
+
+        let map = last_health.read().unwrap();
+        assert_eq!(
+            map.get("titan"),
+            Some(&HealthStatus::Unhealthy(
+                "Did not finish starting within 180s — retrying".to_string()
+            ))
+        );
+    }
+
+    /// The exact regression this fixes: a startup-timeout event followed
+    /// immediately by a "next tick" bare `Starting` event must leave the
+    /// LATEST status persisted (last-write-wins) — a poll right after the
+    /// timeout event fires sees the timeout reason, matching what the
+    /// live event listener already showed, not a value that reverted on
+    /// its own without a real state change.
+    #[test]
+    fn a_later_event_for_the_same_integration_overwrites_the_earlier_one() {
+        let last_health: RwLock<HashMap<String, HealthStatus>> = RwLock::new(HashMap::new());
+        record_forwarded_health_event(
+            &last_health,
+            &HealthEvent {
+                integration_id: "titan".to_string(),
+                status: HealthStatus::Unhealthy("Did not finish starting within 180s — retrying".to_string()),
+                restart_count: 1,
+            },
+        );
+        record_forwarded_health_event(
+            &last_health,
+            &HealthEvent {
+                integration_id: "titan".to_string(),
+                status: HealthStatus::Healthy,
+                restart_count: 1,
+            },
+        );
+        assert_eq!(last_health.read().unwrap().get("titan"), Some(&HealthStatus::Healthy));
+    }
+
+    #[test]
+    fn events_for_different_integrations_do_not_clobber_each_other() {
+        let last_health: RwLock<HashMap<String, HealthStatus>> = RwLock::new(HashMap::new());
+        record_forwarded_health_event(
+            &last_health,
+            &HealthEvent {
+                integration_id: "titan".to_string(),
+                status: HealthStatus::Unhealthy("missing VC++ runtime".to_string()),
+                restart_count: 0,
+            },
+        );
+        record_forwarded_health_event(
+            &last_health,
+            &HealthEvent {
+                integration_id: "mysterium".to_string(),
+                status: HealthStatus::Healthy,
+                restart_count: 0,
+            },
+        );
+        let map = last_health.read().unwrap();
+        assert_eq!(map.get("titan"), Some(&HealthStatus::Unhealthy("missing VC++ runtime".to_string())));
+        assert_eq!(map.get("mysterium"), Some(&HealthStatus::Healthy));
+    }
 }
 
 fn main() {
@@ -83,6 +184,23 @@ fn main() {
                 });
             }
 
+            // BUG 11/12: if the installed app version changed since the last
+            // report, tell the server right away instead of waiting for the
+            // next periodic PoC tick (fire-and-forget, fail-safe — a failure
+            // here just means the periodic tick catches it later).
+            {
+                let ver_config = config_store.clone();
+                let ver_client = api_client.clone();
+                tauri::async_runtime::spawn(async move {
+                    commands::device::attempt_version_change_heartbeat(
+                        &ver_config,
+                        &ver_client,
+                        env!("CARGO_PKG_VERSION"),
+                    )
+                    .await;
+                });
+            }
+
             // Process supervisor (created before registry — MysteriumIntegration needs Arc<Mutex<Supervisor>>)
             let log_dir = app
                 .path()
@@ -108,11 +226,12 @@ fn main() {
                 api_client: api_client.clone(),
                 config: config_store.clone(),
             }));
-            registry.register(Arc::new(integrations::space_acres::SpaceAcresIntegration));
-            registry.register(Arc::new(integrations::aem::AemIntegration));
+            registry.register(Arc::new(integrations::space_acres::SpaceAcresIntegration::default()));
+            registry.register(Arc::new(integrations::aem::AemIntegration::default()));
             registry.register(Arc::new(integrations::fryvpn::FryVpnIntegration {
                 config: config_store.clone(),
                 supervisor: supervisor.clone(),
+                log_dir: log_dir.clone(),
             }));
             registry.register(Arc::new(integrations::sentinel::SentinelIntegration));
             registry.register(Arc::new(integrations::titan::TitanIntegration {
@@ -135,30 +254,64 @@ fn main() {
             // would freeze the UI and stall the PoC reporter behind the lock.
             integrations::space_acres::warm_ssd_probe();
 
-            // Restore enabled states from config. Skip ids no longer registered
-            // (e.g. the removed Presearch) — a stale key would otherwise inflate
-            // enabled_count()/proportion() with a ghost entry.
-            for (id, enabled) in &cfg.integrations_enabled {
-                let Some(integration) = registry.get(id) else {
-                    tracing::info!(id = id.as_str(), "Config references a removed integration — ignoring");
-                    continue;
-                };
-                // A machine can stop meeting an integration's minimums between
-                // runs (disk filled up). Restoring it enabled would auto-start
-                // something that cannot work and count it against the user.
-                if *enabled {
-                    if let Err(reason) = integration.check_requirements() {
-                        tracing::info!(
-                            id = id.as_str(),
-                            reason = reason.as_str(),
-                            "Integration no longer meets its minimum requirements — leaving disabled"
-                        );
-                        registry.set_enabled(id, false);
-                        continue;
-                    }
-                }
-                registry.set_enabled(id, *enabled);
+            // BUG 4c: sweep leftover untracked copies of purely
+            // supervisor-managed binaries (Myst, Titan) before startup
+            // recovery below starts a fresh one — see
+            // `updater_auto::STARTUP_ORPHAN_IMAGES` for why SpaceAcres and
+            // Olostep are excluded (adopt, don't kill).
+            updater_auto::kill_startup_orphans();
+
+            // BUG 1/2: if the PREVIOUS launch of this app was in the middle
+            // of an update, confirm it actually landed. Must run before
+            // anything else assumes a settled state.
+            updater_auto::check_update_outcome_on_launch(&config_dir, env!("CARGO_PKG_VERSION"));
+
+            // BUG 1/2 (part d): one-time elevated Defender exclusion +
+            // frynode firewall hardening, once per version. Fire-and-forget —
+            // a UAC prompt must never block app boot, and a decline/failure
+            // just leaves the manual command logged for the operator.
+            {
+                let hardening_config = config_store.clone();
+                let hardening_cfg = cfg.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::task::block_in_place(|| {
+                        let current = env!("CARGO_PKG_VERSION");
+                        if !security_setup::should_run_hardening(
+                            hardening_cfg.hardening_applied_version.as_deref(),
+                            current,
+                        ) {
+                            return;
+                        }
+                        let Ok(exe_path) = std::env::current_exe() else { return };
+                        let Some(install_dir) = exe_path.parent() else { return };
+                        let frynode_path = install_dir.join("resources").join("frynode.exe");
+                        let exe_names = ["fry-edge-miner.exe", "frynode.exe"];
+                        match security_setup::run_hardening_elevated(install_dir, &exe_names, &frynode_path) {
+                            Ok(()) => {
+                                if let Err(e) = hardening_config.update(|c| {
+                                    c.hardening_applied_version = Some(current.to_string());
+                                }) {
+                                    tracing::warn!(error = %e, "Could not persist hardening_applied_version");
+                                }
+                            }
+                            Err(e) => {
+                                let manual = security_setup::manual_hardening_command(install_dir, &exe_names);
+                                tracing::warn!(
+                                    error = %e,
+                                    manual_command = %manual,
+                                    "Elevated hardening setup declined or failed — run the manual command as Administrator to apply it yourself"
+                                );
+                            }
+                        }
+                    });
+                });
             }
+
+            // Restore enabled states from config. See BUG 4a in
+            // `IntegrationRegistry::restore_enabled_states`: a boot-time
+            // `check_requirements()` failure no longer force-disables — it
+            // only logs, so the health loop keeps retrying automatically.
+            registry.restore_enabled_states(&cfg.integrations_enabled);
 
             // One-time Presearch cleanup (integration removed — project shut down):
             // best-effort remove any orphaned Docker containers/volume an older FEM
@@ -269,6 +422,18 @@ fn main() {
                     };
 
                     let restart_fn = move || {
+                        // BUG 1/2: once an update install is underway,
+                        // release_install_tree has already stopped this
+                        // process on purpose — restarting it here would race
+                        // download_and_install's file replacement. See
+                        // `updater_auto::UPDATE_IN_PROGRESS`.
+                        if crate::updater_auto::restarts_suspended() {
+                            tracing::info!(
+                                id = id_restart.as_str(),
+                                "Restart skipped — an update install is in progress"
+                            );
+                            return false;
+                        }
                         // B1: guard dropped before the blocking stop/start, for
                         // the same reason as check_fn above.
                         let integration = {
@@ -327,10 +492,31 @@ fn main() {
                 drop(health_tx);
 
                 // Forward health events to frontend
+                //
+                // BUG 12 (generic "STARTING only" card — no failure reason
+                // survives a refresh): `health_check_loop`'s bounded-startup
+                // timeout (`RecoveryAction::StartupTimedOut`) synthesizes a
+                // concrete `Unhealthy("Did not finish starting…")` status and
+                // sends it ONLY through this event channel — it was never
+                // written into `last_health`, the SAME map
+                // `commands::integration::get_integrations` reads on every
+                // poll. The frontend's live `health-event` listener showed
+                // the reason for a moment, then the very next 30s fallback
+                // poll (or any page remount) overwrote it with whatever
+                // `check_fn`'s own next tick computed — typically a bare
+                // `Starting` again, since the timeout is what RESET the
+                // starting-ticks counter. The card was correct for an
+                // instant and wrong forever after. Persist every forwarded
+                // event into `last_health` too, so a poll always sees the
+                // same status the event stream already pushed — closes the
+                // gap for every integration generically, not just the ones
+                // with their own dead-process reason fix (BUG 6/8/9/10).
                 let app_handle = app.handle().clone();
+                let forwarded_health = last_health.clone();
                 tauri::async_runtime::spawn(async move {
                     use tauri::Emitter;
                     while let Some(event) = health_rx.recv().await {
+                        record_forwarded_health_event(&forwarded_health, &event);
                         if let Err(e) = app_handle.emit("health-event", &event) {
                             tracing::warn!(error = %e, "Failed to emit health event");
                         }

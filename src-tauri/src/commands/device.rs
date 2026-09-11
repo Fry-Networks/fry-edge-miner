@@ -897,3 +897,120 @@ mod deregistration_tests {
         assert!(should_clear_local(false, true));
     }
 }
+
+/// BUG 11/12: pure decision — does this launch need to report the installed
+/// version out of band (immediate heartbeat + lease action) instead of
+/// waiting for the next periodic PoC tick to pick it up?
+pub fn should_report_version_change(stored: Option<&str>, current: &str) -> bool {
+    stored != Some(current)
+}
+
+/// BUG 11/12: on every launch of a device that is already registered
+/// (miner_key + install_id present), if the installed binary version
+/// differs from the last version this device told the server about, send an
+/// immediate heartbeat carrying the new `software_version_installed` and
+/// renew/acquire the mining lease right away, instead of waiting for the
+/// next periodic PoC tick (which previously left the dashboard showing a
+/// stale version, sometimes indefinitely if that tick's submission kept
+/// failing). Only persists `last_reported_version` when the heartbeat
+/// actually succeeds, so a failed attempt retries on the next launch.
+pub async fn attempt_version_change_heartbeat(
+    config: &std::sync::Arc<crate::config::store::ConfigStore>,
+    api_client: &std::sync::Arc<crate::api::client::ApiClient>,
+    current_version: &str,
+) {
+    let cfg = config.get();
+    let (miner_key, install_id) = match (&cfg.miner_key, &cfg.install_id) {
+        (Some(k), Some(id)) => (k.clone(), id.clone()),
+        _ => return, // not registered yet — register_device reports the version itself
+    };
+
+    if !should_report_version_change(cfg.last_reported_version.as_deref(), current_version) {
+        return;
+    }
+
+    tracing::info!(
+        miner_key = %miner_key,
+        from = cfg.last_reported_version.as_deref().unwrap_or("(none)"),
+        to = current_version,
+        "App version changed since last report — sending immediate heartbeat + lease action"
+    );
+
+    let heartbeat = crate::api::types::InstallationHeartbeat {
+        miner_key: miner_key.clone(),
+        install_id: install_id.clone(),
+        miner_code: Some("FEM".to_string()),
+        software_version_installed: Some(current_version.to_string()),
+        poc_version_installed: Some("1.0.0".to_string()),
+        hostname: std::env::var("COMPUTERNAME")
+            .ok()
+            .or_else(|| std::env::var("HOSTNAME").ok()),
+        os: Some(std::env::consts::OS.to_string()),
+        is_installed: Some(true),
+        device_name: cfg.device_name.clone(),
+    };
+
+    let heartbeat_ok = match crate::api::installations::register(api_client, &heartbeat).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "Version-change heartbeat failed — will retry on next launch");
+            false
+        }
+    };
+
+    // Best-effort lease action. A failure here doesn't block persisting the
+    // heartbeat success — the regular PoC tick's own lease renewal covers it.
+    let action = crate::api::types::LeaseAction::default();
+    let renew_result = crate::api::leases::renew(api_client, &miner_key, &install_id, &action).await;
+    let lease_ok = match &renew_result {
+        Ok(resp) if resp.granted => true,
+        _ => {
+            match crate::api::leases::acquire(api_client, &miner_key, &install_id, &action).await {
+                Ok(resp) => resp.granted,
+                Err(_) => false,
+            }
+        }
+    };
+    if !lease_ok {
+        tracing::warn!(miner_key = %miner_key, "Version-change lease action did not grant — the next PoC tick will retry");
+    }
+
+    if heartbeat_ok {
+        if let Err(e) =
+            config.update(|c| c.last_reported_version = Some(current_version.to_string()))
+        {
+            tracing::warn!(error = %e, "Failed to persist last_reported_version");
+        }
+    }
+}
+
+/// BUG 11/12 (Discord: "auto-update disconnects the device from the
+/// dashboard, have to touch each device" / rozell 9/03; "config overwritten
+/// on restart" / georgeparis 8/20): a device already on a per-device token
+/// only reported its installed version via the periodic PoC tick, so the
+/// dashboard could show a stale `software_version_installed` for up to a
+/// full tick interval after an update — and if that tick's PUT failed for
+/// any reason, indefinitely, until someone manually re-touched the device.
+/// `should_report_version_change` is the pure decision this launch's startup
+/// hook uses to force an immediate heartbeat + lease action instead of
+/// waiting for the next tick.
+#[cfg(test)]
+mod version_change_tests {
+    use super::should_report_version_change;
+
+    #[test]
+    fn a_version_bump_since_the_last_report_must_report() {
+        assert!(should_report_version_change(Some("0.4.27"), "0.4.28"));
+    }
+
+    #[test]
+    fn the_same_version_as_last_report_must_not_report_again() {
+        assert!(!should_report_version_change(Some("0.4.28"), "0.4.28"));
+    }
+
+    #[test]
+    fn no_prior_report_on_a_registered_device_must_report() {
+        // e.g. a device registered before this field existed.
+        assert!(should_report_version_change(None, "0.4.28"));
+    }
+}

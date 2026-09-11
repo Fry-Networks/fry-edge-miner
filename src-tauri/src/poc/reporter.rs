@@ -172,6 +172,17 @@ pub fn build_poc_doc(
         (healthy_count as f64 / available_count as f64).min(1.0)
     };
 
+    // BUG 13: the slot's `multiplier` is a PASS/FAIL gate signal, not a scaled
+    // proportion. It previously reused `proportion` directly, so a device
+    // running 3 of 9 possible integrations — all of them healthy — submitted
+    // a 0.333 multiplier instead of the full 1.0 its healthy work earned.
+    // `active_count`/`total_count`/`proportion` already carry the partial-
+    // participation figures the dashboard's own breakdown displays
+    // correctly; scaling THIS field by the same ratio double-counted partial
+    // participation into the reward math. Any real, healthy contribution
+    // earns the full gate-pass multiplier.
+    let multiplier = if healthy_count > 0 { 1.0 } else { 0.0 };
+
     // Display fields — enabled-based (unchanged)
     let active_count = registry.enabled_count();
     let active_tools: Vec<String> = registry
@@ -191,7 +202,7 @@ pub fn build_poc_doc(
         poa: gates.poa,
         tools_active: active_tools,
         tools_count: active_count,
-        multiplier: proportion,
+        multiplier,
     };
 
     ApiPocHardwareDoc {
@@ -373,6 +384,41 @@ mod tests {
         let reg = registry_with(&[("a", None), ("b", Some("needs 900 GB"))]);
         let doc = build_poc_doc("FEM-TEST", &reg, &healthy_map(&["a"]));
         assert_eq!(doc.total_count, 2);
+    }
+
+    /// BUG 13 (Discord: dashboard breakdown math was right, but the reward
+    /// multiplier this document actually submits was wrong): 3 of 9 possible
+    /// integrations running, all healthy, must earn the FULL gate-pass
+    /// multiplier — not a 0.333 slice scaled by how many of the 9 are
+    /// running. `proportion` (0.333 here) is the correct, separate figure
+    /// the dashboard's own partial-participation breakdown already uses.
+    #[test]
+    fn three_of_nine_healthy_earns_the_full_multiplier_not_a_third() {
+        let reg = registry_with(&[
+            ("a", None),
+            ("b", None),
+            ("c", None),
+            ("d", None),
+            ("e", None),
+            ("f", None),
+            ("g", None),
+            ("h", None),
+            ("i", None),
+        ]);
+        let doc = build_poc_doc("FEM-TEST", &reg, &healthy_map(&["a", "b", "c"]));
+        assert_eq!(doc.proportion, 3.0 / 9.0, "fixture sanity check — got {}", doc.proportion);
+        assert_eq!(
+            doc.slots[0].multiplier, 1.0,
+            "3 of 9 healthy must earn the full multiplier, got {}",
+            doc.slots[0].multiplier
+        );
+    }
+
+    #[test]
+    fn zero_healthy_earns_no_multiplier() {
+        let reg = registry_with(&[("a", None), ("b", None)]);
+        let doc = build_poc_doc("FEM-TEST", &reg, &HashMap::new());
+        assert_eq!(doc.slots[0].multiplier, 0.0);
     }
 }
 
