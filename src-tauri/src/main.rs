@@ -720,6 +720,10 @@ fn main() {
             let poc_cache_loop = poc_cache.clone();
             let poc_reporting = reporting_status.clone();
             let poc_recovery_at = last_token_recovery.clone();
+            // Commit 3: registration-retry cooldown, same idiom as the 401 one.
+            let last_registration_completion: Arc<RwLock<Option<std::time::Instant>>> =
+                Arc::new(RwLock::new(None));
+            let poc_registration_at = last_registration_completion.clone();
             tauri::async_runtime::spawn(async move {
                 // Verify runtime supports block_in_place — panics at first poll if
                 // current_thread, not 10 min later in the reward path. Same worker
@@ -737,6 +741,24 @@ fn main() {
                 loop {
                     interval.tick().await;
                     let cfg = poc_config.get();
+
+                    // Commit 3: a half-registered device (miner_key present,
+                    // install_id missing) reconciles here, not only at startup.
+                    // Deliberately OUTSIDE the PoC-submission block below: its
+                    // problem has nothing to do with whether the PoC POST
+                    // succeeded, and the 401-recovery path only runs on failure.
+                    if commands::device::should_attempt_registration_completion(
+                        cfg.miner_key.is_some(),
+                        cfg.install_id.is_some(),
+                        *poc_registration_at.read().unwrap(),
+                        std::time::Instant::now(),
+                        commands::device::REGISTRATION_RETRY_COOLDOWN,
+                    ) {
+                        *poc_registration_at.write().unwrap() = Some(std::time::Instant::now());
+                        commands::device::attempt_registration_completion(&poc_config, &poc_client)
+                            .await;
+                    }
+
                     if let Some(ref key) = cfg.miner_key {
                         // --- PoC submission (wrapped in {"document": ...}) ---
                         let health_map = poc::reporter::compute_health_map(&poc_registry);
@@ -1052,4 +1074,80 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running FEM")
+}
+
+/// Commit 3: proof that the registration reconciler is actually WIRED to the
+/// PoC tick, not merely defined.
+///
+/// The pure predicate has had full unit coverage since v0.4.30 (fires after the
+/// cooldown, does not fire before it, does not fire when complete or
+/// unregistered) — re-running those proves nothing about whether anything calls
+/// it. It was dead code for two releases precisely because the predicate was
+/// tested and the call site was missing.
+///
+/// The tick loop cannot be unit-tested (it never returns and owns real I/O), so
+/// this asserts on source. Two traps the first version of this test fell into,
+/// both now closed:
+///   1. it matched its OWN assertion literals, because this file is what it
+///      scans — needles are therefore assembled at runtime from fragments;
+///   2. it matched the STARTUP call, which already existed and is not what this
+///      commit adds — the search is therefore scoped to the PoC tick region.
+#[cfg(test)]
+mod c3_reconciler_wiring_tests {
+    fn code_only(src: &str) -> String {
+        src.lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Everything from the PoC loop's own state binding onwards, with this test
+    /// module itself excluded. The startup reconciler call sits far above this
+    /// marker, so it cannot satisfy the assertions below.
+    fn poc_tick_region() -> String {
+        let code = code_only(include_str!("main.rs"));
+        let start = code
+            .find("let poc_recovery_at")
+            .expect("the PoC loop binds poc_recovery_at");
+        let end = code
+            .find("mod c3_reconciler_wiring_tests")
+            .unwrap_or(code.len());
+        assert!(end > start, "test module must sit after the PoC loop");
+        code[start..end].to_string()
+    }
+
+    #[test]
+    fn the_poc_tick_drives_the_registration_reconciler() {
+        let region = poc_tick_region();
+        let gate = format!("should_attempt_registration{}completion", '_');
+        let call = format!("attempt_registration{}completion(", '_');
+        assert!(
+            region.contains(&gate),
+            "the PoC tick must consult the retry gate, or a half-registered device \
+             only ever reconciles at startup"
+        );
+        assert!(
+            region.contains(&call),
+            "the PoC tick must actually call the reconciler"
+        );
+    }
+
+    /// The gate must be consulted BEFORE the reconciler runs, or the cooldown is
+    /// decorative and every tick POSTs.
+    #[test]
+    fn the_retry_is_rate_limited_by_the_gate() {
+        let region = poc_tick_region();
+        let gate = format!("should_attempt_registration{}completion", '_');
+        let call = format!("attempt_registration{}completion(", '_');
+        let gate_at = region
+            .find(&gate)
+            .expect("gate must be referenced in the tick");
+        let call_at = region
+            .rfind(&call)
+            .expect("reconciler must be called in the tick");
+        assert!(
+            gate_at < call_at,
+            "the cooldown gate must be evaluated before the reconciler is invoked"
+        );
+    }
 }

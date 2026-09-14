@@ -65,6 +65,18 @@ static REGISTRATION_IN_FLIGHT: tokio::sync::Mutex<()> = tokio::sync::Mutex::cons
 /// tuple and return early). Without this it stays stuck until the user
 /// happens to re-run the wizard — the "did not register until after ANOTHER
 /// reboot" report. Reuses the SAME heartbeat shape the other hooks build.
+/// PURE: which `install_id` this retry attempt should use.
+///
+/// Returns the pending id when there is a usable one, otherwise adopts the
+/// freshly generated one. Blank/whitespace counts as absent — POSTing an empty
+/// install_id would put an empty path segment on the request.
+pub fn install_id_for_attempt(pending: Option<&str>, fresh: &str) -> String {
+    match pending.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(p) => p.to_string(),
+        None => fresh.to_string(),
+    }
+}
+
 pub async fn attempt_registration_completion(
     config: &std::sync::Arc<crate::config::store::ConfigStore>,
     api_client: &std::sync::Arc<crate::api::client::ApiClient>,
@@ -77,7 +89,18 @@ pub async fn attempt_registration_completion(
         return false;
     }
 
-    let install_id = generate_install_id();
+    // Reuse the pending id if one is already in flight, so a retry re-upserts
+    // the SAME server document instead of creating another.
+    let install_id =
+        install_id_for_attempt(cfg.pending_install_id.as_deref(), &generate_install_id());
+    if cfg.pending_install_id.as_deref() != Some(install_id.as_str()) {
+        // Persist BEFORE the POST: if the response is lost, the next retry must
+        // still know which id the server may already have seen.
+        let to_store = install_id.clone();
+        if let Err(e) = config.update(|c| c.pending_install_id = Some(to_store.clone())) {
+            tracing::warn!(error = %e, "Could not persist the pending install id — retry may not be idempotent");
+        }
+    }
     let heartbeat = crate::api::types::InstallationHeartbeat {
         miner_key: miner_key.clone(),
         install_id: install_id.clone(),
@@ -98,6 +121,8 @@ pub async fn attempt_registration_completion(
             if config
                 .update(|c| {
                     c.install_id = Some(install_id.clone());
+                    // Promoted: the id is no longer "pending".
+                    c.pending_install_id = None;
                     if let Some(ref t) = token {
                         c.device_token = Some(t.clone());
                     }
@@ -150,20 +175,13 @@ pub fn registration_state(miner_key: Option<&str>, install_id: Option<&str>) -> 
 }
 
 /// How often a half-registered device retries completing its registration.
-/// OUT OF SCOPE — DISCOVERED (v0.4.30 gap, not fixed here):
-/// this cooldown and `should_attempt_registration_completion` below are unused
-/// because v0.4.30 wired `attempt_registration_completion` at STARTUP ONLY and
-/// never to the 60s PoC tick it was designed for. A half-registered device
-/// therefore reconciles once per launch instead of every 10 minutes. Silenced
-/// deliberately rather than deleted, so the designed mechanism is not lost;
-/// wiring it up is a behaviour change that needs its own versioned release.
-#[allow(dead_code)]
+/// How often a half-registered device retries completing its registration.
+/// Driven from the PoC tick, matching the TOKEN_RECOVERY_COOLDOWN idiom.
 pub const REGISTRATION_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// PURE: rate-limited reconciliation gate, mirroring the existing
 /// `should_attempt_recovery` / TOKEN_RECOVERY_COOLDOWN idiom so there is one
 /// retry policy in this file, not two.
-#[allow(dead_code)] // see REGISTRATION_RETRY_COOLDOWN above
 pub fn should_attempt_registration_completion(
     has_miner_key: bool,
     has_install_id: bool,
@@ -1352,5 +1370,55 @@ mod bug10_registration_recovery_tests {
             Some(401),
             "unauthorized"
         ));
+    }
+}
+
+/// Commit 3: a half-registered device now retries on the 60s PoC tick, not only
+/// at startup. That turns a one-shot into a loop, which makes the identity of
+/// the retry matter.
+///
+/// hardwareapi's `upsert_installation` is keyed on `{miner_key, install_id}`, so
+/// a fresh id per attempt is a DIFFERENT document. If the server succeeds but the
+/// response is lost, the next retry would create another row — once per 10
+/// minutes, per device, indefinitely. The retry must reuse one pending id so the
+/// POST is idempotent server-side.
+#[cfg(test)]
+mod c3_retry_identity_tests {
+    use super::*;
+
+    #[test]
+    fn a_pending_install_id_is_reused_rather_than_regenerated() {
+        let fresh = "fresh-id-should-not-win";
+        assert_eq!(
+            install_id_for_attempt(Some("pending-abc"), fresh),
+            "pending-abc",
+            "a retry must re-upsert the SAME server document, not create a new one"
+        );
+    }
+
+    #[test]
+    fn the_first_attempt_adopts_the_freshly_generated_id() {
+        assert_eq!(install_id_for_attempt(None, "fresh-abc"), "fresh-abc");
+    }
+
+    /// A blank or whitespace pending value is not a usable id — treat it as
+    /// absent rather than POSTing an empty install_id into the path.
+    #[test]
+    fn a_blank_pending_id_is_treated_as_absent() {
+        assert_eq!(install_id_for_attempt(Some(""), "fresh"), "fresh");
+        assert_eq!(install_id_for_attempt(Some("   "), "fresh"), "fresh");
+    }
+
+    /// Two consecutive retries with the same pending value must produce the
+    /// same id — this is the whole point.
+    #[test]
+    fn repeated_retries_all_target_one_document() {
+        let ids: Vec<String> = (0..5)
+            .map(|i| install_id_for_attempt(Some("stable-id"), &format!("fresh-{i}")))
+            .collect();
+        assert!(
+            ids.iter().all(|id| id == "stable-id"),
+            "every retry must reuse the pending id, got {ids:?}"
+        );
     }
 }

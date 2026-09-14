@@ -65,6 +65,17 @@ pub struct FemConfig {
     /// to the default on any problem.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_dir: Option<String>,
+    /// Commit 3: the `install_id` a half-registered device is currently trying
+    /// to register under.
+    ///
+    /// `upsert_installation` on hardwareapi is keyed on `{miner_key, install_id}`,
+    /// so a fresh id per retry creates a NEW document every time. Now that the
+    /// reconciler runs on the 60s PoC tick rather than only at startup, a lost
+    /// response would otherwise accrue one orphan installation row per retry,
+    /// per device, indefinitely. Holding the id here makes every retry
+    /// re-upsert the same row. Cleared once registration completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_install_id: Option<String>,
     /// B3: every key in fem_config.json this build does not recognise.
     ///
     /// `ConfigStore` saves by serializing this whole struct over the file, so
@@ -118,6 +129,7 @@ impl Default for FemConfig {
             last_reported_version: None,
             hardening_applied_version: None,
             storage_dir: None,
+            pending_install_id: None,
             extra: serde_json::Map::new(),
         }
     }
