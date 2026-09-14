@@ -60,6 +60,10 @@ jobs:
         shell: bash
         run: |
           npm test
+          # `tauri::generate_context!` reads frontendDist at COMPILE time, so the
+          # Rust tests cannot build until dist/ exists. `cargo tauri build` below
+          # runs this again via beforeBuildCommand; it takes ~2s and is idempotent.
+          npm run build
           cd src-tauri && cargo test --release -- --test-threads=1
 
       - name: Invalidate cached option_env! artifacts
