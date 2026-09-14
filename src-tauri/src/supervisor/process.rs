@@ -119,13 +119,59 @@ pub struct ManagedProcess {
     pub log_dir: PathBuf,
 }
 
+/// BUG 9: the working directory a managed partner runs in.
+///
+/// Partner binaries create their own state under RELATIVE paths (frynode's
+/// `node-identity` is the reported case), so the inherited CWD decides where
+/// that state lands. Giving each integration its own directory under the
+/// partners root keeps it (a) always writable by a non-elevated user and
+/// (b) namespaced, so two partners can never collide on the same relative name.
+pub fn working_dir_for(integration_id: &str, partners_base: &Path) -> PathBuf {
+    partners_base.join(integration_id)
+}
+
 impl ManagedProcess {
-    /// Spawn a new child process with stdout/stderr redirected to log files
+    /// Spawn a new child process with stdout/stderr redirected to log files.
+    ///
+    /// Preserved verbatim as the no-working-directory form so existing callers
+    /// and tests keep their exact behaviour; see `spawn_in`.
     pub fn spawn(
         integration_id: &str,
         command: &str,
         args: &[&str],
         log_dir: &Path,
+    ) -> io::Result<Self> {
+        Self::spawn_in(integration_id, command, args, log_dir, None)
+    }
+
+    /// Spawn with an explicit working directory (BUG 9).
+    ///
+    /// `cwd == None` reproduces the historic behaviour exactly: the child
+    /// inherits FEM's own CWD. `Some(dir)` creates `dir` if needed and runs the
+    /// child there.
+    pub fn spawn_in(
+        integration_id: &str,
+        command: &str,
+        args: &[&str],
+        log_dir: &Path,
+        cwd: Option<&Path>,
+    ) -> io::Result<Self> {
+        Self::spawn_full(integration_id, command, args, log_dir, cwd, &[])
+    }
+
+    /// Spawn with an explicit working directory AND extra environment.
+    ///
+    /// BUG 6: frynode takes its node identity via `NODE_MNEMONIC`. Secrets go
+    /// in the environment, never in `args` — argv is world-readable through
+    /// `tasklist`/WMI, and `diiisco.rs` already established `.env(...)` as the
+    /// pattern for exactly this value.
+    pub fn spawn_full(
+        integration_id: &str,
+        command: &str,
+        args: &[&str],
+        log_dir: &Path,
+        cwd: Option<&Path>,
+        env: &[(&str, &str)],
     ) -> io::Result<Self> {
         std::fs::create_dir_all(log_dir)?;
         let stdout_path = log_dir.join(format!("{}_stdout.log", integration_id));
@@ -139,14 +185,42 @@ impl ManagedProcess {
             "Spawning process"
         );
 
+        // BUG 9: create the working directory before the spawn, so a partner
+        // that writes a relative path on its very first tick cannot lose the
+        // race. Failure to create it is NOT fatal — falling back to the
+        // inherited CWD is exactly the pre-fix behaviour, which is strictly
+        // better than refusing to start the integration at all.
+        let cwd_owned: Option<PathBuf> = cwd.and_then(|dir| match std::fs::create_dir_all(dir) {
+            Ok(()) => Some(dir.to_path_buf()),
+            Err(e) => {
+                warn!(
+                    integration = integration_id,
+                    path = ?dir,
+                    error = %e,
+                    "Could not create working directory — falling back to the inherited one"
+                );
+                None
+            }
+        });
+
         let command_owned = command.to_string();
         let args_owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let env_owned: Vec<(String, String)> = env
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
         let child = spawn_bounded(integration_id, SPAWN_TIMEOUT, move || {
-            super::platform::command(&command_owned)
-                .args(&args_owned)
+            let mut cmd = super::platform::command(&command_owned);
+            for (k, v) in &env_owned {
+                cmd.env(k, v);
+            }
+            cmd.args(&args_owned)
                 .stdout(Stdio::from(stdout_file))
-                .stderr(Stdio::from(stderr_file))
-                .spawn()
+                .stderr(Stdio::from(stderr_file));
+            if let Some(ref dir) = cwd_owned {
+                cmd.current_dir(dir);
+            }
+            cmd.spawn()
         })?;
 
         Ok(Self {
@@ -441,5 +515,106 @@ mod wp6_spawn_tests {
         }
         eprintln!("deadline race: {returned} returned to the caller, {timed_out} timed out, {} leaked", leaked.len());
         assert!(leaked.is_empty(), "children left running after spawn_bounded: {leaked:?}");
+    }
+}
+
+/// BUG 9 (RailgunDude): frynode reported
+/// `failed to create identity: mkdir node-identity: Access is denied`.
+///
+/// `node-identity` is a RELATIVE path created by the partner binary itself, so
+/// it lands in whatever working directory the child inherits. `ManagedProcess`
+/// never set one, so every supervisor-managed partner inherited FEM's own CWD —
+/// `C:\Windows\System32` when FEM is launched from its `Run` key, which a
+/// non-elevated user cannot write to.
+///
+/// The fix gives every managed child an explicit, always-user-writable working
+/// directory of its own. These tests spawn REAL children and read back the
+/// directory the child actually resolved, rather than asserting on the argv we
+/// intended to pass.
+#[cfg(test)]
+mod bug9_working_dir_tests {
+    use super::*;
+
+    /// Each integration gets its own directory under the partners root, so two
+    /// partners can never race on a relative path with the same name.
+    #[test]
+    fn each_integration_gets_its_own_working_directory() {
+        let base = Path::new(r"D:\FryEdgeMiner\partners");
+        assert_eq!(working_dir_for("fryvpn", base), base.join("fryvpn"));
+        assert_eq!(working_dir_for("titan", base), base.join("titan"));
+        assert_ne!(working_dir_for("fryvpn", base), working_dir_for("titan", base));
+    }
+
+    /// The headline regression test. Spawns a real child that prints its own
+    /// working directory, then reads it back out of the stdout log the
+    /// supervisor already redirects. Pre-fix this reports FEM's own CWD.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_spawned_child_runs_in_the_directory_we_gave_it_not_fems_cwd() {
+        let root = std::env::temp_dir().join(format!("fem-bug9-{}", std::process::id()));
+        let cwd = root.join("partner-home");
+        let log_dir = root.join("logs");
+        std::fs::create_dir_all(&cwd).expect("test cwd");
+
+        // Prove the fixture is meaningful: the directory we are about to hand
+        // the child must NOT be where this test process is already running,
+        // or the assertion below could pass by coincidence.
+        let our_cwd = std::env::current_dir().expect("cwd");
+        assert_ne!(
+            our_cwd.canonicalize().ok(),
+            cwd.canonicalize().ok(),
+            "fixture is degenerate: the child's target dir is already our own CWD"
+        );
+
+        let mut proc = ManagedProcess::spawn_in(
+            "bug9-probe",
+            "cmd",
+            &["/C", "cd"],
+            &log_dir,
+            Some(cwd.as_path()),
+        )
+        .expect("spawn should succeed");
+        let _ = proc.child.wait();
+
+        let logged = std::fs::read_to_string(log_dir.join("bug9-probe_stdout.log"))
+            .expect("stdout log must exist");
+        let reported = logged.trim();
+
+        let expected = cwd.canonicalize().expect("canonicalize target");
+        let actual = Path::new(reported)
+            .canonicalize()
+            .unwrap_or_else(|e| panic!("child reported {reported:?}, not a real path: {e}"));
+
+        assert_eq!(
+            actual, expected,
+            "BUG 9: child ran in {reported:?} instead of the directory it was given"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A caller that passes no directory keeps the historic behaviour, so the
+    /// four pre-existing spawn tests and any future bare-name command on PATH
+    /// are unaffected.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn passing_no_directory_leaves_the_inherited_cwd_untouched() {
+        let root = std::env::temp_dir().join(format!("fem-bug9-none-{}", std::process::id()));
+        let log_dir = root.join("logs");
+
+        let mut proc = ManagedProcess::spawn_in("bug9-none", "cmd", &["/C", "cd"], &log_dir, None)
+            .expect("spawn should succeed");
+        let _ = proc.child.wait();
+
+        let logged = std::fs::read_to_string(log_dir.join("bug9-none_stdout.log"))
+            .expect("stdout log must exist");
+        let reported = Path::new(logged.trim())
+            .canonicalize()
+            .expect("child reported a real path");
+        let ours = std::env::current_dir().expect("cwd").canonicalize().expect("canonicalize");
+
+        assert_eq!(reported, ours, "no directory given must mean no change");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

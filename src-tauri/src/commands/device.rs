@@ -23,7 +23,13 @@ pub struct DeviceInfo {
     pub miner_key: Option<String>,
     pub wallet_address: Option<String>,
     pub device_name: Option<String>,
+    /// Unchanged meaning: `miner_key.is_some()`. Tightening this would route a
+    /// half-registered device back into the Wizard (BUG 10/RC4).
     pub registered: bool,
+    /// BUG 10/RC4: true only when the server confirmed an installation. The UI
+    /// uses this to show "finishing registration" instead of silently
+    /// pretending a half-registered device is done.
+    pub registration_complete: bool,
 }
 
 fn generate_install_id() -> String {
@@ -52,6 +58,137 @@ static REGISTRATION_IN_FLIGHT: tokio::sync::Mutex<()> = tokio::sync::Mutex::cons
 /// succeeded, or a deregistration — the snapshot is stale and restoring it
 /// would destroy the newer binding. Belt-and-braces behind the in-flight lock
 /// above, which is what actually serializes the common case.
+/// BUG 10/RC4: finish a registration that was left half-done.
+///
+/// A device with a miner key but no `install_id` is invisible to every other
+/// recovery hook in this file (they all match on the `(miner_key, install_id)`
+/// tuple and return early). Without this it stays stuck until the user
+/// happens to re-run the wizard — the "did not register until after ANOTHER
+/// reboot" report. Reuses the SAME heartbeat shape the other hooks build.
+pub async fn attempt_registration_completion(
+    config: &std::sync::Arc<crate::config::store::ConfigStore>,
+    api_client: &std::sync::Arc<crate::api::client::ApiClient>,
+) -> bool {
+    let cfg = config.get();
+    let Some(miner_key) = cfg.miner_key.clone() else {
+        return false;
+    };
+    if cfg.install_id.is_some() {
+        return false;
+    }
+
+    let install_id = generate_install_id();
+    let heartbeat = crate::api::types::InstallationHeartbeat {
+        miner_key: miner_key.clone(),
+        install_id: install_id.clone(),
+        miner_code: Some("FEM".to_string()),
+        software_version_installed: Some(env!("CARGO_PKG_VERSION").to_string()),
+        poc_version_installed: Some("1.0.0".to_string()),
+        hostname: std::env::var("COMPUTERNAME")
+            .ok()
+            .or_else(|| std::env::var("HOSTNAME").ok()),
+        os: Some(std::env::consts::OS.to_string()),
+        is_installed: Some(true),
+        device_name: cfg.device_name.clone(),
+    };
+
+    match crate::api::installations::register(api_client, &heartbeat).await {
+        Ok(response) => {
+            let token = response.device_token.clone();
+            if config
+                .update(|c| {
+                    c.install_id = Some(install_id.clone());
+                    if let Some(ref t) = token {
+                        c.device_token = Some(t.clone());
+                    }
+                })
+                .is_err()
+            {
+                return false;
+            }
+            if let Some(t) = token {
+                api_client.set_bearer_token(t);
+            }
+            tracing::info!(
+                miner_key = miner_key.as_str(),
+                "Half-registered device reconciled — registration completed"
+            );
+            crate::events::emit("device-registration-completed", serde_json::json!({}));
+            true
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Registration completion attempt failed — will retry");
+            false
+        }
+    }
+}
+
+/// BUG 10/RC4: how completely is this device registered?
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistrationState {
+    /// No miner key at all.
+    Unregistered,
+    /// A miner key exists but the server never confirmed an installation, so
+    /// `install_id` was never persisted. Every startup recovery hook — and
+    /// `deregister_device` — is gated on `install_id`, so this device has no
+    /// self-service way out.
+    Pending,
+    /// Key AND install id present.
+    Complete,
+}
+
+/// PURE. `registered` is derived as `state != Unregistered`, which is
+/// BIT-IDENTICAL to the historic `miner_key.is_some()` rule — deliberately so.
+/// Tightening `registered` would route a half-registered device back into the
+/// Wizard, re-introducing the "keys and wallet go missing" regression class.
+pub fn registration_state(
+    miner_key: Option<&str>,
+    install_id: Option<&str>,
+) -> RegistrationState {
+    match (miner_key, install_id) {
+        (None, _) => RegistrationState::Unregistered,
+        (Some(_), None) => RegistrationState::Pending,
+        (Some(_), Some(_)) => RegistrationState::Complete,
+    }
+}
+
+/// How often a half-registered device retries completing its registration.
+pub const REGISTRATION_RETRY_COOLDOWN: std::time::Duration =
+    std::time::Duration::from_secs(600);
+
+/// PURE: rate-limited reconciliation gate, mirroring the existing
+/// `should_attempt_recovery` / TOKEN_RECOVERY_COOLDOWN idiom so there is one
+/// retry policy in this file, not two.
+pub fn should_attempt_registration_completion(
+    has_miner_key: bool,
+    has_install_id: bool,
+    last_attempt: Option<std::time::Instant>,
+    now: std::time::Instant,
+    cooldown: std::time::Duration,
+) -> bool {
+    if !has_miner_key || has_install_id {
+        return false;
+    }
+    match last_attempt {
+        None => true,
+        Some(at) => now.duration_since(at) >= cooldown,
+    }
+}
+
+/// PURE: does this registration error mean the SERVER already holds this
+/// binding, so wiping the local key would trap the user in the Wizard?
+///
+/// `IP_ALREADY_REGISTERED` is deliberately excluded: that means a DIFFERENT
+/// device owns the IP slot, so this key genuinely did not register and the
+/// rollback is correct.
+pub fn conflict_means_keep_local_binding(status: Option<u16>, body: &str) -> bool {
+    let lower = body.to_lowercase();
+    if lower.contains("ip_already_registered") {
+        return false;
+    }
+    status == Some(409) || lower.contains("already registered")
+}
+
 pub fn should_restore_snapshot(current_key: Option<&str>, this_attempt_key: &str) -> bool {
     current_key == Some(this_attempt_key)
 }
@@ -127,7 +264,12 @@ pub async fn get_device_info(
     }
 
     Ok(DeviceInfo {
-        registered: miner_key.is_some(),
+        registered: registration_state(miner_key.as_deref(), config.install_id.as_deref())
+            != RegistrationState::Unregistered,
+        registration_complete: registration_state(
+            miner_key.as_deref(),
+            config.install_id.as_deref(),
+        ) == RegistrationState::Complete,
         miner_key,
         wallet_address: wallet,
         device_name: config.device_name.clone(),
@@ -273,9 +415,26 @@ pub async fn register_device(
             Ok(miner_key)
         }
         Err(e) => {
-            // Restore prior state on registration failure — but only if this
-            // attempt's key is still the one on disk (B1).
-            if should_restore_snapshot(state.config.get().miner_key.as_deref(), &miner_key) {
+            // BUG 10/RC4: a 409 / "already registered" means the SERVER already
+            // holds this binding. Wiping the local key there sends the user back
+            // to the Wizard to retype the same key and get the same 409 — and
+            // the advice to "open Settings" is unreachable because the Wizard
+            // owns the whole screen. Keep the binding so the reconciler and
+            // Settings can take over. An IP conflict is excluded: that is a
+            // different device owning the slot, where rollback IS correct.
+            let keep_binding = conflict_means_keep_local_binding(
+                api_error_status(&e),
+                &e.to_string(),
+            );
+            if keep_binding {
+                tracing::warn!(
+                    miner_key = miner_key.as_str(),
+                    "Server reports this device is already registered — keeping the local binding"
+                );
+            }
+            if !keep_binding
+                && should_restore_snapshot(state.config.get().miner_key.as_deref(), &miner_key)
+            {
                 state
                     .config
                     .update(|cfg| {
@@ -1012,5 +1171,99 @@ mod version_change_tests {
     fn no_prior_report_on_a_registered_device_must_report() {
         // e.g. a device registered before this field existed.
         assert!(should_report_version_change(None, "0.4.28"));
+    }
+}
+
+/// BUG 10 / RC4 (RailgunDude): "On reinstall + miner-key entry, the device did
+/// not register until after ANOTHER reboot."
+///
+/// Two compounding traps.
+///
+/// (1) HALF-REGISTRATION. `register_device` writes `miner_key` BEFORE the API
+/// call but persists `install_id` only on success. `DeviceInfo.registered` is
+/// `miner_key.is_some()`, and `App.tsx` uses exactly that to choose AppShell
+/// over Wizard — so after a failed first registration the wizard never comes
+/// back, while all three startup recovery hooks AND `deregister_device` are
+/// gated on `install_id.is_some()` and return early. The device is stuck with
+/// no self-service exit at all.
+///
+/// (2) THE 409 TRAP. On a reinstall the server returns 409 / "already
+/// registered" for the key the user just re-entered. That is non-retryable, so
+/// the error arm rolls `miner_key` back to `None`, which puts the user back in
+/// the Wizard to retype the same key and get the same 409. The error text says
+/// "Open Settings to confirm your miner key" — but Settings is unreachable,
+/// because the Wizard owns the whole screen. Independently corroborated: a peer
+/// measured 485 `main.devices` rows with `is_registered:true` and NO address,
+/// which is exactly the population that answers ALREADY_REGISTERED.
+#[cfg(test)]
+mod bug10_registration_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn a_key_without_an_install_id_is_pending_not_complete() {
+        assert_eq!(registration_state(Some("FEM-A"), None), RegistrationState::Pending);
+        assert_eq!(registration_state(Some("FEM-A"), Some("i-1")), RegistrationState::Complete);
+        assert_eq!(registration_state(None, None), RegistrationState::Unregistered);
+        // A stray install_id with no key is not a registration.
+        assert_eq!(registration_state(None, Some("i-1")), RegistrationState::Unregistered);
+    }
+
+    /// SAFETY NET: `registered` must stay bit-identical to the old rule, or a
+    /// half-registered device gets routed back into the Wizard — the exact
+    /// regression class `resolve_stored_miner_key` and `should_restore_snapshot`
+    /// were written to fix.
+    #[test]
+    fn the_registered_flag_is_bit_identical_to_the_old_rule() {
+        for (k, i) in [
+            (None, None),
+            (None, Some("i")),
+            (Some("FEM-A"), None),
+            (Some("FEM-A"), Some("i")),
+        ] {
+            let old_rule = k.is_some();
+            assert_eq!(
+                registration_state(k, i) != RegistrationState::Unregistered,
+                old_rule,
+                "registered must not change meaning for ({k:?}, {i:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_half_registered_device_is_reconciled_after_the_cooldown() {
+        let now = std::time::Instant::now();
+        let cooldown = std::time::Duration::from_secs(600);
+        // Never attempted -> go now.
+        assert!(should_attempt_registration_completion(true, false, None, now, cooldown));
+        // Just attempted -> wait.
+        assert!(!should_attempt_registration_completion(true, false, Some(now), now, cooldown));
+        // Cooldown elapsed -> go again.
+        assert!(should_attempt_registration_completion(
+            true, false, Some(now - cooldown - std::time::Duration::from_secs(1)), now, cooldown
+        ));
+    }
+
+    #[test]
+    fn a_complete_or_unregistered_device_is_never_reconciled() {
+        let now = std::time::Instant::now();
+        let cooldown = std::time::Duration::from_secs(600);
+        assert!(!should_attempt_registration_completion(true, true, None, now, cooldown));
+        assert!(!should_attempt_registration_completion(false, false, None, now, cooldown));
+    }
+
+    #[test]
+    fn an_already_registered_conflict_keeps_the_local_binding() {
+        assert!(conflict_means_keep_local_binding(Some(409), ""));
+        assert!(conflict_means_keep_local_binding(Some(400), "device already registered"));
+        assert!(conflict_means_keep_local_binding(None, "Already Registered"));
+    }
+
+    /// An IP conflict is a DIFFERENT device owning the slot — this key genuinely
+    /// did not register, so rolling back is correct there.
+    #[test]
+    fn an_ip_conflict_still_rolls_back() {
+        assert!(!conflict_means_keep_local_binding(Some(409), "IP_ALREADY_REGISTERED"));
+        assert!(!conflict_means_keep_local_binding(Some(500), "internal error"));
+        assert!(!conflict_means_keep_local_binding(Some(401), "unauthorized"));
     }
 }

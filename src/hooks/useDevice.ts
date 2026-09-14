@@ -57,6 +57,11 @@ export function useDevice() {
         await fetch()
         return result
       } catch (e) {
+        // BUG 10/RC4: re-read device state before rethrowing. On a 409 the
+        // backend now KEEPS the local binding, but without this refetch
+        // `device` stays stale and App.tsx never re-evaluates Wizard vs
+        // AppShell — leaving the user retyping the same key forever.
+        await fetch().catch(() => {})
         setError(extractErrorMessage(e))
         throw e
       }

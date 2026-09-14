@@ -52,6 +52,16 @@ jobs:
         # an incomplete expression"), breaking a build whose app code was fine.
         run: cargo install tauri-cli --version "^2" --locked
 
+      # The repo's tripwire tests (MSI fail-closed gate, elevation hygiene,
+      # bundle targets) only have value if something runs them. Single-threaded
+      # because two pre-existing fryvpn tests mutate the same process-global
+      # env var and race each other under the default parallel runner.
+      - name: Run tests
+        shell: bash
+        run: |
+          npm test
+          cd src-tauri && cargo test --release -- --test-threads=1
+
       - name: Invalidate cached option_env! artifacts
         run: |
           touch src-tauri/src/config/mod.rs
@@ -91,20 +101,6 @@ jobs:
         with:
           name: fem-installer-nsis-sig
           path: src-tauri/target/release/bundle/nsis/*_${{ env.APP_VERSION }}_*-setup.exe.sig
-          if-no-files-found: error
-
-      - name: Upload MSI installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: fem-installer-msi
-          path: src-tauri/target/release/bundle/msi/*_${{ env.APP_VERSION }}_*.msi
-          if-no-files-found: error
-
-      - name: Upload MSI .sig
-        uses: actions/upload-artifact@v4
-        with:
-          name: fem-installer-msi-sig
-          path: src-tauri/target/release/bundle/msi/*_${{ env.APP_VERSION }}_*.msi.sig
           if-no-files-found: error
 
       - name: Compose latest.json
@@ -172,6 +168,4 @@ jobs:
           files: |
             fem-installer-nsis/*.exe
             fem-installer-nsis-sig/*.sig
-            fem-installer-msi/*.msi
-            fem-installer-msi-sig/*.sig
             fem-latest-json/latest.json

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Info, Key, Monitor, Shield, Wallet } from 'lucide-react'
+import { ExternalLink, HardDrive, Info, Key, Monitor, Shield, Wallet } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import Btn from '../components/primitives/Btn'
 import CopyField from '../components/primitives/CopyField'
@@ -14,6 +14,13 @@ import { useDevice } from '../hooks/useDevice'
 import { useRewards } from '../hooks/useRewards'
 import { APP_VERSION } from '../lib/version'
 import { shouldShowSavedMinerKey } from '../lib/settingsView'
+import { deriveRegistrationBadge, registrationLabel } from '../lib/registrationState'
+import {
+  formatFreeSpace,
+  driveLabel,
+  STORAGE_CHANGE_CONFIRM,
+  type StorageLocation,
+} from '../lib/storageLocation'
 import { deriveRewardDisplay } from '../lib/rewardReadiness'
 import {
   DEREGISTER_CONFIRM,
@@ -72,6 +79,16 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
   const [auto, setAuto] = useState(true)
   const [notif, setNotif] = useState(true)
   const [config, setConfig] = useState<FemConfig | null>(null)
+  // BUG 2: the wallet was render-only once registered, so a typo at setup was permanent.
+  const [walletEditing, setWalletEditing] = useState(false)
+  const [walletDraft, setWalletDraft] = useState('')
+  const [walletError, setWalletError] = useState('')
+  const [walletSaving, setWalletSaving] = useState(false)
+  // BUG 1/4: storage location.
+  const [storage, setStorage] = useState<StorageLocation | null>(null)
+  const [storageDraft, setStorageDraft] = useState('')
+  const [storageError, setStorageError] = useState('')
+  const [storageSaving, setStorageSaving] = useState(false)
   const [regKey, setRegKey] = useState('')
   const [regWallet, setRegWallet] = useState('')
   const [regError, setRegError] = useState('')
@@ -130,6 +147,66 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
     }
   }
 
+  // BUG 1/4: load the storage location alongside settings.
+  useEffect(() => {
+    safeInvoke<StorageLocation>('get_storage_location')
+      .then((loc) => {
+        setStorage(loc)
+        setStorageDraft(loc.path)
+      })
+      .catch(() => setStorage(null))
+  }, [])
+
+  const refreshConfig = async () => {
+    const cfg = await safeInvoke<FemConfig>('get_settings').catch(() => null)
+    if (cfg) setConfig(cfg)
+  }
+
+  // BUG 2: save the wallet locally. There is deliberately no backend write —
+  // payout authority lives on the dashboard and is session-gated.
+  const handleWalletSave = async () => {
+    const next = walletDraft.trim().toUpperCase()
+    setWalletError('')
+    if (next.length !== 58 || !/^[A-Z2-7]+$/.test(next)) {
+      setWalletError('Enter a valid 58-character Algorand address.')
+      return
+    }
+    setWalletSaving(true)
+    try {
+      await safeInvoke('set_wallet_address', { address: next })
+      // The old page never re-read get_settings after a change, so the
+      // displayed value stayed stale until a remount.
+      await refreshConfig()
+      setWalletEditing(false)
+    } catch (e) {
+      setWalletError(extractErrorMessage(e))
+    } finally {
+      setWalletSaving(false)
+    }
+  }
+
+  const handleStorageSave = async (useDefault: boolean) => {
+    setStorageError('')
+    const target = useDefault ? null : storageDraft.trim()
+    if (!useDefault && !target) {
+      setStorageError('Enter a full path beginning with a drive letter, for example D:\FryEdgeMiner.')
+      return
+    }
+    const from = storage?.path ?? 'the current location'
+    if (!window.confirm(STORAGE_CHANGE_CONFIRM(from, target ?? 'the default location'))) return
+    setStorageSaving(true)
+    try {
+      const loc = await safeInvoke<StorageLocation>('set_storage_location', { path: target })
+      setStorage(loc)
+      setStorageDraft(loc.path)
+      await refreshConfig()
+    } catch (e) {
+      setStorageError(extractErrorMessage(e))
+    } finally {
+      setStorageSaving(false)
+    }
+  }
+
   const handleRegister = async () => {
     setRegError('')
     setRegLoading(true)
@@ -161,6 +238,9 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
   }
 
   const isRegistered = device?.registered ?? false
+  // BUG 10/RC4: a device with a miner key but no server-confirmed install id
+  // used to render as fully "Registered" while silently doing nothing.
+  const regBadge = deriveRegistrationBadge(device)
 
   return (
     <div className="sc" style={{ padding: '20px 24px', overflowY: 'auto', height: '100%' }}>
@@ -185,8 +265,21 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               {isRegistered ? (
                 <>
-                  <Shield size={13} color="var(--teal)" strokeWidth={2.5} />
-                  <span style={{ fontFamily: 'var(--fb)', fontSize: 13, color: 'var(--teal)' }}>Registered</span>
+                  <Shield
+                    size={13}
+                    color={regBadge === 'finishing' ? 'var(--amb)' : 'var(--teal)'}
+                    strokeWidth={2.5}
+                  />
+                  <span
+                    data-testid="registration-badge"
+                    style={{
+                      fontFamily: 'var(--fb)',
+                      fontSize: 13,
+                      color: regBadge === 'finishing' ? 'var(--amb)' : 'var(--teal)',
+                    }}
+                  >
+                    {registrationLabel(regBadge)}
+                  </span>
                   <span style={{ fontFamily: 'var(--fm)', fontSize: 10, color: 'var(--t2)' }}>{stakeReady ? `${stakeLabel}${stakeLabel.toLowerCase().includes('stake') ? '' : ' stake'}` : 'Stake info loading…'}</span>
                 </>
               ) : (
@@ -274,7 +367,61 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
 
       <SettingSection Icon={Wallet} ico="var(--amb)" label="Reward Wallet">
         <Lbl sx={{ marginBottom: 6 }}>Algorand Address</Lbl>
-        <CopyField val={config?.wallet_address ?? ''} />
+        {walletEditing ? (
+          <>
+            <input
+              className="inp"
+              value={walletDraft}
+              onChange={(e) => setWalletDraft(e.target.value.toUpperCase())}
+              placeholder="Your 58-character Algorand address…"
+              spellCheck={false}
+              data-testid="wallet-edit-input"
+              style={{ width: '100%', marginBottom: 8 }}
+            />
+            {walletError && (
+              <div style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--red)', marginBottom: 8 }}>
+                {walletError}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <Btn v="p" onClick={handleWalletSave} disabled={walletSaving || walletDraft.trim().length !== 58}>
+                {walletSaving ? 'Saving…' : 'Save'}
+              </Btn>
+              <Btn v="g" onClick={() => { setWalletEditing(false); setWalletError('') }}>Cancel</Btn>
+            </div>
+          </>
+        ) : (
+          <>
+            <CopyField val={config?.wallet_address ?? ''} />
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <Btn
+                v="g"
+                onClick={() => {
+                  setWalletDraft(config?.wallet_address ?? '')
+                  setWalletError('')
+                  setWalletEditing(true)
+                }}
+              >
+                Edit
+              </Btn>
+            </div>
+            <div style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t2)', marginTop: 10, lineHeight: 1.5 }}>
+              This address is stored on this device. Rewards are paid to the wallet on your Fry
+              Networks dashboard account — change it there to change where you get paid.
+            </div>
+            <a
+              href="https://dashboard.frynetworks.com/devices"
+              target="_blank"
+              rel="noreferrer"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 5, marginTop: 8,
+                fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--teal)', textDecoration: 'none',
+              }}
+            >
+              Change payout wallet <ExternalLink size={11} />
+            </a>
+          </>
+        )}
         {isRegistered && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 10 }}>
             <Shield size={12} color="var(--teal)" />
@@ -282,6 +429,48 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
             <span style={{ fontFamily: 'var(--fm)', fontSize: 12, color: 'var(--teal)' }}>{stakeMultiplierLabel}</span>
           </div>
         )}
+      </SettingSection>
+
+      <SettingSection Icon={HardDrive} ico="var(--teal)" label="Storage Location">
+        <Lbl sx={{ marginBottom: 6 }}>Where partner data is stored</Lbl>
+        <CopyField val={storage?.path ?? ''} />
+        <div style={{ fontFamily: 'var(--fm)', fontSize: 12, color: 'var(--t2)', marginTop: 6 }}>
+          {formatFreeSpace(storage?.free_gb ?? null)}
+          {driveLabel(storage?.path) ? ` on ${driveLabel(storage?.path)}` : ''}
+        </div>
+        {storage?.pending_restart && (
+          <div style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--amb)', marginTop: 8 }}>
+            Restart Fry Edge Miner to start using this location.
+          </div>
+        )}
+        <div style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t2)', marginTop: 10, lineHeight: 1.5 }}>
+          Storage integrations (Iagon, Storj, Space Acres) size and write here. Point this at a
+          bigger drive if this one is short on space.
+        </div>
+        <input
+          className="inp"
+          value={storageDraft}
+          onChange={(e) => setStorageDraft(e.target.value)}
+          placeholder="D:\FryEdgeMiner"
+          spellCheck={false}
+          data-testid="storage-path-input"
+          style={{ width: '100%', marginTop: 10, marginBottom: 8 }}
+        />
+        {storageError && (
+          <div style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--red)', marginBottom: 8 }}>
+            {storageError}
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Btn v="p" onClick={() => handleStorageSave(false)} disabled={storageSaving}>
+            {storageSaving ? 'Checking…' : 'Change location'}
+          </Btn>
+          {storage && !storage.is_default && (
+            <Btn v="g" onClick={() => handleStorageSave(true)} disabled={storageSaving}>
+              Use default
+            </Btn>
+          )}
+        </div>
       </SettingSection>
 
       <SettingSection Icon={Monitor} ico="var(--blu)" label="Preferences">

@@ -2,8 +2,17 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{info, warn};
 
-/// Get the base directory for FEM partner binaries
-pub fn partners_base_dir() -> PathBuf {
+/// BUG 1/4: the storage root, resolved ONCE at startup and never mutated.
+///
+/// `OnceLock`, deliberately not `RwLock`: if the root could flip mid-run,
+/// `installed_version()` would start returning `None` and
+/// `commands/integration.rs` would reinstall on top of a live partner, and
+/// Iagon's node token would vanish from under a running node. A change
+/// therefore takes effect on the next launch.
+static STORAGE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The historic location — verbatim the pre-fix body of `partners_base_dir`.
+pub fn default_partners_base_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| {
             #[cfg(windows)]
@@ -15,6 +24,56 @@ pub fn partners_base_dir() -> PathBuf {
         })
         .join("FryEdgeMiner")
         .join("partners")
+}
+
+/// PURE: the whole override decision, testable with no disk and no globals.
+///
+/// An unset / blank / whitespace-only value all mean "use the historic
+/// location", so every existing install is byte-for-byte unaffected.
+pub fn resolve_partners_base_dir(configured: Option<&str>, default: PathBuf) -> PathBuf {
+    match configured.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(p) => crate::storage_location::storage_root_for(p),
+        None => default,
+    }
+}
+
+/// Called EXACTLY once, from `main.rs` setup, BEFORE the registry is built.
+/// Validates; on any problem logs and falls back to the historic location
+/// rather than bricking the app. Returns the root actually chosen.
+pub fn init_storage_root(configured: Option<&str>) -> PathBuf {
+    let default = default_partners_base_dir();
+    let chosen = resolve_partners_base_dir(configured, default.clone());
+    let chosen = if chosen != default {
+        match crate::storage_location::probe_writable(&chosen) {
+            Ok(()) => chosen,
+            Err(e) => {
+                warn!(
+                    path = ?chosen,
+                    error = %e.message(),
+                    "Configured storage location is unusable — falling back to the default"
+                );
+                default
+            }
+        }
+    } else {
+        chosen
+    };
+    let _ = STORAGE_ROOT.set(chosen.clone());
+    info!(path = ?chosen, "Storage root resolved");
+    chosen
+}
+
+/// Get the base directory for FEM partner binaries.
+///
+/// Signature and name unchanged — which is why none of the 12 call sites
+/// across 8 integration files needed editing. `unwrap_or_else` (not
+/// `get_or_init`) means any path that runs before `init_storage_root`,
+/// including every unit test, gets exactly the historic behaviour.
+pub fn partners_base_dir() -> PathBuf {
+    STORAGE_ROOT
+        .get()
+        .cloned()
+        .unwrap_or_else(default_partners_base_dir)
 }
 
 /// Default User-Agent for all partner downloads.
@@ -169,4 +228,62 @@ fn build_client(user_agent: &str, auth_token: Option<&str>) -> reqwest::Client {
         .default_headers(headers)
         .build()
         .expect("failed to build HTTP client")
+}
+
+/// BUG 1/4 (1337, georgeparis): "FEM only shows C: drive storage even when
+/// installed on D:" and "Iagon says it requires 900 GB but only checks C:
+/// (167 GB) instead of D: (2 TB)".
+///
+/// Root cause: `partners_base_dir()` was anchored to `dirs::data_dir()` =
+/// `%APPDATA%`, which is always on the user-profile drive. Every storage
+/// integration sizes and writes through this one function, so the drive FEM
+/// probed could never be the drive the user wanted.
+#[cfg(test)]
+mod bug1_storage_root_tests {
+    use super::*;
+
+    /// THE headline regression test: the drive the free-space probe reads must
+    /// follow the configured path.
+    #[cfg(windows)]
+    #[test]
+    fn the_probed_drive_follows_the_configured_path() {
+        let legacy = PathBuf::from(r"C:\Users\u\AppData\Roaming\FryEdgeMiner\partners");
+        assert_eq!(
+            crate::system_info::drive_letter(&legacy),
+            Some("C".to_string()),
+            "fixture must reproduce the bug: %APPDATA% is always on C:"
+        );
+
+        let chosen = resolve_partners_base_dir(Some(r"D:\FryEdgeMiner"), legacy.clone());
+        assert_eq!(
+            crate::system_info::drive_letter(&chosen),
+            Some("D".to_string()),
+            "BUG 1/4: the free-space probe must read the drive the user chose, not %APPDATA%'s C:"
+        );
+    }
+
+    /// Upgrade safety: every existing install has no `storage_dir`, and must
+    /// keep the byte-for-byte historic path.
+    #[test]
+    fn an_unset_storage_dir_is_byte_for_byte_the_legacy_path() {
+        let legacy = default_partners_base_dir();
+        for configured in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                resolve_partners_base_dir(configured, legacy.clone()),
+                legacy,
+                "configured={configured:?} must mean the historic location"
+            );
+        }
+    }
+
+    /// The fixed leaf is a SAFETY boundary: `aem.rs` force-clean does a
+    /// `remove_dir_all(partners_base_dir().join("aem"))`, so a bare `D:\`
+    /// must never become the root.
+    #[test]
+    fn a_configured_root_never_lets_force_clean_escape_to_the_drive_root() {
+        let root = resolve_partners_base_dir(Some(r"D:\"), default_partners_base_dir());
+        assert_eq!(root, PathBuf::from(r"D:\FryEdgeMiner\partners"));
+        let aem = root.join("aem");
+        assert_ne!(aem, PathBuf::from(r"D:\aem"), "force-clean would target the drive root");
+    }
 }

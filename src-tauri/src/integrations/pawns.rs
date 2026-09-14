@@ -52,6 +52,14 @@ const TERMS_VERSION: &str = "cli-addendum-2026-08-10";
 /// Exact wording the device owner must be shown before sharing starts
 /// (CLI Addendum §5.4 (a)–(e)). Surfaced through the integration's health
 /// message until consent is given, and stored with each consent record.
+/// BUG 8: the SHORT status line shown on the integration card while consent is
+/// outstanding. The full audited disclosure belongs in the consent dialog and
+/// in the durable consent record — not in a status field.
+pub(crate) fn consent_required_status() -> String {
+    "Pawns.app needs your consent before it can share bandwidth — open it to review and enable."
+        .to_string()
+}
+
 const CONSENT_DISCLOSURE: &str = "Pawns.app bandwidth sharing: internet traffic from Pawns.app and \
 its customers is routed through this device and its internet connection; the device's public IP \
 address and technical connection data are visible to those customers; sharing uses processor \
@@ -664,10 +672,10 @@ impl Integration for PawnsIntegration {
 
     async fn start(&self) -> Result<()> {
         if !Self::user_consent() {
-            anyhow::bail!(
-                "{} Enable this integration to consent (sets PAWNS_USER_CONSENT=accepted).",
-                CONSENT_DISCLOSURE
-            );
+            // BUG 8: short + actionable. The audited disclosure is shown by the
+            // consent dialog and recorded in the consent log, per Addendum
+            // §5.4/§5.8 — it is not a status message.
+            anyhow::bail!("{}", consent_required_status());
         }
 
         let (email, password) = match self.credentials().await {
@@ -742,10 +750,7 @@ impl Integration for PawnsIntegration {
 
     async fn health_check(&self) -> HealthStatus {
         if !Self::user_consent() {
-            return HealthStatus::Unhealthy(format!(
-                "{} Enable this integration to consent.",
-                CONSENT_DISCLOSURE
-            ));
+            return HealthStatus::Unhealthy(consent_required_status());
         }
         if let Err(reason) = self.credentials().await {
             // Provisioning state, not a user-action demand: nothing the device
@@ -1130,3 +1135,76 @@ mod account_credential_tests {
     }
 }
 
+
+/// BUG 8 (minerman): "Pawns shows a consent/terms wall instead of auto-enabling."
+///
+/// The consent GATE itself is a deliberate compliance control — Pawns.app CLI
+/// Addendum §5.2–5.4 requires a separate, explicit consent action from the
+/// device owner before the agent starts, and §5.8 requires a durable record.
+/// It is backed by 68 tests and six dedicated commits. Auto-accepting it would
+/// breach the Addendum, so the gate is NOT being removed.
+///
+/// What WAS wrong is the presentation: `start()` and `health_check()` both
+/// formatted the entire ~600-character legal disclosure into the status string.
+/// `awaitsUserSetup()` only matches Storj, so Pawns fell through to the
+/// `else` branch in IntCard and rendered a red "Unhealthy" badge with a wall of
+/// legal text in the card body — reappearing at every boot via startup
+/// recovery with a `Start failed: ` prefix. That is the "wall" in the report.
+///
+/// The audited wording still appears verbatim where the Addendum requires it:
+/// the consent RECORD (`pawns.rs` consent-log `wording` field) and the consent
+/// DIALOG (`consent_disclosure()` served by `check_consent`). Only the status
+/// line is shortened.
+#[cfg(test)]
+mod bug8_consent_presentation_tests {
+    use super::*;
+
+    #[test]
+    fn the_status_line_is_short_enough_to_read_on_a_card() {
+        let msg = consent_required_status();
+        assert!(
+            msg.len() < 120,
+            "a status line must not be a wall of text ({} chars): {msg}",
+            msg.len()
+        );
+    }
+
+    #[test]
+    fn the_status_line_tells_the_user_exactly_what_to_do() {
+        let msg = consent_required_status().to_lowercase();
+        assert!(msg.contains("pawns"), "must name the integration");
+        assert!(
+            msg.contains("review") || msg.contains("enable") || msg.contains("consent"),
+            "must point at the one action that clears it"
+        );
+    }
+
+    /// The compliance guarantee: shortening the STATUS must not shorten the
+    /// DISCLOSURE. The audited §5.4(a)-(e) wording is what gets recorded and
+    /// what the dialog shows, and it must stay whole.
+    #[test]
+    fn the_audited_disclosure_is_untouched_and_still_covers_the_addendum() {
+        let d = consent_disclosure();
+        assert!(d.len() > 400, "the audited disclosure must remain complete");
+        let lower = d.to_lowercase();
+        for required in [
+            "routed through this device",
+            "public ip address",
+            "data allowance",
+            "age of majority",
+            "off at any time",
+        ] {
+            assert!(lower.contains(required), "Addendum point missing: {required}");
+        }
+    }
+
+    /// The status line must NOT be the disclosure — that substitution is the bug.
+    #[test]
+    fn the_status_line_is_not_the_disclosure() {
+        assert_ne!(consent_required_status(), consent_disclosure());
+        assert!(
+            !consent_required_status().contains("age of majority"),
+            "BUG 8: the legal disclosure must not be used as a status message"
+        );
+    }
+}

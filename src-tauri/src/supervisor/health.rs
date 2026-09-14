@@ -58,6 +58,12 @@ pub(crate) fn recovery_action(
     starting_timeout_ticks: u32,
 ) -> RecoveryAction {
     match status {
+        // BUG 5/8: waiting on the user is not a fault to recover from.
+        HealthStatus::Unhealthy(reason)
+            if crate::integrations::awaits_user_action(reason) =>
+        {
+            RecoveryAction::None
+        }
         HealthStatus::Unhealthy(_) => RecoveryAction::Restart,
         HealthStatus::Stopped if enabled => RecoveryAction::Restart,
         HealthStatus::Starting
@@ -393,5 +399,59 @@ mod recovery_tests {
         let c = HealthCheckConfig::default();
         assert_eq!(c.starting_timeout_ticks, 6);
         assert_eq!(c.check_interval * c.starting_timeout_ticks, Duration::from_secs(180));
+    }
+}
+
+/// BUG 5 + BUG 8: an integration that is waiting on a step only the USER can
+/// perform must not be restarted every 30 s.
+///
+/// Storj reports `Unhealthy("Awaiting Storj setup …")` until the operator
+/// creates a node auth token at storj.io — which can take days — and Pawns
+/// reports a consent-required status until the owner accepts the Addendum.
+/// `recovery_action` mapped every `Unhealthy` to `Restart`, so the supervisor
+/// ran stop (a real `taskkill`) + start (a no-op for Storj) three times with
+/// 5/15/45 s backoff, paused, and re-armed every ~5 minutes — forever, with no
+/// possibility of success, for as long as the integration stayed enabled.
+#[cfg(test)]
+mod bug5_awaiting_user_tests {
+    use super::*;
+
+    #[test]
+    fn an_integration_awaiting_the_user_is_not_restarted() {
+        let storj = HealthStatus::Unhealthy(
+            "Awaiting Storj setup — create a node auth token at storj.io and complete node \
+             identity to bring this node online. Install and eligibility are already active."
+                .to_string(),
+        );
+        assert_eq!(recovery_action(&storj, true, 0, 6), RecoveryAction::None);
+
+        let pawns = HealthStatus::Unhealthy(
+            "Pawns.app needs your consent before it can share bandwidth — open it to review and enable."
+                .to_string(),
+        );
+        assert_eq!(recovery_action(&pawns, true, 0, 6), RecoveryAction::None);
+    }
+
+    /// A REAL failure must still restart, or this change would disable recovery.
+    #[test]
+    fn a_genuine_failure_still_restarts() {
+        let crashed = HealthStatus::Unhealthy(
+            "titan-edge process is not running: missing VC++ 2015-2022 x64 runtime".to_string(),
+        );
+        assert_eq!(recovery_action(&crashed, true, 0, 6), RecoveryAction::Restart);
+        assert_eq!(
+            recovery_action(&HealthStatus::Stopped, true, 0, 6),
+            RecoveryAction::Restart
+        );
+    }
+
+    #[test]
+    fn the_awaiting_user_predicate_does_not_match_ordinary_errors() {
+        assert!(crate::integrations::awaits_user_action("Awaiting Storj setup — do a thing"));
+        assert!(crate::integrations::awaits_user_action(
+            "Pawns.app needs your consent before it can share bandwidth"
+        ));
+        assert!(!crate::integrations::awaits_user_action("Error detected in daemon logs"));
+        assert!(!crate::integrations::awaits_user_action("process is not running"));
     }
 }

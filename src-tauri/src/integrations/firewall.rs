@@ -123,7 +123,7 @@ pub fn ensure_program_rules(rule_name: &str, program: &Path) -> Result<()> {
         netsh_script
     );
     let outer = format!(
-        "$p = Start-Process -FilePath powershell -ArgumentList '-NoProfile','-Command',\"{}\" -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
+        "$ErrorActionPreference = 'Stop'; try {{ $p = Start-Process -FilePath powershell -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command',\"{}\" -Verb RunAs -WindowStyle Hidden -Wait -PassThru; if ($null -eq $p) {{ exit 3 }}; exit $p.ExitCode }} catch {{ exit 2 }}",
         inner.replace('"', "`\"")
     );
 
@@ -153,7 +153,7 @@ pub fn delete_rules(rule_name: &str) {
         return;
     }
     let outer = format!(
-        "$p = Start-Process -FilePath netsh -ArgumentList 'advfirewall','firewall','delete','rule','name={rule_name}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode"
+        "$ErrorActionPreference = 'Stop'; try {{ $p = Start-Process -FilePath netsh -ArgumentList 'advfirewall','firewall','delete','rule','name={rule_name}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; if ($null -eq $p) {{ exit 3 }}; exit $p.ExitCode }} catch {{ exit 2 }}"
     );
     match crate::supervisor::platform::command("powershell")
         .args(["-NoProfile", "-Command", &outer])

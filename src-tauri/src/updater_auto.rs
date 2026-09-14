@@ -375,16 +375,85 @@ pub fn parse_msi_uninstall_json(json: &str) -> Option<MsiUninstallEntry> {
 /// Best-effort: any PowerShell/registry failure is treated as "none found"
 /// rather than blocking the update — a query error is far more likely than a
 /// genuine MSI install existing alongside the NSIS one.
-pub(crate) fn find_msi_uninstall_entry() -> Option<MsiUninstallEntry> {
-    let script = "Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'Fry Edge Miner*' } | Select-Object DisplayName,Publisher,UninstallString | ConvertTo-Json -Compress";
-    let out = crate::supervisor::platform::command("powershell")
-        .args(["-NoProfile", "-Command", script])
-        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
-        .ok()?;
-    if !out.status.success() {
-        return None;
+/// BUG 10/RC1: the registry sweep spans two Uninstall hives and every
+/// installed program. On a well-used machine that genuinely exceeds the 20 s
+/// generic probe budget, and a timeout used to read as "no MSI installed".
+pub(crate) const MSI_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Three-state MSI ownership probe. "Could not tell" MUST be distinguishable
+/// from "there is none" — conflating them is what let the update proceed into
+/// the uninstall path.
+#[derive(Debug)]
+pub(crate) enum MsiProbe {
+    Found(MsiUninstallEntry),
+    NotFound,
+    Inconclusive(String),
+}
+
+pub(crate) enum MsiGate {
+    Proceed,
+    Blocked(String),
+}
+
+/// PURE: classify the probe's raw result. Only a CLEAN exit that parsed to no
+/// entry is `NotFound`; everything else is `Inconclusive`.
+pub(crate) fn msi_probe_outcome(exit_code: Option<i32>, stdout: &str) -> MsiProbe {
+    match exit_code {
+        Some(0) => match parse_msi_uninstall_json(stdout) {
+            Some(entry) => MsiProbe::Found(entry),
+            None => MsiProbe::NotFound,
+        },
+        Some(code) => MsiProbe::Inconclusive(format!("the MSI check exited {code}")),
+        None => MsiProbe::Inconclusive(
+            "the MSI check did not finish (timed out or could not be started)".to_string(),
+        ),
     }
-    parse_msi_uninstall_json(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// PURE: fail CLOSED. An update may only proceed when we can PROVE this install
+/// is not MSI-owned.
+pub(crate) fn msi_gate(probe: MsiProbe) -> MsiGate {
+    match probe {
+        MsiProbe::NotFound => MsiGate::Proceed,
+        MsiProbe::Found(entry) => MsiGate::Blocked(format!(
+            "This copy of Fry Edge Miner was installed from the .msi package, which the              updater cannot safely replace. Uninstall it first, then install the current              version — your miner key and wallet are preserved. Uninstall command: {}",
+            msi_remediation_command(&entry.uninstall_string)
+        )),
+        MsiProbe::Inconclusive(why) => MsiGate::Blocked(format!(
+            "Fry Edge Miner paused this update because it could not confirm how this copy              was installed ({why}). It will try again automatically."
+        )),
+    }
+}
+
+/// PURE: the uninstall command with the flags the NSIS template omits — `/qn`
+/// and `REBOOT=ReallySuppress` are exactly what stop the machine rebooting
+/// mid-uninstall, which is how the reported incident ended.
+pub(crate) fn msi_remediation_command(uninstall_string: &str) -> String {
+    let base = uninstall_string.trim();
+    if base.to_lowercase().contains("/qn") {
+        base.to_string()
+    } else {
+        format!("{base} /qn /norestart REBOOT=ReallySuppress")
+    }
+}
+
+/// Probe MSI ownership, distinguishing "there is none" from "could not tell".
+///
+/// Replaces the old `find_msi_uninstall_entry`, whose `Option` return could not
+/// express the difference — and so reported every PowerShell failure and every
+/// timeout as "no MSI installed".
+pub(crate) fn probe_msi_ownership() -> MsiProbe {
+    // Raw string: the registry paths are full of backslashes and this is the
+    // one place an escaping slip would silently query nothing and then be
+    // reported as "no MSI installed".
+    let script = r"Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'Fry Edge Miner*' } | Select-Object DisplayName,Publisher,UninstallString | ConvertTo-Json -Compress";
+    match crate::supervisor::platform::command("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output_bounded(MSI_PROBE_TIMEOUT)
+    {
+        Ok(out) => msi_probe_outcome(out.status.code(), &String::from_utf8_lossy(&out.stdout)),
+        Err(e) => MsiProbe::Inconclusive(format!("the MSI check could not run: {e}")),
+    }
 }
 
 /// Result of the pre-install preparation step. The caller uses this to decide
@@ -420,22 +489,33 @@ pub(crate) async fn prepare_for_update_install(
     from_version: &str,
     to_version: &str,
 ) -> PrepareOutcome {
-    if let Some(entry) = tokio::task::block_in_place(find_msi_uninstall_entry) {
-        warn!(
-            display_name = %entry.display_name,
-            publisher = %entry.publisher,
-            "MSI-owned install detected — refusing to auto-update over it"
-        );
+    // BUG 10/RC1: FAIL CLOSED. The old guard returned None on any PowerShell
+    // error or timeout, which read as "no MSI installed" and let the update
+    // walk straight into the NSIS WiX uninstall path this exists to prevent.
+    let probe = tokio::task::block_in_place(probe_msi_ownership);
+    let probe_reason = match &probe {
+        MsiProbe::Found(e) => Some(("msi-present", e.uninstall_string.clone(), e.display_name.clone())),
+        MsiProbe::Inconclusive(why) => Some(("probe-inconclusive", String::new(), why.clone())),
+        MsiProbe::NotFound => None,
+    };
+    if let MsiGate::Blocked(message) = msi_gate(probe) {
+        let (reason, uninstall_string, detail) =
+            probe_reason.unwrap_or(("probe-inconclusive", String::new(), String::new()));
+        warn!(reason = reason, detail = %detail, "Update blocked before install");
         crate::events::emit(
             "update-blocked-msi",
             serde_json::json!({
-                "displayName": entry.display_name,
-                "publisher": entry.publisher,
-                "message": "An MSI install of Fry Edge Miner is registered on this machine. \
-                    Uninstall it from Apps & Features, then update again.",
+                "reason": reason,
+                "detail": detail,
+                "uninstallString": uninstall_string,
+                "message": message,
             }),
         );
-        return PrepareOutcome::MsiBlocked(entry);
+        return PrepareOutcome::MsiBlocked(MsiUninstallEntry {
+            display_name: "Fry Edge Miner".to_string(),
+            publisher: String::new(),
+            uninstall_string,
+        });
     }
 
     // C1 review fix: arm the guard BEFORE touching any partner process —
@@ -1067,5 +1147,85 @@ mod update_safety_tests {
     #[test]
     fn malformed_json_is_treated_as_no_entry_rather_than_a_panic() {
         assert!(parse_msi_uninstall_json("not json").is_none());
+    }
+}
+
+/// BUG 10 / RC1 (RailgunDude): "After a FEM update, FEM ended up UNINSTALLED
+/// and the PC rebooted."
+///
+/// `bundle.targets: "all"` shipped an MSI alongside the NSIS setup.exe. In the
+/// generated NSIS `PageLeaveReinstall`, the WiX/MSI check runs BEFORE the
+/// `/UPDATE` short-circuit and runs the MSI `UninstallString` raw — unelevated
+/// from NSIS's view, no `/qn`, no `REBOOT=ReallySuppress` — then `MessageBox` +
+/// `Abort` if it returns non-zero OR if the exe merely still exists. The old
+/// app is gone, the new one was never installed, and FEM itself is already
+/// dead because `download_and_install` hands off via ShellExecuteW and calls
+/// `exit(0)`. `msiexec` is also the only component in that chain privileged
+/// enough to schedule delayed file renames and reboot the machine.
+///
+/// v0.4.28's guard FAILED OPEN: any PowerShell error or a PROBE_TIMEOUT expiry
+/// yielded `None`, which read as "no MSI installed" and let the update proceed
+/// into the exact path the guard exists to prevent. On a machine with several
+/// hundred installed programs that registry sweep can genuinely exceed 20 s.
+#[cfg(test)]
+mod bug10_msi_gate_tests {
+    use super::*;
+
+    #[test]
+    fn the_bundle_never_ships_an_msi_target() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
+        let targets = &conf["bundle"]["targets"];
+        assert!(
+            targets.is_array(),
+            "bundle.targets must be an explicit list, not \"all\" (got {targets})"
+        );
+        let listed: Vec<&str> = targets.as_array().unwrap().iter().filter_map(|t| t.as_str()).collect();
+        assert!(
+            !listed.iter().any(|t| t.eq_ignore_ascii_case("msi")),
+            "shipping an MSI re-arms the NSIS WiX uninstall path: {listed:?}"
+        );
+        assert!(listed.contains(&"nsis"), "the updater feed needs the NSIS installer");
+    }
+
+    #[test]
+    fn an_inconclusive_probe_never_reads_as_no_msi_installed() {
+        assert!(matches!(msi_probe_outcome(None, ""), MsiProbe::Inconclusive(_)));
+        assert!(matches!(msi_probe_outcome(Some(1), ""), MsiProbe::Inconclusive(_)));
+        // A clean run that genuinely found nothing is the ONLY NotFound.
+        assert!(matches!(msi_probe_outcome(Some(0), ""), MsiProbe::NotFound));
+    }
+
+    #[test]
+    fn an_inconclusive_probe_blocks_the_install() {
+        assert!(matches!(
+            msi_gate(MsiProbe::Inconclusive("timed out".into())),
+            MsiGate::Blocked(_)
+        ));
+        assert!(matches!(msi_gate(MsiProbe::NotFound), MsiGate::Proceed));
+        let entry = MsiUninstallEntry {
+            display_name: "Fry Edge Miner".into(),
+            publisher: "Fry Networks".into(),
+            uninstall_string: "MsiExec.exe /X{GUID}".into(),
+        };
+        assert!(matches!(msi_gate(MsiProbe::Found(entry)), MsiGate::Blocked(_)));
+    }
+
+    /// The registry sweep is far slower than a generic CLI probe, and timing
+    /// out is precisely what made the v0.4.28 guard fail open in the field.
+    #[test]
+    fn the_msi_probe_gets_a_budget_that_fits_a_real_registry_sweep() {
+        assert!(MSI_PROBE_TIMEOUT > crate::supervisor::platform::PROBE_TIMEOUT);
+        assert!(MSI_PROBE_TIMEOUT <= std::time::Duration::from_secs(120));
+    }
+
+    /// A blocked user must get a command they can actually run. The NSIS
+    /// template omits exactly the flags that prevent the reboot.
+    #[test]
+    fn the_remediation_command_suppresses_the_reboot_that_caused_the_incident() {
+        let cmd = msi_remediation_command("MsiExec.exe /X{ABC-123}");
+        assert!(cmd.contains("/X{ABC-123}"), "must target the real product: {cmd}");
+        assert!(cmd.contains("/qn"), "must be silent: {cmd}");
+        assert!(cmd.contains("REBOOT=ReallySuppress"), "must not reboot the machine: {cmd}");
     }
 }

@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, warn};
 
+const ALGOD_SERVER: &str = "https://mainnet-api.algonode.cloud";
 const FRYNODE_VERSION: &str = "0.1.0";
 
 /// BUG 6: dedicated Windows Firewall rule name for frynode.exe, same pattern
@@ -15,6 +16,11 @@ pub const FRYNODE_RULE_NAME: &str = "FEM-FryNode";
 
 pub struct FryVpnIntegration {
     pub config: Arc<ConfigStore>,
+    /// BUG 6: needed to fetch this device's provisioned Algorand credentials
+    /// (`GET /credentials/{miner_key}`) so frynode registers with a FUNDED
+    /// account instead of generating a fresh 0-ALGO one. Same field Diiisco
+    /// and Mysterium already carry.
+    pub api_client: Arc<crate::api::client::ApiClient>,
     pub supervisor: Arc<Mutex<crate::supervisor::Supervisor>>,
     /// BUG 6: base log directory (same one the Supervisor writes
     /// `<log_dir>/fryvpn/fryvpn_stderr.log` under) — needed so a crashed
@@ -153,6 +159,108 @@ async fn probe_health_once() -> HealthStatus {
     }
 }
 
+/// Minimum SPENDABLE balance (microAlgos) fryDVPN needs to register on-chain:
+/// the registry app call plus its fee. 0.1 ALGO is comfortably above the
+/// 1000 microAlgo minimum fee and any box/opt-in cost.
+pub(crate) const REGISTRATION_MIN_MICROALGOS: u64 = 100_000;
+
+/// PURE: what an account can actually spend — algod reports the TOTAL `amount`
+/// and separately the locked `min-balance`. Saturating, so an account below its
+/// own minimum reports 0 rather than underflowing.
+pub(crate) fn spendable_microalgos(amount: u64, min_balance: u64) -> u64 {
+    amount.saturating_sub(min_balance)
+}
+
+/// PURE: can this wallet afford on-chain registration?
+///
+/// Returns a message the device owner can ACT on. Deliberately never surfaces
+/// the raw "overspend" the chain returns — that told minerman nothing.
+pub(crate) fn registration_affordability(
+    spendable: u64,
+    required: u64,
+    address: &str,
+) -> Result<(), String> {
+    if spendable >= required {
+        return Ok(());
+    }
+    let short = (required - spendable) as f64 / 1_000_000.0;
+    let have = spendable as f64 / 1_000_000.0;
+    Err(format!(
+        "fryDVPN needs about {:.3} ALGO in this device's wallet to register on-chain, and it          currently has {:.3} ALGO — about {:.3} ALGO short. Send ALGO to {} and fryDVPN will          register automatically on the next check.",
+        required as f64 / 1_000_000.0,
+        have,
+        short,
+        address
+    ))
+}
+
+/// PURE: pull `amount` and `min-balance` out of an algod account response.
+/// `None` on anything unparseable — an HTML error page must NEVER read as a
+/// zero balance, or the pre-check would block a perfectly funded wallet.
+pub(crate) fn parse_account_balance(body: &str) -> Option<(u64, u64)> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let amount = v.get("amount")?.as_u64()?;
+    let min_balance = v.get("min-balance").and_then(|m| m.as_u64()).unwrap_or(0);
+    Some((amount, min_balance))
+}
+
+impl FryVpnIntegration {
+    /// Fetch the device's provisioned Algorand identity and confirm it can
+    /// actually afford the on-chain registration (BUG 6).
+    ///
+    /// Returns the mnemonic to hand frynode. Any failure is a user-facing
+    /// sentence, never a raw chain error.
+    async fn resolve_funded_identity(&self) -> Result<String, String> {
+        let miner_key = self
+            .config
+            .get()
+            .miner_key
+            .ok_or_else(|| "This device is not registered yet — finish setup first.".to_string())?;
+
+        let creds = crate::api::credentials::lookup(&self.api_client, &miner_key)
+            .await
+            .map_err(|e| format!("Could not fetch this device's wallet: {e}"))?;
+
+        let address = creds
+            .algo_address
+            .filter(|a| !a.trim().is_empty())
+            .ok_or_else(|| {
+                "Device wallet not provisioned yet — fryDVPN will start automatically once it is."
+                    .to_string()
+            })?;
+        let mnemonic = creds.algo_mnemonic.filter(|m| !m.trim().is_empty()).ok_or_else(|| {
+            "Device wallet key not available yet — fryDVPN will start automatically once it is."
+                .to_string()
+        })?;
+
+        // Pre-check the balance so a 0-ALGO wallet never reaches the chain and
+        // comes back as an opaque "overspend".
+        let url = format!("{}/v2/accounts/{}", ALGOD_SERVER, address);
+        let body = reqwest::Client::new()
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| format!("Could not check the fryDVPN wallet balance: {e}"))?
+            .text()
+            .await
+            .map_err(|e| format!("Could not read the fryDVPN wallet balance: {e}"))?;
+
+        match parse_account_balance(&body) {
+            Some((amount, min_balance)) => {
+                let spendable = spendable_microalgos(amount, min_balance);
+                registration_affordability(spendable, REGISTRATION_MIN_MICROALGOS, &address)?;
+            }
+            None => {
+                // Unreadable is NOT zero. Fail open rather than block a funded
+                // wallet because algod returned an error page.
+                warn!("Could not parse the algod account response — proceeding without a balance pre-check");
+            }
+        }
+        Ok(mnemonic)
+    }
+}
+
 #[async_trait]
 impl Integration for FryVpnIntegration {
     fn id(&self) -> &str {
@@ -213,11 +321,26 @@ impl Integration for FryVpnIntegration {
             Self::capacity_mbps().to_string(),
         ];
 
+        // BUG 6: hand frynode the device's OWN funded account. Without this it
+        // generated a fresh 0-ALGO identity and RegisterNode failed with an
+        // overspend the user could do nothing about.
+        let mnemonic = match self.resolve_funded_identity().await {
+            Ok(m) => m,
+            Err(reason) => anyhow::bail!("{reason}"),
+        };
+
         {
             let mut sup = self.supervisor.lock().unwrap();
             let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            sup.start_integration("fryvpn", &binary, &arg_refs)
-                .map_err(|e| anyhow::anyhow!("Failed to spawn frynode: {}", e))?;
+            // The mnemonic goes in the ENVIRONMENT, never in argv — argv is
+            // readable by any process via tasklist/WMI.
+            sup.start_integration_with_env(
+                "fryvpn",
+                &binary,
+                &arg_refs,
+                &[("NODE_MNEMONIC", mnemonic.as_str())],
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to spawn frynode: {}", e))?;
         }
 
         info!("Fry dVPN started with CLI flags");
@@ -303,6 +426,13 @@ mod tests {
     fn test_fryvpn_id() {
         let integration = FryVpnIntegration {
             config: Arc::new(crate::config::store::ConfigStore::new(std::path::PathBuf::from("/tmp"), None)),
+            // BUG 6: field added so fryvpn can fetch the device's provisioned
+            // Algorand identity. Fixture value only — these two tests assert on
+            // id()/display_name() and never touch the client. No assertion changed.
+            api_client: Arc::new(crate::api::client::ApiClient::new(
+                "http://127.0.0.1:1".to_string(),
+                String::new(),
+            )),
             supervisor: Arc::new(Mutex::new(crate::supervisor::Supervisor::new(
                 std::path::PathBuf::from("/tmp"),
             ))),
@@ -315,6 +445,13 @@ mod tests {
     fn test_fryvpn_display_name() {
         let integration = FryVpnIntegration {
             config: Arc::new(crate::config::store::ConfigStore::new(std::path::PathBuf::from("/tmp"), None)),
+            // BUG 6: field added so fryvpn can fetch the device's provisioned
+            // Algorand identity. Fixture value only — these two tests assert on
+            // id()/display_name() and never touch the client. No assertion changed.
+            api_client: Arc::new(crate::api::client::ApiClient::new(
+                "http://127.0.0.1:1".to_string(),
+                String::new(),
+            )),
             supervisor: Arc::new(Mutex::new(crate::supervisor::Supervisor::new(
                 std::path::PathBuf::from("/tmp"),
             ))),
@@ -432,5 +569,68 @@ mod tests {
             super::super::firewall::OLOSTEP_RULE_NAME,
             "must not collide with Olostep's rule"
         );
+    }
+}
+
+/// BUG 6 (minerman): fryDVPN on-chain registration fails — wallet Z2HCY…GTMKI
+/// has 0 ALGO, so `RegisterNode` is rejected with an overspend error and the
+/// card shows "dVPN not registered on-chain" with no way to act on it.
+///
+/// Root cause: FEM passed frynode no node identity at all, so frynode
+/// generated a FRESH Algorand account with a zero balance and immediately
+/// tried to pay a transaction fee from it. FEM already holds the device's
+/// provisioned credentials (`CredentialInfo.algo_address` / `.algo_mnemonic`)
+/// — Diiisco consumes exactly these — but `FryVpnIntegration` had no
+/// `api_client` to fetch them with.
+#[cfg(test)]
+mod bug6_balance_tests {
+    use super::*;
+
+    #[test]
+    fn a_zero_balance_wallet_is_refused_before_any_transaction_is_attempted() {
+        let err = registration_affordability(0, 100_000, "Z2HCYEXAMPLEADDRESS")
+            .expect_err("0 ALGO must not proceed to an on-chain call");
+        assert!(err.contains("Z2HCYEXAMPLEADDRESS"), "the user must be told WHICH wallet: {err}");
+        assert!(err.contains("ALGO"), "the user must be told what to add: {err}");
+        assert!(
+            !err.to_lowercase().contains("overspend"),
+            "must not surface the raw blockchain error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_funded_wallet_proceeds() {
+        assert_eq!(registration_affordability(500_000, 100_000, "ADDR"), Ok(()));
+        // Exactly at the threshold is fine.
+        assert_eq!(registration_affordability(100_000, 100_000, "ADDR"), Ok(()));
+    }
+
+    /// The shortfall must be quantified, not just "insufficient" — the user
+    /// needs to know how much to send.
+    #[test]
+    fn the_message_quantifies_the_shortfall_in_whole_algo() {
+        let err = registration_affordability(25_000, 100_000, "ADDR").unwrap_err();
+        assert!(err.contains("0.075"), "shortfall in ALGO must be explicit: {err}");
+    }
+
+    /// Balance parsing must come from the real algod account shape.
+    #[test]
+    fn the_spendable_balance_excludes_the_locked_minimum() {
+        // algod reports total `amount` and the locked `min-balance`.
+        assert_eq!(spendable_microalgos(300_000, 200_000), 100_000);
+        // A wallet below its own minimum has nothing spendable, never negative.
+        assert_eq!(spendable_microalgos(100_000, 200_000), 0);
+    }
+
+    #[test]
+    fn a_real_algod_account_response_parses() {
+        let body = r#"{"address":"ABC","amount":1234567,"min-balance":100000,"round":12345}"#;
+        assert_eq!(parse_account_balance(body), Some((1_234_567, 100_000)));
+    }
+
+    #[test]
+    fn an_unparseable_algod_response_is_not_treated_as_zero() {
+        assert_eq!(parse_account_balance("<html>502 Bad Gateway</html>"), None);
+        assert_eq!(parse_account_balance(""), None);
     }
 }

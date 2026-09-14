@@ -52,6 +52,19 @@ pub struct FemConfig {
     /// re-nag on every single startup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hardening_applied_version: Option<String>,
+    /// BUG 1/4: root directory for partner binaries, installers and partner
+    /// data (Space Acres plots, Iagon's node config). `None` — the only value
+    /// any existing install has — means the historic
+    /// `%APPDATA%\FryEdgeMiner\partners` location, so an upgrade is a
+    /// byte-for-byte no-op: `skip_serializing_if` means the key is never even
+    /// written until the user chooses a location.
+    ///
+    /// Stored as the RAW user-entered path; `storage_location::storage_root_for`
+    /// appends the fixed `FryEdgeMiner\partners` leaf and
+    /// `download::init_storage_root` validates it once at startup, falling back
+    /// to the default on any problem.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_dir: Option<String>,
     /// B3: every key in fem_config.json this build does not recognise.
     ///
     /// `ConfigStore` saves by serializing this whole struct over the file, so
@@ -104,6 +117,7 @@ impl Default for FemConfig {
             myst_lan_override: false,
             last_reported_version: None,
             hardening_applied_version: None,
+            storage_dir: None,
             extra: serde_json::Map::new(),
         }
     }

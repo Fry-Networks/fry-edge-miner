@@ -105,6 +105,18 @@ pub(crate) fn stderr_tail(stderr: &str, n: usize) -> String {
 /// previously discarded, so neither integration could tell its OWN spawned
 /// process apart from one it merely adopted (already running, started by
 /// Windows autostart or a previous FEM session).
+/// BUG 5 + BUG 8: does this unhealthy reason represent "waiting on a step only
+/// the user can perform" rather than a fault the supervisor could recover from?
+///
+/// Restarting these accomplishes nothing and burns a stop/start cycle every
+/// 30 s for as long as the integration is enabled. Matched on the reason text
+/// because `HealthStatus` has no dedicated variant and adding one would ripple
+/// into the TypeScript union and the LifecycleState mapping.
+pub(crate) fn awaits_user_action(reason: &str) -> bool {
+    const AWAITING_MARKERS: [&str; 2] = ["Awaiting Storj setup", "needs your consent"];
+    AWAITING_MARKERS.iter().any(|m| reason.contains(m))
+}
+
 pub(crate) fn tracked_child_probe(slot: &mut Option<std::process::Child>) -> Option<bool> {
     match slot {
         None => None,

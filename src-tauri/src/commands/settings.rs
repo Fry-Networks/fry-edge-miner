@@ -17,6 +17,12 @@ pub struct FemConfigView {
     pub auto_update: bool,
     pub notifications: bool,
     pub config_warning: Option<String>,
+    /// BUG 1/4: the configured override (None = the historic %APPDATA% location).
+    pub storage_dir: Option<String>,
+    /// BUG 1/4: the root actually in use THIS session. Differs from
+    /// `storage_dir` until the app is restarted, which is how the UI knows to
+    /// show "restart to use this location".
+    pub storage_dir_active: String,
 }
 
 impl From<FemConfig> for FemConfigView {
@@ -33,6 +39,10 @@ impl From<FemConfig> for FemConfigView {
             auto_update: cfg.auto_update,
             notifications: cfg.notifications,
             config_warning: None,
+            storage_dir: cfg.storage_dir,
+            storage_dir_active: crate::integrations::download::partners_base_dir()
+                .to_string_lossy()
+                .into_owned(),
         }
     }
 }
@@ -97,4 +107,88 @@ pub async fn save_settings(
 
     tracing::info!("Settings saved");
     Ok(())
+}
+
+/// BUG 2 (1337): "No way to change the wallet address once entered."
+///
+/// The Settings page showed the address through a read-only `CopyField` and the
+/// input only existed in the un-registered branch, so a typo at setup was
+/// permanent. There is deliberately NO backend endpoint here: FEM never
+/// transmitted this value (`InstallationHeartbeat` has no wallet field), and
+/// payout authority lives in `main.devices.reward_wallet` on the dashboard,
+/// which is session-gated. A device-token-authenticated write would let anyone
+/// holding a miner key redirect another user's payouts, so the UI links to the
+/// dashboard for that and this command only fixes the local value.
+#[tauri::command]
+pub async fn set_wallet_address(
+    address: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let trimmed = address.trim().to_uppercase();
+    crate::config::wallet::validate_address(&trimmed).map_err(|e| e.to_string())?;
+    state
+        .config
+        .update(|cfg| cfg.wallet_address = Some(trimmed.clone()))
+        .map_err(|e| e.to_string())?;
+    tracing::info!("Wallet address updated locally");
+    Ok(())
+}
+
+/// BUG 1/4: where partner binaries and partner data live.
+#[derive(Debug, serde::Serialize)]
+pub struct StorageLocation {
+    /// The root FEM will use (already including the FryEdgeMiner\partners leaf).
+    pub path: String,
+    /// Free space on that volume, or None if it could not be measured.
+    pub free_gb: Option<f64>,
+    pub is_default: bool,
+    /// Configured != active, i.e. a restart is needed for it to take effect.
+    pub pending_restart: bool,
+}
+
+fn describe_storage(configured: Option<&str>) -> StorageLocation {
+    let default = crate::integrations::download::default_partners_base_dir();
+    let active = crate::integrations::download::partners_base_dir();
+    let resolved =
+        crate::integrations::download::resolve_partners_base_dir(configured, default.clone());
+    StorageLocation {
+        free_gb: crate::system_info::available_disk_gb(&active),
+        is_default: resolved == default,
+        pending_restart: resolved != active,
+        path: resolved.to_string_lossy().into_owned(),
+    }
+}
+
+#[tauri::command]
+pub async fn get_storage_location(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<StorageLocation, String> {
+    Ok(describe_storage(state.config.get().storage_dir.as_deref()))
+}
+
+/// `path: None` or an empty string reverts to the historic default.
+#[tauri::command]
+pub async fn set_storage_location(
+    path: Option<String>,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<StorageLocation, String> {
+    let cleaned = path.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+
+    if let Some(ref p) = cleaned {
+        let install_dir = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_default();
+        crate::storage_location::validate_pure(p, &install_dir)
+            .map_err(|e| e.message())?;
+        let root = crate::storage_location::storage_root_for(p);
+        crate::storage_location::probe_writable(&root).map_err(|e| e.message())?;
+    }
+
+    state
+        .config
+        .update(|cfg| cfg.storage_dir = cleaned.clone())
+        .map_err(|e| e.to_string())?;
+    tracing::info!(is_default = cleaned.is_none(), "Storage location updated");
+    Ok(describe_storage(cleaned.as_deref()))
 }

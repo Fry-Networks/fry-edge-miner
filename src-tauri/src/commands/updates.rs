@@ -285,3 +285,69 @@ mod manual_install_tests {
         );
     }
 }
+
+/// BUG 10: a genuinely-asserting replacement for the tripwire in
+/// `manual_install_tests`.
+///
+/// That test asserts the literal string `release_install_tree` appears in the
+/// app branch — but after v0.4.28 the only two occurrences in this file are the
+/// assertion itself and a COMMENT. It passes on the strength of prose and would
+/// keep passing if the real call were deleted. The original is deliberately
+/// left untouched; this module sits alongside it and strips comments first, so
+/// it cannot be satisfied the same way.
+#[cfg(test)]
+mod bug10_manual_install_gate_tests {
+    /// Remove line comments, so no assertion here can be satisfied by prose.
+    fn code_only(src: &str) -> String {
+        src.lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn app_branch() -> String {
+        let src = include_str!("updates.rs");
+        let branch = src
+            .split("else if kind ==")
+            .next()
+            .expect("updates.rs always has the integration branch");
+        code_only(branch)
+    }
+
+    #[test]
+    fn the_manual_app_install_honours_every_pre_install_gate_before_downloading() {
+        let code = app_branch();
+        let prepare = code
+            .find("prepare_for_update_install")
+            .expect("the manual path must go through the single pre-install choke point");
+        let download = code
+            .find("download_and_install")
+            .expect("the manual path must still install");
+        assert!(
+            prepare < download,
+            "preparation must run BEFORE download_and_install, not after"
+        );
+    }
+
+    /// The fail-closed MSI outcome did not exist pre-fix, so this is RED on the
+    /// old code without needing a mutation argument.
+    #[test]
+    fn the_manual_app_install_honours_an_inconclusive_msi_probe() {
+        let code = app_branch();
+        assert!(
+            code.contains("MsiBlocked"),
+            "must refuse to install over a detected MSI install"
+        );
+    }
+
+    /// Guards the exact defect in the original tripwire: prove that stripping
+    /// comments actually changes what is visible, so this test can never
+    /// degrade into the prose-matching one it replaces.
+    #[test]
+    fn a_comment_alone_cannot_satisfy_these_assertions() {
+        let sample = "let x = 1; // prepare_for_update_install download_and_install\n";
+        let stripped = code_only(sample);
+        assert!(!stripped.contains("prepare_for_update_install"));
+        assert!(!stripped.contains("download_and_install"));
+    }
+}

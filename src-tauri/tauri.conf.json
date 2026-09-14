@@ -1,6 +1,6 @@
 {
   "productName": "Fry Edge Miner",
-  "version": "0.4.29",
+  "version": "0.4.30",
   "build": {
     "beforeBuildCommand": "npm run build",
     "beforeDevCommand": "npm run dev",
@@ -35,7 +35,9 @@
   "bundle": {
     "createUpdaterArtifacts": true,
     "active": true,
-    "targets": "all",
+    "targets": [
+      "nsis"
+    ],
     "resources": [
       "resources/frynode.exe"
     ],

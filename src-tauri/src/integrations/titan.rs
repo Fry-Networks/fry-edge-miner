@@ -5,6 +5,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::{info, warn};
 use crate::supervisor::Supervisor;
 
@@ -48,7 +49,7 @@ const VC_REDIST_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// Outcome of one elevated VC++ redist install attempt. A dedicated enum
 /// rather than folding everything into `Result` because `StillInstalling`
 /// is NOT a failure — `output_bounded`'s timeout only kills the OUTER
-/// unelevated `powershell.exe` that launched `Start-Process -Verb RunAs`;
+/// unelevated `powershell.exe` that launched `Start-Process -Verb RunAs -WindowStyle Hidden`;
 /// the real elevated installer is a separate process in a different
 /// security context that kill cannot reach, so it very plausibly keeps
 /// running and can succeed moments later. Reporting that as a hard failure
@@ -83,7 +84,7 @@ fn vc_redist_install_outcome(timed_out: bool, success: bool, exit_code: Option<i
 }
 
 /// Download and silently install the VC++ 2015-2022 x64 redistributable
-/// through ONE elevated prompt (same `Start-Process -Verb RunAs -Wait`
+/// through ONE elevated prompt (same `Start-Process -Verb RunAs -WindowStyle Hidden -Wait`
 /// pattern as `security_setup::run_hardening_elevated` /
 /// `firewall::ensure_program_rules`). `Err` is reserved for genuine
 /// unexpected failures (download failed, task panicked); a completed-but-declined
@@ -95,7 +96,7 @@ pub(crate) async fn install_vc_redist_elevated() -> Result<VcRedistInstallOutcom
 
     let installer_str = installer_path.to_string_lossy().to_string();
     let outer = format!(
-        "$p = Start-Process -FilePath '{}' -ArgumentList '/install','/quiet','/norestart' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
+        "$ErrorActionPreference = 'Stop'; try {{ $p = Start-Process -FilePath '{}' -ArgumentList '/install','/quiet','/norestart' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; if ($null -eq $p) {{ exit 3 }}; exit $p.ExitCode }} catch {{ exit 2 }}",
         installer_str.replace('\'', "''")
     );
 
@@ -223,6 +224,51 @@ mod log_level_tests {
 /// `vc_redist_dll_present`) over the generic log-tail fallback shared with
 /// BUG 6 (fryvpn) / BUG 9 (mysterium) — a missing DLL means the process
 /// likely never got far enough to write anything useful to its own logs.
+/// BUG 3: how many consecutive failing health ticks before the card is marked
+/// UNHEALTHY. titan-edge legitimately logs RPC timeouts while it is still
+/// locating a scheduler, and the health loop ticks every 30 s — so a single
+/// blip must not flip a working card (and trigger a restart cascade).
+pub(crate) const CONSECUTIVE_FAILURES_BEFORE_UNHEALTHY: u32 = 3;
+
+/// Consecutive failing health ticks seen so far. Reset the moment a clean tick
+/// is observed, so tolerance never accumulates across unrelated incidents.
+static TITAN_CONSECUTIVE_FAILURES: AtomicU32 = AtomicU32::new(0);
+
+/// PURE: consecutive-failure gate, so the tolerance is testable without timing.
+pub(crate) fn should_report_unhealthy(consecutive_failures: u32) -> bool {
+    consecutive_failures >= CONSECUTIVE_FAILURES_BEFORE_UNHEALTHY
+}
+
+/// PURE: the first genuinely-failing line in a log tail, or None.
+/// Reuses the existing `line_indicates_error` contract so benign lines that
+/// merely contain "error" (errors=0, error=<nil>, a docs URL) stay benign.
+pub(crate) fn first_error_line(log: &str) -> Option<&str> {
+    log.lines().map(str::trim).find(|l| line_indicates_error(l))
+}
+
+/// PURE: the user-facing reason for a daemon that is running but logging
+/// failures. Carries the REAL error through instead of the old fixed
+/// placeholder, and explains the common connectivity case in plain language.
+pub(crate) fn daemon_log_failure_reason(log: &str) -> String {
+    let Some(line) = first_error_line(log) else {
+        return "Titan Network: the daemon reported a problem".to_string();
+    };
+    let lower = line.to_lowercase();
+    let is_connectivity = lower.contains("timeout")
+        || lower.contains("i/o timeout")
+        || lower.contains("connection refused")
+        || lower.contains("no such host")
+        || lower.contains("dial tcp");
+    if is_connectivity {
+        format!(
+            "Titan Network: cannot reach the Titan scheduler — this is a network              connection problem, not a fault on this device. Titan retries              automatically. Details: {}",
+            super::stderr_tail(line, 1)
+        )
+    } else {
+        format!("Titan Network: {}", super::stderr_tail(line, 1))
+    }
+}
+
 fn process_not_running_reason(vc_redist_missing: bool, stderr_tail: &str) -> String {
     if vc_redist_missing {
         return "titan-edge process is not running: missing VC++ 2015-2022 x64 runtime \
@@ -451,12 +497,21 @@ impl Integration for TitanIntegration {
             .map(|l| l.to_string())
             .collect();
 
-        // Check for error markers
-        let has_errors = recent_lines.iter().any(|l| line_indicates_error(l));
-
-        if has_errors {
-            return HealthStatus::Unhealthy("Error detected in Titan daemon logs".to_string());
+        // BUG 3: carry the REAL error through, and tolerate transients.
+        // The old code collapsed every matched line to a fixed placeholder and
+        // flipped the card on the very first tick.
+        let combined = recent_lines.join("
+");
+        if first_error_line(&combined).is_some() {
+            let failures = TITAN_CONSECUTIVE_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
+            if should_report_unhealthy(failures) {
+                return HealthStatus::Unhealthy(daemon_log_failure_reason(&combined));
+            }
+            // Not yet persistent: report the transient state honestly rather
+            // than claiming health we cannot demonstrate.
+            return HealthStatus::Starting;
         }
+        TITAN_CONSECUTIVE_FAILURES.store(0, Ordering::Relaxed);
 
         // Check for daemon startup markers (conservative: process alive + no errors = Starting, look for running marker)
         let is_running = recent_lines
@@ -626,5 +681,88 @@ mod bug8_h2_vc_redist_timeout_tests {
             vc_redist_install_outcome(false, false, None),
             VcRedistInstallOutcome::Failed(None)
         );
+    }
+}
+
+/// BUG 3 (georgeparis): "Titan Network UNHEALTHY — RPC timeout to
+/// test23-scheduler.titannet.io:3456".
+///
+/// Measured from FryStation during recon — the endpoint is NOT the problem:
+///   test23-scheduler.titannet.io -> 47.76.123.118   TCP 3456 : reachable
+///   cassini-locator.titannet.io  -> 8.211.33.28     TCP 5000 : reachable  (what FEM uses)
+///   locator.titannet.io          -> 39.108.214.29   TCP 5000 : CLOSED
+///   mainnet-locator.titannet.io  -> NXDOMAIN
+/// `test23-scheduler` is handed to titan-edge by the locator at runtime and
+/// appears nowhere in this repo, and the only alternative locator does not
+/// answer — so there is no endpoint to switch to.
+///
+/// The actual defect: a matched error line collapsed to the fixed string
+/// "Error detected in Titan daemon logs", throwing away the one piece of
+/// information the user needed, even though `stderr_tail` was already imported
+/// and used two branches above.
+#[cfg(test)]
+mod bug3_daemon_error_tests {
+    use super::*;
+
+    #[test]
+    fn the_real_daemon_error_reaches_the_user_instead_of_a_fixed_string() {
+        let log = "2026-09-14 10:00:01 INFO  starting edge node\n\
+                   2026-09-14 10:00:31 ERROR rpc timeout: dial tcp 47.76.123.118:3456: i/o timeout\n";
+        let reason = daemon_log_failure_reason(log);
+        assert!(
+            reason.contains("3456") || reason.contains("timeout"),
+            "the actual failure must survive into the reason, got: {reason}"
+        );
+        assert_ne!(
+            reason, "Error detected in Titan daemon logs",
+            "BUG 3: the fixed placeholder string discards the real error"
+        );
+    }
+
+    /// A scheduler/RPC timeout is a specific, actionable condition — say so in
+    /// plain language rather than surfacing a Go error verbatim.
+    #[test]
+    fn a_scheduler_timeout_is_explained_in_plain_language() {
+        let log = "ERROR rpc timeout: dial tcp 47.76.123.118:3456: i/o timeout\n";
+        let reason = daemon_log_failure_reason(log);
+        let lower = reason.to_lowercase();
+        assert!(
+            lower.contains("titan") && (lower.contains("network") || lower.contains("connection")),
+            "a timeout should read as a connectivity problem, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_log_with_no_error_lines_produces_no_reason() {
+        let log = "INFO starting edge node\nINFO listening on 0.0.0.0:1234\n";
+        assert_eq!(first_error_line(log), None);
+    }
+
+    /// Benign lines that merely contain the substring "error" must not trip the
+    /// detector — this is the pre-existing `line_indicates_error` contract and
+    /// it must keep holding through the new path.
+    #[test]
+    fn benign_lines_containing_the_word_error_are_not_failures() {
+        for benign in [
+            "INFO  errors=0 warnings=0",
+            "INFO  error=<nil>",
+            "INFO  see https://docs.titannet.io/troubleshooting/error-codes",
+        ] {
+            assert_eq!(first_error_line(benign), None, "{benign:?} must not be a failure");
+        }
+    }
+
+    /// A single transient failure must not flip a card that was healthy — the
+    /// daemon legitimately logs RPC timeouts while it is finding a scheduler.
+    #[test]
+    fn one_transient_failure_does_not_flip_the_card() {
+        assert!(!should_report_unhealthy(1));
+        assert!(!should_report_unhealthy(CONSECUTIVE_FAILURES_BEFORE_UNHEALTHY - 1));
+    }
+
+    #[test]
+    fn a_persistent_failure_is_still_reported() {
+        assert!(should_report_unhealthy(CONSECUTIVE_FAILURES_BEFORE_UNHEALTHY));
+        assert!(should_report_unhealthy(CONSECUTIVE_FAILURES_BEFORE_UNHEALTHY + 5));
     }
 }

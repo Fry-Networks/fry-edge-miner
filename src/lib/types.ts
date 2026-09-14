@@ -109,11 +109,17 @@ export interface DeviceInfo {
   wallet_address: string | null
   device_name: string | null
   registered: boolean
+  /** BUG 10/RC4: optional so an older backend cannot break the UI. */
+  registration_complete?: boolean
 }
 
 export interface FemConfig {
   miner_key: string | null
   wallet_address: string | null
+  /** BUG 1/4: configured storage override; null/absent = the default location. */
+  storage_dir?: string | null
+  /** BUG 1/4: the root actually in use this session (differs until restart). */
+  storage_dir_active?: string
   config_warning?: string | null
   integrations_enabled: Record<string, boolean>
   api_base_url: string

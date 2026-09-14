@@ -17,6 +17,15 @@ const SPACE_ACRES_MIN_GB: u64 = 50;
 /// Fails OPEN on `None`: an unmeasurable machine must never be silently marked
 /// unavailable, because `check_requirements()` drives `available_count()`,
 /// which is the denominator of the multiplier this device submits.
+/// PURE: the `Result` -> `(eligible, reason)` shape the toggle expects. Split
+/// out so the mapping is testable without a disk.
+fn eligibility_from(verdict: Result<(), String>) -> (bool, Option<String>) {
+    match verdict {
+        Ok(()) => (true, None),
+        Err(r) => (false, Some(r)),
+    }
+}
+
 fn evaluate_requirements(ssd: Option<bool>, free_gb: Option<f64>) -> Result<(), String> {
     if ssd == Some(false) {
         return Err("No SSD detected — SpaceAcres requires solid-state storage".to_string());
@@ -571,32 +580,22 @@ impl SpaceAcresIntegration {
     /// - System has an SSD (or the SeekPenalty=false fallback indicates one)
     /// - Free disk space >= SPACE_ACRES_MIN_GB
     /// Returns (eligible, Option<reason>) — if ineligible, reason explains why.
+    /// BUG 1/4 + BUG 7: rebuilt on `evaluate_requirements` so the toggle gate
+    /// and `check_requirements()` can no longer disagree.
+    ///
+    /// Previously this ran its OWN uncached PowerShell probe (`check_free_space`)
+    /// that rounded through `u64`, so it could differ from the real gate by up
+    /// to 1 GB, and it used `has_ssd()` (`unwrap_or(false)` — fail CLOSED)
+    /// while `check_requirements` used the tri-state (fail OPEN). Off-Windows
+    /// `has_ssd()` is hardcoded `false`, which made SpaceAcres permanently
+    /// untoggleable there while still counting toward `available_count()`.
+    ///
+    /// Still `async` so the call site in `commands/integration.rs` is untouched.
     pub async fn check_eligibility() -> (bool, Option<String>) {
-        if !has_ssd() {
-            return (false, Some("No SSD detected — SpaceAcres requires solid-state storage".to_string()));
-        }
-
-        // Check free disk space on the partners base directory
-        match check_free_space().await {
-            Ok(free_gb) => {
-                if free_gb < SPACE_ACRES_MIN_GB {
-                    return (
-                        false,
-                        Some(format!(
-                            "Insufficient disk space — {} GB free, {} GB required",
-                            free_gb, SPACE_ACRES_MIN_GB
-                        )),
-                    );
-                }
-                (true, None)
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to check disk space");
-                // TODO-verify: SpaceAcres actual minimum
-                // Assume eligible if check fails (don't block on uncertain state)
-                (true, None)
-            }
-        }
+        eligibility_from(evaluate_requirements(
+            ssd_state_for_requirements(),
+            crate::system_info::available_disk_gb(&partners_base_dir()),
+        ))
     }
 }
 
@@ -828,7 +827,10 @@ impl Integration for SpaceAcresIntegration {
         if !installed {
             return HealthStatus::Stopped;
         }
-        if !has_ssd() {
+        // BUG 7: only a DEFINITE "this machine has rotating disks" reading may
+        // mark a running farmer unhealthy. `has_ssd()` collapsed unmeasurable
+        // into false, so every NVMe box reported degraded forever.
+        if ssd_state_for_requirements() == Some(false) {
             warn!("No SSD detected — SpaceAcres performance will be degraded");
             return HealthStatus::Unhealthy(
                 "No SSD detected — SpaceAcres performance degraded".to_string(),
@@ -914,52 +916,6 @@ impl Integration for SpaceAcresIntegration {
     }
 }
 
-/// Check available disk space on the partners directory.
-/// Returns available space in GB.
-async fn check_free_space() -> anyhow::Result<u64> {
-    let base_dir = partners_base_dir();
-    #[cfg(target_os = "windows")]
-    {
-        let path = base_dir.to_string_lossy().to_string();
-        let drive = path.split(':').next().unwrap_or("C");
-
-        let output = crate::supervisor::platform::command("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!(
-                    "((Get-Volume -DriveLetter {} | Select-Object -Expand SizeRemaining) / 1GB) -as [int64]",
-                    drive
-                ),
-            ])
-            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
-
-        String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse::<u64>()
-            .map_err(|e| anyhow::anyhow!("Failed to parse disk space: {}", e))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let output = crate::supervisor::platform::command("df")
-            .arg("-BG")
-            .arg(&base_dir)
-            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
-
-        // df output format: Filesystem 1G-blocks Used Available Use% Mounted on
-        let lines: Vec<&str> = String::from_utf8_lossy(&output.stdout).lines().collect();
-        if lines.len() > 1 {
-            let parts: Vec<&str> = lines[1].split_whitespace().collect();
-            if parts.len() > 3 {
-                return parts[3]
-                    .trim_end_matches('G')
-                    .parse::<u64>()
-                    .map_err(|e| anyhow::anyhow!("Failed to parse disk space: {}", e));
-            }
-        }
-        anyhow::bail!("Failed to parse df output")
-    }
-}
 
 /// Detect if system has an SSD.
 /// Cached: the probe spawns a full PowerShell process (~1-3s) and this is
@@ -975,7 +931,14 @@ async fn check_free_space() -> anyhow::Result<u64> {
 /// working integration), so "no SSD" and "could not tell" cannot share a value.
 #[cfg(target_os = "windows")]
 fn ssd_state() -> Option<bool> {
-    *SSD_CACHE.get_or_init(|| {
+    if let Ok(guard) = SSD_CACHE.lock() {
+        if let Some((value, at)) = *guard {
+            if at.elapsed() < SSD_CACHE_TTL {
+                return value;
+            }
+        }
+    }
+    let measured = (|| {
         // Primary probe answers definitively when it succeeds.
         let primary = crate::supervisor::platform::command("powershell")
             .args([
@@ -1011,22 +974,64 @@ fn ssd_state() -> Option<bool> {
                     .to_lowercase()
                     .contains("true")
             });
-        match (primary, fallback) {
-            // Fallback saw an SSD.
-            (_, Some(true)) => Some(true),
-            // At least one probe ran and neither found one.
-            (Some(_), Some(false)) | (Some(_), None) | (None, Some(false)) => Some(false),
-            // Nothing could be measured.
-            (None, None) => None,
-        }
-    })
+        // Third signal (BUG 7): a physical disk with SpindleSpeed 0 is an SSD
+        // even when MediaType reads `Unspecified` — the NVMe / RAID / VMD case.
+        let no_spindle = crate::supervisor::platform::command("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "(Get-PhysicalDisk | Where-Object { $_.SpindleSpeed -eq 0 } | Measure-Object).Count",
+            ])
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+            .ok()
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok())
+            .unwrap_or(0);
+
+        let spinning = crate::supervisor::platform::command("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "(Get-PhysicalDisk | Where-Object { $_.SpindleSpeed -gt 0 } | Measure-Object).Count",
+            ])
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+            .ok()
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok())
+            .unwrap_or(0);
+
+        classify_ssd(primary, fallback, no_spindle, spinning)
+    })();
+    if let Ok(mut guard) = SSD_CACHE.lock() {
+        *guard = Some((measured, std::time::Instant::now()));
+    }
+    measured
 }
 
-/// Unmeasurable is reported as "no SSD" here to preserve the pre-existing
-/// behaviour of every caller that predates `ssd_state()`.
-#[cfg(target_os = "windows")]
-fn has_ssd() -> bool {
-    ssd_state().unwrap_or(false)
+/// PURE (BUG 7). Decide the tri-state SSD signal from the raw probe results.
+///
+/// `ssd_media`  = count of disks whose MediaType is literally 'SSD' (None = probe failed)
+/// `no_penalty` = did the SeekPenalty==false probe find any device (None = probe failed)
+/// `no_spindle` = count of physical disks reporting SpindleSpeed == 0
+/// `spinning`   = count of physical disks reporting SpindleSpeed > 0
+///
+/// The critical rule the old code got wrong: a ZERO count is NOT evidence of a
+/// spinning disk. On NVMe / RAID / VMD hardware every SSD-detecting probe can
+/// legitimately return nothing, which is exactly what an HDD-only box looks
+/// like. The two are only distinguishable by an AFFIRMATIVE rotational signal,
+/// so `Some(false)` is returned solely when a disk actually reports a spindle
+/// speed above zero. Everything else is `None` and fails OPEN.
+fn classify_ssd(
+    ssd_media: Option<u32>,
+    no_penalty: Option<bool>,
+    no_spindle: u32,
+    spinning: u32,
+) -> Option<bool> {
+    if ssd_media.is_some_and(|c| c > 0) || no_spindle > 0 || no_penalty == Some(true) {
+        return Some(true);
+    }
+    if spinning > 0 {
+        return Some(false);
+    }
+    None
 }
 
 /// Warm the SSD probe before anything on a hot path can trigger it. The first
@@ -1053,14 +1058,22 @@ fn ssd_state_for_requirements() -> Option<bool> {
     }
 }
 
+/// BUG 7: a TTL cache, not a process-lifetime `OnceLock`.
+///
+/// The probe is warmed at the coldest possible moment (`main.rs` setup). A
+/// cold `Get-PhysicalDisk` that exceeds PROBE_TIMEOUT, or a Storage WMI
+/// namespace that is briefly unavailable, used to poison the answer until the
+/// app was restarted. Re-probing every 10 minutes matches `system_info`'s own
+/// disk/RAM caches and costs at most one extra PowerShell spawn per window.
 #[cfg(target_os = "windows")]
-static SSD_CACHE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+const SSD_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+#[cfg(target_os = "windows")]
+static SSD_CACHE: std::sync::Mutex<Option<(Option<bool>, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
 
 
-#[cfg(not(target_os = "windows"))]
-fn has_ssd() -> bool {
-    false // Platform-specific SSD detection deferred
-}
+
 
 /// F6 follow-up: upstream's WiX package (res/windows/wix/space-acres.wxs)
 /// installs the farmer to `<root>\Space Acres\bin\space-acres.exe` — a `bin`
@@ -1482,5 +1495,103 @@ mod bug7_update_check_tests {
     fn version_component_parsing_strips_a_leading_v_and_pads_nothing_itself() {
         assert_eq!(parse_version_components("v0.2.21"), vec![0, 2, 21]);
         assert_eq!(parse_version_components("0.2.21.0"), vec![0, 2, 21, 0]);
+    }
+}
+
+/// BUG 7 (minerman): "No SSD detected" on a device that HAS an SSD.
+///
+/// The old classifier collapsed "could not tell" into "definitively no SSD":
+/// the arm `(Some(_), Some(false))` committed to `Some(false)`. On NVMe drives
+/// and disks behind RAID/Intel-RST/VMD controllers `Get-PhysicalDisk` reports
+/// `MediaType = Unspecified` (so the count is 0) and `MSFT_PhysicalDisk`
+/// reports `SeekPenalty = $null` (so `-EQ $false` matches nothing) — two
+/// non-answers that together produced a confident "no".
+///
+/// Measured on FryStation, which has two real SSDs (one NVMe, one SATA):
+///   Get-PhysicalDisk | Where MediaType -eq 'SSD'  -> 2
+///   Win32_DiskDrive.MediaType                     -> "Fixed hard disk media" (both)
+///   Win32_DiskDrive.InterfaceType                 -> IDE (for the SATA SSD)
+/// i.e. the legacy WMI view is useless and only the tri-state reading is safe.
+#[cfg(test)]
+mod bug7_ssd_classifier_tests {
+    use super::*;
+
+    #[test]
+    fn a_positive_count_is_a_definite_yes() {
+        assert_eq!(classify_ssd(Some(2), None, 0, 0), Some(true));
+        assert_eq!(classify_ssd(Some(1), Some(false), 0, 0), Some(true));
+    }
+
+    /// The reported bug. An NVMe box: the SSD count is 0 because MediaType is
+    /// `Unspecified`, and SeekPenalty is null so the fallback matches nothing.
+    /// Neither probe actually SAW a spinning disk, so the honest answer is
+    /// "unmeasurable" — which fails OPEN — not "no SSD", which fails closed.
+    #[test]
+    fn an_nvme_box_reporting_unspecified_media_is_unmeasurable_not_a_definite_no() {
+        assert_eq!(
+            classify_ssd(Some(0), Some(false), 0, 0),
+            None,
+            "BUG 7: two non-answers must not add up to a confident 'no SSD'"
+        );
+    }
+
+    /// A third signal: physical disks reporting a zero spindle speed are SSDs
+    /// even when MediaType is Unspecified.
+    #[test]
+    fn a_zero_spindle_speed_rescues_a_box_the_first_two_probes_missed() {
+        assert_eq!(classify_ssd(Some(0), Some(false), 1, 0), Some(true));
+        assert_eq!(classify_ssd(None, None, 2, 0), Some(true));
+    }
+
+    /// A genuine spinning-rust machine must still be a definite no, or the
+    /// requirements gate stops protecting anyone.
+    #[test]
+    fn a_real_spinning_disk_machine_is_still_a_definite_no() {
+        // Only an AFFIRMATIVE spindle-speed reading justifies a confident no.
+        assert_eq!(classify_ssd(Some(0), Some(false), 0, 2), Some(false));
+    }
+
+    /// The distinction the old code could not make: an NVMe box and an
+    /// HDD-only box produce identical SSD-probe output, and are told apart
+    /// only by whether any disk affirmatively reports a spindle speed.
+    #[test]
+    fn an_nvme_box_and_a_spinning_box_are_told_apart_by_the_rotational_signal() {
+        let nvme = classify_ssd(Some(0), Some(false), 0, 0);
+        let hdd = classify_ssd(Some(0), Some(false), 0, 3);
+        assert_eq!(nvme, None, "NVMe: unmeasurable, must fail open");
+        assert_eq!(hdd, Some(false), "HDD: affirmative rotation, must fail closed");
+        assert_ne!(nvme, hdd);
+    }
+
+    #[test]
+    fn nothing_measurable_stays_unmeasurable() {
+        assert_eq!(classify_ssd(None, None, 0, 0), None);
+    }
+
+    /// BUG 1/4 + BUG 7: the toggle gate and the requirements gate must agree.
+    #[test]
+    fn eligibility_and_requirements_never_disagree() {
+        let cases = [
+            (Some(true), Some(100.0)),
+            (Some(true), Some(49.0)),
+            (Some(false), Some(500.0)),
+            (None, None),
+        ];
+        for (ssd, gb) in cases {
+            let verdict = evaluate_requirements(ssd, gb);
+            let expected = match &verdict {
+                Ok(()) => (true, None),
+                Err(r) => (false, Some(r.clone())),
+            };
+            assert_eq!(eligibility_from(verdict), expected, "ssd={ssd:?} gb={gb:?}");
+        }
+    }
+
+    /// An unmeasurable machine must NOT be blocked by the toggle when the real
+    /// requirements gate would let it through. This is the off-Windows and
+    /// NVMe case that used to be permanently untoggleable.
+    #[test]
+    fn an_unmeasurable_machine_is_no_longer_blocked_by_the_toggle() {
+        assert_eq!(eligibility_from(evaluate_requirements(None, None)), (true, None));
     }
 }

@@ -89,7 +89,7 @@ pub fn build_hardening_script(install_dir: &Path, exe_names: &[&str], frynode_pa
 /// depth for any other path that could leave `$p` unset.
 fn build_outer_elevation_script(inner: &str) -> String {
     format!(
-        "$ErrorActionPreference = 'Stop'; try {{ $p = Start-Process -FilePath powershell -ArgumentList '-NoProfile','-Command',\"{}\" -Verb RunAs -Wait -PassThru; if ($null -eq $p) {{ exit 3 }}; exit $p.ExitCode }} catch {{ exit 2 }}",
+        "$ErrorActionPreference = 'Stop'; try {{ $p = Start-Process -FilePath powershell -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command',\"{}\" -Verb RunAs -WindowStyle Hidden -Wait -PassThru; if ($null -eq $p) {{ exit 3 }}; exit $p.ExitCode }} catch {{ exit 2 }}",
         inner.replace('"', "`\"")
     )
 }
@@ -311,5 +311,73 @@ mod tests {
     fn any_other_nonzero_exit_code_is_a_failure() {
         assert!(hardening_outcome(Some(1), true).is_err());
         assert!(hardening_outcome(Some(1603), false).is_err());
+    }
+}
+
+/// BUG 10 / RC3: elevation hygiene, enforced against the real source.
+///
+/// `CREATE_NO_WINDOW` on the outer unelevated `platform::command("powershell")`
+/// does NOT propagate to a grandchild created by `Start-Process -Verb RunAs` —
+/// that child is created by the AppInfo service via ShellExecuteEx, which
+/// honours `-WindowStyle` and nothing from the parent's creation flags. So
+/// every elevated launch flashed a console window on top of the UAC prompt.
+///
+/// Separately, commit 51a59b3 hardened only ONE of the four elevation
+/// wrappers. `firewall.rs` and `titan.rs` still carried the pre-51a59b3 shape
+/// (`$p = Start-Process …; exit $p.ExitCode`, no `$ErrorActionPreference`,
+/// no `$null` guard), where a DECLINED UAC reads as exit 0 — i.e. success.
+#[cfg(test)]
+mod bug10_elevation_hygiene_tests {
+    const SOURCES: [(&str, &str); 4] = [
+        ("security_setup.rs", include_str!("security_setup.rs")),
+        ("firewall.rs", include_str!("integrations/firewall.rs")),
+        ("titan.rs", include_str!("integrations/titan.rs")),
+        ("docker_manager.rs", include_str!("integrations/docker_manager.rs")),
+    ];
+
+    /// Strip line comments so a test can never be satisfied by prose — the
+    /// exact failure mode of the vacuous tripwire in `commands/updates.rs`.
+    fn code_only(src: &str) -> String {
+        src.lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn every_elevated_start_process_hides_its_console_window() {
+        for (name, src) in SOURCES {
+            let code = code_only(src);
+            let launches = code.matches("-Verb RunAs").count();
+            let hidden = code.matches("-WindowStyle Hidden").count();
+            assert!(
+                hidden >= launches,
+                "{name}: {launches} elevated launches but only {hidden} hide their window"
+            );
+        }
+    }
+
+    #[test]
+    fn no_elevation_wrapper_still_carries_the_pre_51a59b3_shape() {
+        // Built at runtime from fragments: this file is itself one of SOURCES,
+        // so a verbatim literal here would make the test match its own
+        // assertion and fail forever.
+        let legacy_shape = format!("-PassThru; exit {}p.ExitCode", '$');
+        for (name, src) in SOURCES {
+            let code = code_only(src);
+            assert!(
+                !code.contains(&legacy_shape),
+                "{name}: still uses the wrapper where a declined UAC reads as exit 0"
+            );
+        }
+    }
+
+    #[test]
+    fn storj_never_bypasses_the_no_window_command_helper() {
+        let code = code_only(include_str!("integrations/storj.rs"));
+        assert!(
+            !code.contains("Command::new(\"powershell\")"),
+            "storj bypasses platform::command, so Expand-Archive flashes a console window"
+        );
     }
 }

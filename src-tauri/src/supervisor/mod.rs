@@ -42,6 +42,18 @@ impl Supervisor {
         command: &str,
         args: &[&str],
     ) -> std::io::Result<()> {
+        self.start_integration_with_env(id, command, args, &[])
+    }
+
+    /// Start an integration with extra environment (BUG 6: secrets belong in
+    /// the environment, never on the command line).
+    pub fn start_integration_with_env(
+        &mut self,
+        id: &str,
+        command: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> std::io::Result<()> {
         if let Some(existing) = self.processes.get_mut(id) {
             if existing.is_running() {
                 info!(integration = id, "Already running, skipping start");
@@ -49,7 +61,22 @@ impl Supervisor {
             }
         }
         let integration_log_dir = self.log_dir.join(id);
-        let process = ManagedProcess::spawn(id, command, args, &integration_log_dir)?;
+        // BUG 9: run every managed partner in its own always-writable directory
+        // instead of letting it inherit FEM's CWD (`C:\Windows\System32` when
+        // FEM starts from its Run key), which is what made frynode fail with
+        // `mkdir node-identity: Access is denied`.
+        let working_dir = process::working_dir_for(
+            id,
+            &crate::integrations::download::partners_base_dir(),
+        );
+        let process = ManagedProcess::spawn_full(
+            id,
+            command,
+            args,
+            &integration_log_dir,
+            Some(working_dir.as_path()),
+            env,
+        )?;
         info!(
             integration = id,
             pid = process.pid(),

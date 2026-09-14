@@ -113,10 +113,10 @@
     FileWrite $6 "$\r$\n"
     FileWrite $6 "To recover:$\r$\n"
     FileWrite $6 "  1. Open Windows Security > Virus & threat protection > Protection history, find the quarantined fry-edge-miner.exe, and restore it.$\r$\n"
-    FileWrite $6 "  2. Or restore the previous version from: %LOCALAPPDATA%\Fry Edge Miner\.prev\fry-edge-miner.exe$\r$\n"
+    FileWrite $6 "  2. Or restore the previous version from: $APPDATA\com.frynetworks.fem\.prev\fry-edge-miner.exe$\r$\n"
     FileWrite $6 "  3. Add an exclusion for this folder in Windows Security so future updates are unaffected: $INSTDIR$\r$\n"
     FileClose $6
-    MessageBox MB_ICONEXCLAMATION "Fry Edge Miner did not install correctly — the application file is missing or was blocked by antivirus.$\r$\n$\r$\nSee $INSTDIR\update-failed.txt for recovery steps, or restore the previous version from %LOCALAPPDATA%\Fry Edge Miner\.prev\"
+    MessageBox MB_ICONEXCLAMATION "Fry Edge Miner did not install correctly — the application file is missing or was blocked by antivirus.$\r$\n$\r$\nSee $INSTDIR\update-failed.txt for recovery steps, or restore the previous version from $APPDATA\com.frynetworks.fem\.prev\"
   ${Else}
     DetailPrint "fry-edge-miner.exe verified present ($4 bytes)"
   ${EndIf}

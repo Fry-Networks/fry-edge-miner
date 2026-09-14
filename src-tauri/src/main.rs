@@ -11,6 +11,7 @@ mod logging;
 mod migration;
 mod poc;
 mod security_setup;
+mod storage_location;
 mod supervisor;
 mod system_info;
 mod updater_auto;
@@ -170,10 +171,28 @@ fn main() {
 
             // API client (initial bearer token is the configured token; per-device token applied after registration)
             let cfg = config_store.get();
+
+            // BUG 1/4: resolve the storage root ONCE, before anything reads it.
+            // Ordering is load-bearing — every `registry.register` below, the
+            // SpaceAcres SSD/disk warm probe, and the startup orphan sweep all
+            // call `partners_base_dir()` and must see the final value.
+            integrations::download::init_storage_root(cfg.storage_dir.as_deref());
             let api_client = Arc::new(ApiClient::new(
                 cfg.api_base_url.clone(),
                 cfg.effective_api_token(),
             ));
+
+            // BUG 10/RC4: finish a half-done registration FIRST. The two hooks
+            // below both match on (miner_key, install_id) and return early
+            // without an install_id, so on a half-registered device they can
+            // never make progress until this has run.
+            {
+                let rc_config = config_store.clone();
+                let rc_api = api_client.clone();
+                tauri::async_runtime::spawn(async move {
+                    commands::device::attempt_registration_completion(&rc_config, &rc_api).await;
+                });
+            }
 
             // Device token auto-migration (fire-and-forget, fail-safe)
             {
@@ -230,6 +249,7 @@ fn main() {
             registry.register(Arc::new(integrations::aem::AemIntegration::default()));
             registry.register(Arc::new(integrations::fryvpn::FryVpnIntegration {
                 config: config_store.clone(),
+                api_client: api_client.clone(),
                 supervisor: supervisor.clone(),
                 log_dir: log_dir.clone(),
             }));
@@ -1011,6 +1031,9 @@ fn main() {
             commands::rewards::get_poc_slots,
             commands::settings::get_settings,
             commands::settings::save_settings,
+            commands::settings::set_wallet_address,
+            commands::settings::get_storage_location,
+            commands::settings::set_storage_location,
             commands::system::get_system_status,
             commands::migration::check_migration,
             commands::migration::run_migration,

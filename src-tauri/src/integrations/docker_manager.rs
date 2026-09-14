@@ -474,7 +474,7 @@ async fn run_docker_installer(installer_path: &std::path::Path) -> Result<()> {
         r#"
 $installer = '{}'
 $args = @('install', '--quiet', '--accept-license')
-Start-Process -FilePath $installer -ArgumentList $args -Verb RunAs -Wait
+Start-Process -FilePath $installer -ArgumentList $args -Verb RunAs -WindowStyle Hidden -Wait
 Exit $LASTEXITCODE
 "#,
         installer_path.display()

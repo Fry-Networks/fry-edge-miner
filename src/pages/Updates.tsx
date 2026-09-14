@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import {
   ArrowUpCircle,
   CheckCircle2,
@@ -8,6 +9,13 @@ import {
   type LucideIcon
 } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
+import {
+  updateButtonState,
+  formatUpdateBlockedMsi,
+  formatUpdateFailed,
+  UPDATE_HANDOFF_NOTICE,
+  type UpdatePhase,
+} from '../lib/updateEvents'
 import Btn from '../components/primitives/Btn'
 import EmptyState from '../components/primitives/EmptyState'
 import Lbl from '../components/primitives/Lbl'
@@ -55,6 +63,11 @@ export default function Updates() {
   const [success, setSuccess] = useState<string | null>(null)
   const [lastChecked, setLastChecked] = useState<Date | null>(null)
   const [isUpdating, setIsUpdating] = useState(false)
+  // BUG 10: the old isUpdating flag gated nothing visible, and on Windows the
+  // install promise never resolves (the process exits), so the page just froze.
+  const [phase, setPhase] = useState<UpdatePhase>('idle')
+  const [blocked, setBlocked] = useState<{ title: string; detail: string; command: string | null } | null>(null)
+  const [failed, setFailed] = useState<{ title: string; detail: string } | null>(null)
 
   const fetchUpdates = useCallback(async () => {
     setChecking(true)
@@ -77,12 +90,49 @@ export default function Updates() {
     fetchUpdates()
   }, [fetchUpdates])
 
+  useEffect(() => {
+    const unlisteners: Array<() => void> = []
+    let cancelled = false
+    void (async () => {
+      try {
+        const offBlocked = await listen<Record<string, string>>('update-blocked-msi', (ev) => {
+          setBlocked(formatUpdateBlockedMsi(ev.payload ?? {}))
+          setPhase('blocked')
+          setIsUpdating(false)
+        })
+        const offFailed = await listen<Record<string, string>>('update-failed', (ev) => {
+          setFailed(formatUpdateFailed(ev.payload ?? {}))
+          setPhase('failed')
+          setIsUpdating(false)
+        })
+        if (cancelled) {
+          offBlocked()
+          offFailed()
+        } else {
+          unlisteners.push(offBlocked, offFailed)
+        }
+      } catch {
+        // Not running under Tauri (browser preview) — nothing to listen to.
+      }
+    })()
+    return () => {
+      cancelled = true
+      unlisteners.forEach((off) => off())
+    }
+  }, [])
+
   const doUpdate = useCallback(
     async (kind: string, id: string) => {
       if (isUpdating) return
       setIsUpdating(true)
+      setPhase('preparing')
       setError(null)
       setSuccess(null)
+      setBlocked(null)
+      setFailed(null)
+      // On Windows the app hands off to the installer and exits, so this is the
+      // last thing the user will see from us.
+      if (kind === 'app') setSuccess(UPDATE_HANDOFF_NOTICE)
       try {
         const result = isTauri()
           ? await invoke<string>('install_update', { kind, id })
@@ -94,6 +144,7 @@ export default function Updates() {
         setError(String(e))
       } finally {
         setIsUpdating(false)
+        setPhase((prev: UpdatePhase) => (prev === 'preparing' ? 'idle' : prev))
       }
     },
     [fetchUpdates, isUpdating]
@@ -205,6 +256,58 @@ export default function Updates() {
         </Btn>
       </div>
 
+      {blocked && (
+        <div
+          data-testid="update-blocked"
+          style={{
+            padding: '10px 14px',
+            background: 'var(--amb)12',
+            border: '1px solid var(--amb)40',
+            borderRadius: 'var(--rad)',
+            fontFamily: 'var(--fb)',
+            fontSize: 12,
+            color: 'var(--amb)'
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>{blocked.title}</div>
+          <div style={{ lineHeight: 1.5 }}>{blocked.detail}</div>
+          {blocked.command && (
+            <div
+              style={{
+                marginTop: 8,
+                padding: '6px 8px',
+                background: 'var(--s2)',
+                borderRadius: 4,
+                fontFamily: 'var(--fm)',
+                fontSize: 11,
+                color: 'var(--t1)',
+                overflowWrap: 'anywhere'
+              }}
+            >
+              {blocked.command}
+            </div>
+          )}
+        </div>
+      )}
+
+      {failed && (
+        <div
+          data-testid="update-failed"
+          style={{
+            padding: '10px 14px',
+            background: 'var(--red)12',
+            border: '1px solid var(--red)40',
+            borderRadius: 'var(--rad)',
+            fontFamily: 'var(--fb)',
+            fontSize: 12,
+            color: 'var(--red)'
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>{failed.title}</div>
+          <div style={{ lineHeight: 1.5 }}>{failed.detail}</div>
+        </div>
+      )}
+
       {error && (
         <div
           style={{
@@ -251,7 +354,11 @@ export default function Updates() {
             current={appUpdate.current_version}
             available={appUpdate.latest_version}
             status={statusFor(appUpdate)}
-            onUpdate={appUpdate.available ? () => doUpdate('app', appUpdate.id) : undefined}
+            onUpdate={
+              updateButtonState({ phase, available: appUpdate.available }).disabled
+                ? undefined
+                : () => doUpdate('app', appUpdate.id)
+            }
           />
         ) : (
           <UpdCard
@@ -280,7 +387,11 @@ export default function Updates() {
                 current={p.current_version}
                 available={p.latest_version}
                 status={statusFor(p)}
-                onUpdate={p.available ? () => doUpdate('integration', p.id) : undefined}
+                onUpdate={
+                  updateButtonState({ phase, available: p.available }).disabled
+                    ? undefined
+                    : () => doUpdate('integration', p.id)
+                }
               />
             ))}
           </div>
