@@ -204,60 +204,90 @@ pub(crate) fn parse_account_balance(body: &str) -> Option<(u64, u64)> {
     Some((amount, min_balance))
 }
 
+/// What to do about frynode's node identity (BUG 6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IdentityPlan {
+    /// We hold the device's key: pass it, after a balance pre-check.
+    UseIdentity { address: String, mnemonic: String },
+    /// We do not hold a usable key. Start frynode exactly as before rather
+    /// than removing a node that would otherwise run.
+    StartWithoutIdentity,
+}
+
+/// PURE: decide from what hardwareapi actually returned.
+pub(crate) fn identity_plan(address: Option<&str>, mnemonic: Option<&str>) -> IdentityPlan {
+    match (
+        address.map(str::trim).filter(|a| !a.is_empty()),
+        mnemonic.map(str::trim).filter(|m| !m.is_empty()),
+    ) {
+        (Some(a), Some(m)) => IdentityPlan::UseIdentity {
+            address: a.to_string(),
+            mnemonic: m.to_string(),
+        },
+        _ => IdentityPlan::StartWithoutIdentity,
+    }
+}
+
 impl FryVpnIntegration {
     /// Fetch the device's provisioned Algorand identity and confirm it can
     /// actually afford the on-chain registration (BUG 6).
     ///
     /// Returns the mnemonic to hand frynode. Any failure is a user-facing
     /// sentence, never a raw chain error.
-    async fn resolve_funded_identity(&self) -> Result<String, String> {
-        let miner_key = self
-            .config
-            .get()
-            .miner_key
-            .ok_or_else(|| "This device is not registered yet — finish setup first.".to_string())?;
+    async fn resolve_funded_identity(&self) -> Result<Option<String>, String> {
+        let Some(miner_key) = self.config.get().miner_key else {
+            // Not registered yet: nothing to look up, and frynode starting
+            // without an identity is exactly the pre-change behaviour.
+            return Ok(None);
+        };
 
-        let creds = crate::api::credentials::lookup(&self.api_client, &miner_key)
-            .await
-            .map_err(|e| format!("Could not fetch this device's wallet: {e}"))?;
-
-        let address = creds
-            .algo_address
-            .filter(|a| !a.trim().is_empty())
-            .ok_or_else(|| {
-                "Device wallet not provisioned yet — fryDVPN will start automatically once it is."
-                    .to_string()
-            })?;
-        let mnemonic = creds.algo_mnemonic.filter(|m| !m.trim().is_empty()).ok_or_else(|| {
-            "Device wallet key not available yet — fryDVPN will start automatically once it is."
-                .to_string()
-        })?;
-
-        // Pre-check the balance so a 0-ALGO wallet never reaches the chain and
-        // comes back as an opaque "overspend".
-        let url = format!("{}/v2/accounts/{}", ALGOD_SERVER, address);
-        let body = reqwest::Client::new()
-            .get(&url)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| format!("Could not check the fryDVPN wallet balance: {e}"))?
-            .text()
-            .await
-            .map_err(|e| format!("Could not read the fryDVPN wallet balance: {e}"))?;
-
-        match parse_account_balance(&body) {
-            Some((amount, min_balance)) => {
-                let spendable = spendable_microalgos(amount, min_balance);
-                registration_affordability(spendable, REGISTRATION_MIN_MICROALGOS, &address)?;
+        let creds = match crate::api::credentials::lookup(&self.api_client, &miner_key).await {
+            Ok(c) => c,
+            Err(e) => {
+                // A lookup failure must not remove a node that would run.
+                warn!(error = %e, "Could not fetch device wallet - starting fryDVPN without it");
+                return Ok(None);
             }
-            None => {
-                // Unreadable is NOT zero. Fail open rather than block a funded
-                // wallet because algod returned an error page.
-                warn!("Could not parse the algod account response — proceeding without a balance pre-check");
+        };
+
+        match identity_plan(creds.algo_address.as_deref(), creds.algo_mnemonic.as_deref()) {
+            IdentityPlan::StartWithoutIdentity => {
+                info!("No device wallet key available - starting fryDVPN without a node identity");
+                Ok(None)
+            }
+            IdentityPlan::UseIdentity { address, mnemonic } => {
+                // We hold this key, so the balance we measure IS the account
+                // frynode will spend from - only now is refusing justified.
+                let url = format!("{}/v2/accounts/{}", ALGOD_SERVER, address);
+                match reqwest::Client::new()
+                    .get(&url)
+                    .timeout(std::time::Duration::from_secs(10))
+                    .send()
+                    .await
+                {
+                    Ok(resp) => {
+                        match resp.text().await.ok().and_then(|b| parse_account_balance(&b)) {
+                            Some((amount, min_balance)) => {
+                                let spendable = spendable_microalgos(amount, min_balance);
+                                registration_affordability(
+                                    spendable,
+                                    REGISTRATION_MIN_MICROALGOS,
+                                    &address,
+                                )?;
+                            }
+                            None => warn!(
+                                "Could not read the fryDVPN wallet balance - starting without a pre-check"
+                            ),
+                        }
+                    }
+                    Err(e) => warn!(
+                        error = %e,
+                        "Could not reach algod for the fryDVPN balance pre-check - continuing"
+                    ),
+                }
+                Ok(Some(mnemonic))
             }
         }
-        Ok(mnemonic)
     }
 }
 
@@ -334,13 +364,12 @@ impl Integration for FryVpnIntegration {
             let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             // The mnemonic goes in the ENVIRONMENT, never in argv — argv is
             // readable by any process via tasklist/WMI.
-            sup.start_integration_with_env(
-                "fryvpn",
-                &binary,
-                &arg_refs,
-                &[("NODE_MNEMONIC", mnemonic.as_str())],
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to spawn frynode: {}", e))?;
+            let env: Vec<(&str, &str)> = match mnemonic.as_deref() {
+                Some(m) => vec![("NODE_MNEMONIC", m)],
+                None => Vec::new(),
+            };
+            sup.start_integration_with_env("fryvpn", &binary, &arg_refs, &env)
+                .map_err(|e| anyhow::anyhow!("Failed to spawn frynode: {}", e))?;
         }
 
         info!("Fry dVPN started with CLI flags");
@@ -632,5 +661,64 @@ mod bug6_balance_tests {
     fn an_unparseable_algod_response_is_not_treated_as_zero() {
         assert_eq!(parse_account_balance("<html>502 Bad Gateway</html>"), None);
         assert_eq!(parse_account_balance(""), None);
+    }
+}
+
+
+/// BUG 6 follow-up, found by the LIVE CANARY and not by the unit tests.
+///
+/// The first cut refused to start frynode whenever the device's mnemonic was
+/// unavailable. On a real device (algo_address present, algo_mnemonic absent --
+/// hardwareapi only returns the mnemonic when its encrypted blob decrypts) that
+/// is a REGRESSION: before the change frynode still ran and served traffic, it
+/// just failed the on-chain registration. Refusing to start removes a working
+/// node in order to fix a registration problem.
+#[cfg(test)]
+mod bug6_identity_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_mnemonic_falls_back_instead_of_blocking_the_node() {
+        assert_eq!(
+            identity_plan(Some("ZWWFC7ADDR"), None),
+            IdentityPlan::StartWithoutIdentity
+        );
+        assert_eq!(identity_plan(None, None), IdentityPlan::StartWithoutIdentity);
+    }
+
+    #[test]
+    fn a_usable_mnemonic_is_passed_through() {
+        let m = "word ".repeat(25);
+        let m = m.trim();
+        assert_eq!(
+            identity_plan(Some("ADDR"), Some(m)),
+            IdentityPlan::UseIdentity {
+                address: "ADDR".to_string(),
+                mnemonic: m.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_blank_mnemonic_is_treated_as_absent() {
+        assert_eq!(
+            identity_plan(Some("ADDR"), Some("   ")),
+            IdentityPlan::StartWithoutIdentity
+        );
+    }
+
+    /// The whole point: an underfunded wallet is only ever REFUSED when we
+    /// actually hold that wallet's key, because only then is the balance we
+    /// measured the account frynode will really spend from.
+    #[test]
+    fn refusal_requires_actually_holding_the_identity() {
+        assert!(
+            !matches!(
+                identity_plan(Some("ADDR"), None),
+                IdentityPlan::UseIdentity { .. }
+            ),
+            "without the key we cannot know which account frynode will use, so we must not \
+             block on a balance we did not measure"
+        );
     }
 }
