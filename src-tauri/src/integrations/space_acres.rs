@@ -577,8 +577,10 @@ impl SpaceAcresIntegration {
     }
 
     /// Check if system meets SpaceAcres eligibility requirements:
+    ///
     /// - System has an SSD (or the SeekPenalty=false fallback indicates one)
     /// - Free disk space >= SPACE_ACRES_MIN_GB
+    ///
     /// Returns (eligible, Option<reason>) — if ineligible, reason explains why.
     /// BUG 1/4 + BUG 7: rebuilt on `evaluate_requirements` so the toggle gate
     /// and `check_requirements()` can no longer disagree.

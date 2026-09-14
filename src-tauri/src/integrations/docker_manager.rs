@@ -327,7 +327,7 @@ fn detect_docker_startup_error() -> Option<String> {
         let log_dir = dirs::data_local_dir()?.join("Docker").join("log");
         for entry in std::fs::read_dir(&log_dir).ok()? {
             let path = entry.ok()?.path();
-            if path.extension().map_or(true, |e| e != "log" && e != "txt") {
+            if path.extension().is_none_or(|e| e != "log" && e != "txt") {
                 continue;
             }
             if let Ok(content) = std::fs::read_to_string(&path) {

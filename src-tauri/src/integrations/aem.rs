@@ -262,7 +262,7 @@ impl AemIntegration {
         }
         let identifier = format!(
             "mllwtl_olostepbrowser_{}",
-            hex::encode(&rand::random::<[u8; 6]>())
+            hex::encode(rand::random::<[u8; 6]>())
         );
         let config = serde_json::json!({
             "mllwtl_identifier": identifier,

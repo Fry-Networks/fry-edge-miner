@@ -451,6 +451,53 @@ impl Integration for FryVpnIntegration {
 mod tests {
     use super::*;
 
+    /// FIX 5: tests that mutate process-global environment variables must not
+    /// run concurrently. `cargo test` runs tests as threads in ONE process, so
+    /// a `set_var`/`remove_var` in one test is immediately visible to every
+    /// other. Reproduced before this fix: 1 failure in 10 consecutive parallel
+    /// full-suite runs (`region_honours_the_env_override`).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Holds `ENV_LOCK` and restores the variable's ORIGINAL value on drop.
+    ///
+    /// The restore lives in `Drop`, not at the end of the test body, so a
+    /// panic mid-test cannot leak a mutated variable into the next test.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn acquire(key: &'static str) -> Self {
+            // A panicking test poisons the mutex; recover the guard rather
+            // than cascading one real failure into unrelated ones.
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            Self {
+                key,
+                prev: std::env::var(key).ok(),
+                _lock: lock,
+            }
+        }
+
+        fn set(&self, value: &str) {
+            std::env::set_var(self.key, value);
+        }
+
+        fn unset(&self) {
+            std::env::remove_var(self.key);
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
     fn test_fryvpn_id() {
         let integration = FryVpnIntegration {
@@ -536,36 +583,77 @@ mod tests {
     fn region_defaults_when_unset_and_is_never_empty() {
         // frynode exits with "failed to load config: REGION is required" if this
         // is missing, which is what kept the binary from staying up.
-        std::env::remove_var("FRYNODE_REGION");
+        let env = EnvGuard::acquire("FRYNODE_REGION");
+        env.unset();
         assert_eq!(FryVpnIntegration::region(), "us");
     }
 
     #[test]
     fn region_honours_the_env_override() {
-        std::env::set_var("FRYNODE_REGION", "eu-west");
+        let env = EnvGuard::acquire("FRYNODE_REGION");
+        env.set("eu-west");
         assert_eq!(FryVpnIntegration::region(), "eu-west");
-        std::env::set_var("FRYNODE_REGION", "   ");
+        env.set("   ");
         assert_eq!(FryVpnIntegration::region(), "us", "blank override must fall back");
-        std::env::remove_var("FRYNODE_REGION");
+    }
+
+
+    /// FIX 5: the guard must restore the ORIGINAL value even when the test
+    /// holding it panics. A cleanup line at the end of a test body cannot do
+    /// this, which is why the restore lives in `Drop`.
+    ///
+    /// NOTE: `EnvGuard` is NOT re-entrant — it holds a plain `Mutex`, so
+    /// acquiring it twice on one thread deadlocks. This test therefore seeds
+    /// the variable directly and takes the guard exactly once, inside the
+    /// panicking closure.
+    #[test]
+    fn the_env_guard_restores_the_original_value_even_after_a_panic() {
+        const KEY: &str = "FEM_ENVGUARD_PROBE";
+        std::env::set_var(KEY, "original");
+
+        let panicked = std::panic::catch_unwind(|| {
+            let inner = EnvGuard::acquire(KEY);
+            inner.set("clobbered");
+            panic!("simulated test failure while holding the guard");
+        });
+        assert!(panicked.is_err(), "the inner closure must have panicked");
+
+        assert_eq!(
+            std::env::var(KEY).ok().as_deref(),
+            Some("original"),
+            "Drop must restore the pre-guard value even when the test panicked"
+        );
+
+        std::env::remove_var(KEY);
+        let absent = std::panic::catch_unwind(|| {
+            let inner = EnvGuard::acquire(KEY);
+            inner.set("temporary");
+            panic!("panic with no prior value");
+        });
+        assert!(absent.is_err());
+        assert!(
+            std::env::var(KEY).is_err(),
+            "a variable that did not exist before the guard must be unset again"
+        );
     }
 
     #[test]
     fn capacity_is_always_positive() {
         // frynode rejects 0 outright: "CAPACITY_MBPS is required (must be > 0)".
-        std::env::remove_var("FRYNODE_CAPACITY_MBPS");
+        let env = EnvGuard::acquire("FRYNODE_CAPACITY_MBPS");
+        env.unset();
         assert!(FryVpnIntegration::capacity_mbps() > 0);
 
-        std::env::set_var("FRYNODE_CAPACITY_MBPS", "250");
+        env.set("250");
         assert_eq!(FryVpnIntegration::capacity_mbps(), 250);
 
         for bad in ["0", "-5", "abc", ""] {
-            std::env::set_var("FRYNODE_CAPACITY_MBPS", bad);
+            env.set(bad);
             assert!(
                 FryVpnIntegration::capacity_mbps() > 0,
                 "override {bad:?} must not produce a zero capacity"
             );
         }
-        std::env::remove_var("FRYNODE_CAPACITY_MBPS");
     }
 
     #[test]

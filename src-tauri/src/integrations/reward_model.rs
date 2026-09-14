@@ -11,6 +11,7 @@
 //!     The server recomputes every count from the per-integration health data
 //!     in the PoC document and never trusts a client-supplied proportion.
 //!   * the dashboard's FEM reward display (HERMES00) — display only.
+//!
 //! This module is the FEM client's copy and drives the on-device estimate only.
 
 /// Boost for running BOTH required integrations rather than one.

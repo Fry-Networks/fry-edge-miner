@@ -80,8 +80,8 @@ where
         .spawn(move || {
             let _quiet = loader_error_mode::suppress();
             let result = create();
-            if let Err(std::sync::mpsc::SendError(late)) = tx.send(result) {
-                if let Ok(mut child) = late {
+            if let Err(std::sync::mpsc::SendError(Ok(mut child))) = tx.send(result) {
+                {
                     warn!(
                         integration = %id,
                         pid = child.id(),
@@ -102,8 +102,7 @@ where
                 bound.as_secs()
             ),
         )),
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
-            io::ErrorKind::Other,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other(
             format!("process creation thread for {integration_id} ended without a result"),
         )),
     }
@@ -135,6 +134,10 @@ impl ManagedProcess {
     ///
     /// Preserved verbatim as the no-working-directory form so existing callers
     /// and tests keep their exact behaviour; see `spawn_in`.
+    ///
+    /// clippy(dead_code): this and `spawn_in` are exercised by the tests in
+    /// this file; the gate runs on the bin target only and cannot see them.
+    #[allow(dead_code)]
     pub fn spawn(
         integration_id: &str,
         command: &str,
@@ -149,6 +152,7 @@ impl ManagedProcess {
     /// `cwd == None` reproduces the historic behaviour exactly: the child
     /// inherits FEM's own CWD. `Some(dir)` creates `dir` if needed and runs the
     /// child there.
+    #[allow(dead_code)]
     pub fn spawn_in(
         integration_id: &str,
         command: &str,

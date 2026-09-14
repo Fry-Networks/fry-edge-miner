@@ -153,12 +153,21 @@ pub fn registration_state(
 }
 
 /// How often a half-registered device retries completing its registration.
+/// OUT OF SCOPE — DISCOVERED (v0.4.30 gap, not fixed here):
+/// this cooldown and `should_attempt_registration_completion` below are unused
+/// because v0.4.30 wired `attempt_registration_completion` at STARTUP ONLY and
+/// never to the 60s PoC tick it was designed for. A half-registered device
+/// therefore reconciles once per launch instead of every 10 minutes. Silenced
+/// deliberately rather than deleted, so the designed mechanism is not lost;
+/// wiring it up is a behaviour change that needs its own versioned release.
+#[allow(dead_code)]
 pub const REGISTRATION_RETRY_COOLDOWN: std::time::Duration =
     std::time::Duration::from_secs(600);
 
 /// PURE: rate-limited reconciliation gate, mirroring the existing
 /// `should_attempt_recovery` / TOKEN_RECOVERY_COOLDOWN idiom so there is one
 /// retry policy in this file, not two.
+#[allow(dead_code)] // see REGISTRATION_RETRY_COOLDOWN above
 pub fn should_attempt_registration_completion(
     has_miner_key: bool,
     has_install_id: bool,
@@ -499,6 +508,9 @@ pub async fn deregister_device(
 ) -> Result<(), String> {
     let force = force.unwrap_or(false);
     let config = state.config.get();
+    // clippy(unused_assignments): the initial `true` was never read -- the
+    // branch below decides the value before anything observes it.
+    #[allow(unused_assignments)]
     let mut api_ok = true;
     if let (Some(ref key), Some(ref id)) = (&config.miner_key, &config.install_id) {
         if let Err(e) = crate::api::installations::unregister(&state.api_client, key, id).await {

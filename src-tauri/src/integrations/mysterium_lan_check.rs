@@ -103,10 +103,7 @@ async fn scan_subnet() -> Result<Option<String>> {
     }
 
     for task in tasks {
-        match task.await {
-            Ok(Some(conflict)) => return Ok(Some(conflict)),
-            _ => {}
-        }
+        if let Ok(Some(conflict)) = task.await { return Ok(Some(conflict)) }
     }
 
     Ok(None)
@@ -129,16 +126,13 @@ async fn probe_ip(ip: &str) -> Option<String> {
 /// Get local IP address (best effort).
 async fn get_local_ip() -> Result<String> {
     // Heuristic: connect to a public IP (don't actually send data) to discover local IP
-    match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
-        Ok(socket) => {
-            let _ = socket.connect("8.8.8.8:53").await; // Google DNS, arbitrary
-            if let Ok(addr) = socket.local_addr() {
-                if let IpAddr::V4(v4) = addr.ip() {
-                    return Ok(v4.to_string());
-                }
+    if let Ok(socket) = tokio::net::UdpSocket::bind("0.0.0.0:0").await {
+        let _ = socket.connect("8.8.8.8:53").await; // Google DNS, arbitrary
+        if let Ok(addr) = socket.local_addr() {
+            if let IpAddr::V4(v4) = addr.ip() {
+                return Ok(v4.to_string());
             }
         }
-        Err(_) => {}
     }
 
     // Fallback

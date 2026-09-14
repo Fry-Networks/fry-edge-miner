@@ -180,16 +180,16 @@ async fn attempt_docker_dependent_recovery(
                     match health_map.get(id) {
                         Some(HealthStatus::Healthy) | Some(HealthStatus::Stopped) => {
                             // Already healthy or intentionally stopped — skip
-                            return None;
+                            None
                         }
                         Some(HealthStatus::Unhealthy(_)) | Some(HealthStatus::Unknown) | None => {
                             // Unhealthy or unknown — candidate for recovery
-                            return Some(id.to_string());
+                            Some(id.to_string())
                         }
                         _ => None,
                     }
                 } else {
-                    return None;
+                    None
                 }
             })
             .collect()

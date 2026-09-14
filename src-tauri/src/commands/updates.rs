@@ -270,18 +270,52 @@ pub async fn install_update(
 mod manual_install_tests {
     /// Regression tripwire: the Tauri command itself cannot run under
     /// `cargo test`, but deleting the release call must still fail a test.
-    /// The app branch of `install_update` ends where the integration branch
-    /// begins, so the call has to appear before that split.
+    ///
+    /// The original version of this test asserted only that the literal string
+    /// `release_install_tree` appeared somewhere in the app branch. After
+    /// v0.4.28 the branch calls `prepare_for_update_install` instead, and the
+    /// only remaining occurrences of that literal in this file were the
+    /// assertion itself and a comment — so it passed on prose. Proven vacuous:
+    /// with the real `release_install_tree(supervisor).await;` call deleted
+    /// from `updater_auto.rs`, the old assertion still passed.
+    ///
+    /// It now pins the whole chain that actually exists:
+    ///   updates.rs app branch -> prepare_for_update_install -> release_install_tree
+    /// and strips comments first, so prose can never satisfy it again.
     #[test]
     fn the_manual_app_install_releases_the_install_tree_first() {
-        let src = include_str!("updates.rs");
-        let app_branch = src
-            .split("else if kind ==")
-            .next()
-            .expect("updates.rs always has the integration branch");
+        fn code_only(src: &str) -> String {
+            src.lines()
+                .map(|l| l.split("//").next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("
+")
+        }
+
+        // Link 1: the manual app branch goes through the pre-install choke point.
+        let app_branch = code_only(
+            include_str!("updates.rs")
+                .split("else if kind ==")
+                .next()
+                .expect("updates.rs always has the integration branch"),
+        );
         assert!(
-            app_branch.contains("release_install_tree"),
-            "install_update's app branch no longer releases the install tree before download_and_install"
+            app_branch.contains("prepare_for_update_install"),
+            "install_update's app branch no longer goes through the pre-install choke point"
+        );
+
+        // Link 2: that choke point still releases the install tree. This is the
+        // assertion the old test believed it was making.
+        let updater = code_only(include_str!("../updater_auto.rs"));
+        let fn_start = updater
+            .find("async fn prepare_for_update_install")
+            .expect("prepare_for_update_install must exist");
+        let body = &updater[fn_start..];
+        let body_end = body.find("
+pub ").unwrap_or(body.len());
+        assert!(
+            body[..body_end].contains("release_install_tree("),
+            "prepare_for_update_install no longer releases the install tree, so the manual              install can replace a tree partner processes still hold open"
         );
     }
 }

@@ -121,11 +121,22 @@ fn redact_mac(s: &str) -> String {
 /// Redact Windows usernames (basic heuristic)
 fn redact_username(s: &str) -> String {
     // Redact patterns like C:\Users\username\...
+    //
+    // This used to hardcode `C:` and a backslash separator, so a profile
+    // relocated to another drive leaked the username into an exported debug
+    // bundle, and so did any forward-slash path (this crate builds those —
+    // e.g. `download.rs` uses `C:/ProgramData`). Match any drive and either
+    // separator instead.
+    //
+    // The drive letter is PRESERVED in the replacement: it is useful when
+    // reading a bundle and identifies nobody. `${1}` rather than `$1` because
+    // the next character is `:`, which would otherwise be read as part of a
+    // capture-group name.
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        Regex::new(r"(?i)C:\\Users\\([^\\/]+)").unwrap()
+        Regex::new(r"(?i)([A-Z]):[\\/]Users[\\/]([^\\/]+)").unwrap()
     });
-    re.replace_all(s, r"C:\Users\<user>").to_string()
+    re.replace_all(s, r"${1}:\Users\<user>").to_string()
 }
 
 /// Redact hostname (basic heuristic — any HOSTNAME= pattern)
@@ -150,6 +161,53 @@ fn redact_serial(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The scrubber only matched `C:\Users\`, so a profile relocated to any
+    /// other drive leaked the username into an exported debug bundle. Forward-
+    /// slash paths leaked too - this crate genuinely builds them (e.g.
+    /// `download.rs` uses `C:/ProgramData`).
+    #[test]
+    fn a_non_c_drive_user_path_is_redacted() {
+        let scrubbed = scrub_line(r"Config path: D:\Users\alice\AppData\Roaming");
+        assert!(
+            !scrubbed.contains("alice"),
+            "username leaked from a D: path: {scrubbed}"
+        );
+        assert!(scrubbed.contains("<user>"), "{scrubbed}");
+    }
+
+    #[test]
+    fn a_forward_slash_user_path_is_redacted() {
+        let scrubbed = scrub_line("Config path: C:/Users/alice/AppData");
+        assert!(
+            !scrubbed.contains("alice"),
+            "username leaked from a forward-slash path: {scrubbed}"
+        );
+        assert!(scrubbed.contains("<user>"), "{scrubbed}");
+    }
+
+    #[test]
+    fn the_drive_letter_is_preserved_because_it_identifies_nobody() {
+        let scrubbed = scrub_line(r"Config path: E:\Users\bob\x");
+        assert!(
+            scrubbed.contains("E:"),
+            "the drive is useful for debugging and leaks nothing: {scrubbed}"
+        );
+        assert!(!scrubbed.contains("bob"), "{scrubbed}");
+    }
+
+    /// A redactor that eats everything would pass every one-way test above.
+    /// These strings MUST survive untouched.
+    #[test]
+    fn strings_with_no_username_are_left_alone() {
+        for line in [
+            r"Install dir: C:\Program Files\Fry Edge Miner",
+            r"Staged at: D:\FryEdgeMiner\partners\storj",
+            "Users of this feature should read the docs",
+        ] {
+            assert_eq!(scrub_line(line), line, "over-redacted: {line}");
+        }
+    }
 
     #[test]
     fn test_scrub_mnemonic() {

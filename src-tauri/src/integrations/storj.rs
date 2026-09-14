@@ -203,7 +203,7 @@ impl Integration for StorjIntegration {
 
         #[cfg(target_os = "windows")]
         {
-            use std::process::Command;
+            
             crate::supervisor::platform::command("powershell")
                 .args([
                     "-Command",

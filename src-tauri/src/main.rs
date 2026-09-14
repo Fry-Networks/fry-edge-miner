@@ -975,7 +975,7 @@ fn main() {
                         // Every 5th tick (~5 min): refresh verification + staking status
                         static VERIFIED_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                         let count = VERIFIED_COUNTER.fetch_add(1, Ordering::Relaxed);
-                        if count % 5 == 0 {
+                        if count.is_multiple_of(5) {
                             if let Some(ref key) = cfg.miner_key {
                                 match api::credentials::get_verified_status(&poc_client, key).await {
                                     Ok(status) => {

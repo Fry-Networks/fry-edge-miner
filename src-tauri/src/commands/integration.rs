@@ -30,6 +30,11 @@ fn timeout_message(step: &str, id: &str) -> String {
     )
 }
 
+/// One integration's raw row before it is turned into an `IntegrationStatus`:
+/// (id, display name, enabled, version, requires_docker, unavailable_reason).
+/// Named because clippy::type_complexity flags the bare tuple.
+type IntegrationEntry = (String, String, bool, Option<String>, bool, Option<String>);
+
 #[tauri::command]
 pub async fn get_integrations(
     state: tauri::State<'_, crate::AppState>,
@@ -40,7 +45,7 @@ pub async fn get_integrations(
         // Share the reporter's denominator so the per-integration contribution
         // the UI shows matches what actually gets submitted.
         let available = reg.available_count();
-        let entries: Vec<(String, String, bool, Option<String>, bool, Option<String>)> = reg
+        let entries: Vec<IntegrationEntry> = reg
             .list()
             .iter()
             .map(|i| {
