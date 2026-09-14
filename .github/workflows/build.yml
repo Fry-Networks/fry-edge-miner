@@ -53,9 +53,9 @@ jobs:
         run: cargo install tauri-cli --version "^2" --locked
 
       # The repo's tripwire tests (MSI fail-closed gate, elevation hygiene,
-      # bundle targets) only have value if something runs them. Single-threaded
-      # because two pre-existing fryvpn tests mutate the same process-global
-      # env var and race each other under the default parallel runner.
+      # bundle targets) only have value if something runs them. Gates run
+      # fmt -> clippy -> tests, cheapest first, so a formatting slip fails in
+      # seconds instead of after a full release build.
       - name: Run tests
         shell: bash
         run: |
@@ -65,6 +65,9 @@ jobs:
           # runs this again via beforeBuildCommand; it takes ~2s and is idempotent.
           npm run build
           cd src-tauri
+          # Formatting gate. rustfmt.toml pins the target (stock 2021-edition
+          # rustfmt), so this catches drift rather than imposing a new style.
+          cargo fmt --check
           # Lint gate. Scoped to the bin target on purpose: --all-targets also
           # lints test code, where 10 warnings live inside the protected
           # pawns_*_tests.rs files that the harness contract forbids editing.

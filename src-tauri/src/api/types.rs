@@ -85,7 +85,10 @@ pub struct LeaseAction {
 
 impl Default for LeaseAction {
     fn default() -> Self {
-        Self { lease_seconds: 900, external_ip: None }
+        Self {
+            lease_seconds: 900,
+            external_ip: None,
+        }
     }
 }
 
@@ -221,7 +224,6 @@ pub struct RewardConfig {
     #[serde(default)]
     pub stake_token_name: String,
 }
-
 
 /// Live PoC/lease reporting health, surfaced to the UI (B2).
 #[derive(Debug, Clone, Default, serde::Serialize)]

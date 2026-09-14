@@ -34,7 +34,11 @@ fn ps_quote(s: &str) -> String {
 /// this install, plus the frynode firewall rule — combined so both land
 /// under the SAME UAC prompt rather than two separate ones. Pure/testable:
 /// takes plain data in, returns a script string, no process spawned.
-pub fn build_hardening_script(install_dir: &Path, exe_names: &[&str], frynode_path: &Path) -> String {
+pub fn build_hardening_script(
+    install_dir: &Path,
+    exe_names: &[&str],
+    frynode_path: &Path,
+) -> String {
     let install_dir_str = install_dir.to_string_lossy().to_string();
     let exclusion_process_list = exe_names
         .iter()
@@ -49,23 +53,24 @@ pub fn build_hardening_script(install_dir: &Path, exe_names: &[&str], frynode_pa
         exclusion_process_list
     );
 
-    let firewall_cmds = firewall::reconcile_commands("FEM-FryNode", &frynode_path.to_string_lossy())
-        .into_iter()
-        .map(|argv| {
-            let quoted: Vec<String> = argv
-                .iter()
-                .map(|a| {
-                    if let Some(prog) = a.strip_prefix("program=") {
-                        format!("program={}", ps_quote(prog))
-                    } else {
-                        a.clone()
-                    }
-                })
-                .collect();
-            format!("netsh {}", quoted.join(" "))
-        })
-        .collect::<Vec<_>>()
-        .join("; ");
+    let firewall_cmds =
+        firewall::reconcile_commands("FEM-FryNode", &frynode_path.to_string_lossy())
+            .into_iter()
+            .map(|argv| {
+                let quoted: Vec<String> = argv
+                    .iter()
+                    .map(|a| {
+                        if let Some(prog) = a.strip_prefix("program=") {
+                            format!("program={}", ps_quote(prog))
+                        } else {
+                            a.clone()
+                        }
+                    })
+                    .collect();
+                format!("netsh {}", quoted.join(" "))
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
 
     format!("{defender_cmd}; {firewall_cmds}")
 }
@@ -121,7 +126,11 @@ pub(crate) fn hardening_outcome(exit_code: Option<i32>, rule_present: bool) -> R
 /// the update — the caller logs + surfaces the manual command and moves on.
 /// Only returns `Ok` when the firewall rule is VERIFIED present afterward
 /// (v0.4.29 canary fix) — a bare successful exit code is not trusted alone.
-pub(crate) fn run_hardening_elevated(install_dir: &Path, exe_names: &[&str], frynode_path: &Path) -> anyhow::Result<()> {
+pub(crate) fn run_hardening_elevated(
+    install_dir: &Path,
+    exe_names: &[&str],
+    frynode_path: &Path,
+) -> anyhow::Result<()> {
     let inner = build_hardening_script(install_dir, exe_names, frynode_path);
     let outer = build_outer_elevation_script(&inner);
 
@@ -190,7 +199,11 @@ mod tests {
     fn the_script_excludes_the_install_dir_and_both_exe_names() {
         let install_dir = PathBuf::from(r"C:\Users\x\AppData\Local\Fry Edge Miner");
         let frynode = install_dir.join("resources").join("frynode.exe");
-        let script = build_hardening_script(&install_dir, &["fry-edge-miner.exe", "frynode.exe"], &frynode);
+        let script = build_hardening_script(
+            &install_dir,
+            &["fry-edge-miner.exe", "frynode.exe"],
+            &frynode,
+        );
         assert!(script.contains("Add-MpPreference -ExclusionPath"));
         assert!(script.contains("Fry Edge Miner"));
         assert!(script.contains("fry-edge-miner.exe"));
@@ -211,7 +224,10 @@ mod tests {
         let install_dir = PathBuf::from(r"C:\Users\O'Brien\AppData\Local\Fry Edge Miner");
         let frynode = install_dir.join("resources").join("frynode.exe");
         let script = build_hardening_script(&install_dir, &["fry-edge-miner.exe"], &frynode);
-        assert!(script.contains("O''Brien"), "single quote must be doubled for PowerShell: {script}");
+        assert!(
+            script.contains("O''Brien"),
+            "single quote must be doubled for PowerShell: {script}"
+        );
     }
 
     #[test]
@@ -240,9 +256,18 @@ mod tests {
     #[test]
     fn the_outer_script_catches_the_promoted_error_with_a_distinct_exit_code() {
         let script = build_outer_elevation_script("Write-Output test");
-        assert!(script.contains("try {"), "must wrap Start-Process in try/catch: {script}");
-        assert!(script.contains("catch {"), "must catch the promoted terminating error: {script}");
-        assert!(script.contains("exit 2"), "catch block must exit with a distinct non-zero code: {script}");
+        assert!(
+            script.contains("try {"),
+            "must wrap Start-Process in try/catch: {script}"
+        );
+        assert!(
+            script.contains("catch {"),
+            "must catch the promoted terminating error: {script}"
+        );
+        assert!(
+            script.contains("exit 2"),
+            "catch block must exit with a distinct non-zero code: {script}"
+        );
     }
 
     #[test]
@@ -257,8 +282,12 @@ mod tests {
             script.contains("if ($null -eq $p) { exit 3 }"),
             "must guard against a null $p before reading $p.ExitCode: {script}"
         );
-        let null_guard_pos = script.find("if ($null -eq $p)").expect("null guard must be present");
-        let exit_code_read_pos = script.find("exit $p.ExitCode").expect("must still read $p.ExitCode on the happy path");
+        let null_guard_pos = script
+            .find("if ($null -eq $p)")
+            .expect("null guard must be present");
+        let exit_code_read_pos = script
+            .find("exit $p.ExitCode")
+            .expect("must still read $p.ExitCode on the happy path");
         assert!(
             null_guard_pos < exit_code_read_pos,
             "the null guard must run BEFORE exit $p.ExitCode, not after: {script}"
@@ -332,7 +361,10 @@ mod bug10_elevation_hygiene_tests {
         ("security_setup.rs", include_str!("security_setup.rs")),
         ("firewall.rs", include_str!("integrations/firewall.rs")),
         ("titan.rs", include_str!("integrations/titan.rs")),
-        ("docker_manager.rs", include_str!("integrations/docker_manager.rs")),
+        (
+            "docker_manager.rs",
+            include_str!("integrations/docker_manager.rs"),
+        ),
     ];
 
     /// Strip line comments so a test can never be satisfied by prose — the

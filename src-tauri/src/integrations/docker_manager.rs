@@ -1,12 +1,13 @@
-use crate::supervisor::platform::BoundedOutput;
 use super::download::{download_file_with_options, partners_base_dir};
+use crate::supervisor::platform::BoundedOutput;
 use anyhow::Result;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{info, warn};
 
-const DOCKER_DOWNLOAD_URL: &str = "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe";
+const DOCKER_DOWNLOAD_URL: &str =
+    "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe";
 const DOCKER_PATHS: &[&str] = &[
     "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe",
     "C:\\Program Files (x86)\\Docker\\Docker\\Docker Desktop.exe",
@@ -17,7 +18,10 @@ const DOCKER_PATHS: &[&str] = &[
 /// Docker Desktop 4.30+ can install per-user, outside Program Files. These are
 /// relative to %LOCALAPPDATA% / %PROGRAMDATA% and are resolved at runtime.
 const DOCKER_USER_SCOPE_PATHS: &[(&str, &str)] = &[
-    ("LOCALAPPDATA", "Programs\\Docker\\Docker\\Docker Desktop.exe"),
+    (
+        "LOCALAPPDATA",
+        "Programs\\Docker\\Docker\\Docker Desktop.exe",
+    ),
     ("LOCALAPPDATA", "Programs\\Docker\\Docker\\Docker.exe"),
     ("ProgramData", "DockerDesktop\\Docker Desktop.exe"),
 ];
@@ -332,8 +336,14 @@ fn detect_docker_startup_error() -> Option<String> {
             }
             if let Ok(content) = std::fs::read_to_string(&path) {
                 // Check last 8KB only (recent entries)
-                let tail = if content.len() > 8192 { &content[content.len() - 8192..] } else { &content };
-                if tail.contains("hosts' is denied") || tail.contains("Access to the path") && tail.contains("drivers\\etc\\hosts") {
+                let tail = if content.len() > 8192 {
+                    &content[content.len() - 8192..]
+                } else {
+                    &content
+                };
+                if tail.contains("hosts' is denied")
+                    || tail.contains("Access to the path") && tail.contains("drivers\\etc\\hosts")
+                {
                     return Some(
                         "Docker Desktop cannot start because it cannot access your system hosts file. \
                          Fix: right-click Docker Desktop → 'Run as administrator', or fix the file permissions \
@@ -418,14 +428,26 @@ async fn wait_for_docker(attempts: u32, delay_secs: u64) -> Result<()> {
     for attempt in 1..=attempts {
         if docker_running() {
             info!("Docker daemon is ready");
-            emit_progress("ready", "Docker engine is ready".to_string(), attempt, attempts);
+            emit_progress(
+                "ready",
+                "Docker engine is ready".to_string(),
+                attempt,
+                attempts,
+            );
             return Ok(());
         }
         if attempt < attempts {
-            info!(attempt = attempt, remaining = attempts - attempt, "Waiting for Docker daemon...");
+            info!(
+                attempt = attempt,
+                remaining = attempts - attempt,
+                "Waiting for Docker daemon..."
+            );
             emit_progress(
                 "waiting",
-                format!("Waiting for the Docker engine to start ({}/{})", attempt, attempts),
+                format!(
+                    "Waiting for the Docker engine to start ({}/{})",
+                    attempt, attempts
+                ),
                 attempt,
                 attempts,
             );
@@ -529,12 +551,7 @@ pub async fn ensure_docker() -> Result<()> {
         }
         DockerStatus::DaemonStopped => {
             info!("Docker Desktop installed but engine not running — starting it");
-            emit_progress(
-                "starting",
-                "Starting Docker Desktop…".to_string(),
-                0,
-                0,
-            );
+            emit_progress("starting", "Starting Docker Desktop…".to_string(), 0, 0);
             if let Err(e) = try_start_docker_desktop() {
                 warn!(error = %e, "Failed to launch Docker Desktop");
             }
@@ -586,7 +603,10 @@ mod tests {
         assert!(msg.contains("virtual machine"), "got: {msg}");
         assert!(msg.contains("nested virtualization"), "got: {msg}");
         assert!(msg.to_lowercase().contains("proxmox"), "got: {msg}");
-        assert!(!msg.contains("BIOS/UEFI settings"), "VM guests must not get the BIOS path: {msg}");
+        assert!(
+            !msg.contains("BIOS/UEFI settings"),
+            "VM guests must not get the BIOS path: {msg}"
+        );
     }
 
     #[test]

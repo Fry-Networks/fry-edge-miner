@@ -1,9 +1,9 @@
+use std::io;
 /// Platform-specific process management utilities.
 /// For v1, std::process::Child::kill() is sufficient on both platforms.
 /// Phase 3.5 will add graceful SIGTERM on Unix and proper
 /// TerminateProcess/WM_CLOSE on Windows.
 use std::process::Child;
-use std::io;
 
 /// Create a Command with CREATE_NO_WINDOW on Windows to suppress console popups.
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
@@ -35,7 +35,11 @@ pub const LONG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900
 /// (and, on Windows, essentially unmanufacturable) "process that ignores
 /// `TerminateProcess`" — this is the one thing both the main wait loop and
 /// the post-kill reap step below actually need to get right.
-fn bounded_wait<F: FnMut() -> bool>(mut is_done: F, budget: std::time::Duration, poll: std::time::Duration) -> bool {
+fn bounded_wait<F: FnMut() -> bool>(
+    mut is_done: F,
+    budget: std::time::Duration,
+    poll: std::time::Duration,
+) -> bool {
     let started = std::time::Instant::now();
     loop {
         if is_done() {
@@ -89,11 +93,8 @@ pub fn output_bounded(
             None => {
                 if started.elapsed() >= timeout {
                     let _ = child.kill();
-                    let reaped = bounded_wait(
-                        || matches!(child.try_wait(), Ok(Some(_))),
-                        REAP_GRACE,
-                        POLL,
-                    );
+                    let reaped =
+                        bounded_wait(|| matches!(child.try_wait(), Ok(Some(_))), REAP_GRACE, POLL);
                     if !reaped {
                         tracing::warn!(
                             timeout_s = timeout.as_secs(),
@@ -115,17 +116,11 @@ pub fn output_bounded(
 
 /// `.output()` with a deadline, as a drop-in method on `Command`.
 pub trait BoundedOutput {
-    fn output_bounded(
-        &mut self,
-        timeout: std::time::Duration,
-    ) -> io::Result<std::process::Output>;
+    fn output_bounded(&mut self, timeout: std::time::Duration) -> io::Result<std::process::Output>;
 }
 
 impl BoundedOutput for std::process::Command {
-    fn output_bounded(
-        &mut self,
-        timeout: std::time::Duration,
-    ) -> io::Result<std::process::Output> {
+    fn output_bounded(&mut self, timeout: std::time::Duration) -> io::Result<std::process::Output> {
         output_bounded(self, timeout)
     }
 }
@@ -161,7 +156,11 @@ mod tests {
     #[test]
     fn bounded_wait_never_blocks_past_its_budget_even_when_the_condition_never_becomes_true() {
         let started = Instant::now();
-        let done = bounded_wait(|| false, Duration::from_millis(50), Duration::from_millis(5));
+        let done = bounded_wait(
+            || false,
+            Duration::from_millis(50),
+            Duration::from_millis(5),
+        );
         let elapsed = started.elapsed();
         assert!(!done, "condition never became true — must report not-done");
         assert!(

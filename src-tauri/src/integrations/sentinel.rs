@@ -1,5 +1,5 @@
-use crate::supervisor::platform::BoundedOutput;
 use super::{HealthStatus, Integration, PocGateData};
+use crate::supervisor::platform::BoundedOutput;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -38,7 +38,10 @@ pub(crate) fn classify_compose_states(states: &[String]) -> ComposeVerdict {
     // both must NOT report Starting (the v0.4.7 stuck-STARTING bug: a
     // stopped container never became Unhealthy, so the supervisor never
     // restarted it).
-    if states.iter().any(|s| s.starts_with("exited") || s == "dead") {
+    if states
+        .iter()
+        .any(|s| s.starts_with("exited") || s == "dead")
+    {
         return ComposeVerdict::Exited;
     }
     if states.is_empty() {
@@ -87,7 +90,11 @@ impl SentinelIntegration {
         }
     }
 
-    fn compose_run(compose: &std::path::Path, extra: &[&str], stdin_lines: Option<&str>) -> Result<std::process::Output> {
+    fn compose_run(
+        compose: &std::path::Path,
+        extra: &[&str],
+        stdin_lines: Option<&str>,
+    ) -> Result<std::process::Output> {
         let compose_str = compose.to_string_lossy().to_string();
         let mut args: Vec<&str> = vec!["compose", "-f", &compose_str, "run", "--rm", "--no-deps"];
         args.push("sentinel-dvpnx");
@@ -147,7 +154,10 @@ impl SentinelIntegration {
             String::from_utf8_lossy(&keys.stderr)
         );
         if keys.status.success() {
-            if let Some(line) = keys_out.lines().find(|l| l.trim_start().starts_with("address:")) {
+            if let Some(line) = keys_out
+                .lines()
+                .find(|l| l.trim_start().starts_with("address:"))
+            {
                 info!(node_account = %line.trim(), "Sentinel node key created");
             }
         } else if !keys_out.contains("already exists") {
@@ -255,7 +265,10 @@ impl Integration for SentinelIntegration {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             warn!(stderr = %stderr, "docker compose pull failed");
-            anyhow::bail!("Failed to pull Sentinel dVPN image: {}", tail_lines(&stderr, 15));
+            anyhow::bail!(
+                "Failed to pull Sentinel dVPN image: {}",
+                tail_lines(&stderr, 15)
+            );
         }
 
         // First run: generate config.toml + a per-device `main` key inside the
@@ -365,7 +378,11 @@ impl Integration for SentinelIntegration {
                                 .filter(|l| l.starts_with('{'))
                                 .filter_map(|l| serde_json::from_str(l).ok())
                                 .collect();
-                            if rows.is_empty() { None } else { Some(rows) }
+                            if rows.is_empty() {
+                                None
+                            } else {
+                                Some(rows)
+                            }
                         });
                 if let Some(containers) = parsed {
                     let states: Vec<String> = containers

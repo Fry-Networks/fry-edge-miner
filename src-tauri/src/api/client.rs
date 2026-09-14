@@ -151,11 +151,7 @@ impl ApiClient {
         decode_json(path, status.as_u16(), body)
     }
 
-    pub async fn put_json<B: Serialize>(
-        &self,
-        path: &str,
-        body: &B,
-    ) -> Result<(), ApiError> {
+    pub async fn put_json<B: Serialize>(&self, path: &str, body: &B) -> Result<(), ApiError> {
         let token = self.bearer_token.read().unwrap().clone();
         let mut req = self.http.put(self.url(path)).json(body);
         if !token.is_empty() {
@@ -237,7 +233,10 @@ mod http_status_display_tests {
     #[test]
     fn a_short_json_error_body_still_shows_its_detail() {
         let msg = ApiError::HttpStatus(409, r#"{"detail":"IP conflict"}"#.to_string()).to_string();
-        assert!(msg.contains("IP conflict"), "API JSON detail must survive: {msg}");
+        assert!(
+            msg.contains("IP conflict"),
+            "API JSON detail must survive: {msg}"
+        );
         assert!(msg.contains("409"), "{msg}");
     }
 
@@ -245,6 +244,10 @@ mod http_status_display_tests {
     fn an_oversized_text_body_is_truncated() {
         let long = "x".repeat(1000);
         let msg = ApiError::HttpStatus(500, long).to_string();
-        assert!(msg.len() < 400, "body must be truncated, got {} chars", msg.len());
+        assert!(
+            msg.len() < 400,
+            "body must be truncated, got {} chars",
+            msg.len()
+        );
     }
 }

@@ -40,81 +40,69 @@ pub fn scrub_line(line: &str) -> String {
 /// Redact 25-word BIP39 mnemonic sequences
 fn redact_mnemonic(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"(?:\b[a-z]{3,12}\b\s+){24}[a-z]{3,12}\b").unwrap()
-    });
+    let re = RE.get_or_init(|| Regex::new(r"(?:\b[a-z]{3,12}\b\s+){24}[a-z]{3,12}\b").unwrap());
     re.replace_all(s, "[MNEMONIC]").to_string()
 }
 
 /// Redact bearer tokens (bearer="..." or Bearer: ...)
 fn redact_bearer_token(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r#"(?i)bearer[\s:=]+"?[^"\s]+"?"#).unwrap()
-    });
+    let re = RE.get_or_init(|| Regex::new(r#"(?i)bearer[\s:=]+"?[^"\s]+"?"#).unwrap());
     re.replace_all(s, "bearer=[REDACTED]").to_string()
 }
 
 /// Redact api_key values
 fn redact_api_key(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r#"(?i)api_key\s*=\s*"[^"]*"|api[_-]key:\s*\S+"#).unwrap()
-    });
+    let re =
+        RE.get_or_init(|| Regex::new(r#"(?i)api_key\s*=\s*"[^"]*"|api[_-]key:\s*\S+"#).unwrap());
     re.replace_all(s, "api_key=[REDACTED]").to_string()
 }
 
 /// Redact generic token values
 fn redact_token(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r#"(?i)token\s*=\s*"[^"]*"|token:\s*\S+"#).unwrap()
-    });
+    let re = RE.get_or_init(|| Regex::new(r#"(?i)token\s*=\s*"[^"]*"|token:\s*\S+"#).unwrap());
     re.replace_all(s, "token=[REDACTED]").to_string()
 }
 
 /// Redact OP_SESSION and OP_* environment variables
 fn redact_op_session(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"OP_[A-Za-z0-9_]+\s*=\s*\S+").unwrap()
-    });
+    let re = RE.get_or_init(|| Regex::new(r"OP_[A-Za-z0-9_]+\s*=\s*\S+").unwrap());
     re.replace_all(s, "[REDACTED]").to_string()
 }
 
 /// Redact 58-char base32 Algorand addresses as first4…last4
 fn redact_algorand_address(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"\b([A-Z2-7]{58})\b").unwrap()
-    });
+    let re = RE.get_or_init(|| Regex::new(r"\b([A-Z2-7]{58})\b").unwrap());
     re.replace_all(s, |caps: &regex::Captures| {
         let addr = &caps[1];
         if addr.len() >= 8 {
-            format!("{}…{}", &addr[..4], &addr[addr.len()-4..])
+            format!("{}…{}", &addr[..4], &addr[addr.len() - 4..])
         } else {
             addr.to_string()
         }
-    }).to_string()
+    })
+    .to_string()
 }
 
 /// Redact IPv4 addresses (mask last octet)
 fn redact_ipv4(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b").unwrap()
-    });
+    let re =
+        RE.get_or_init(|| Regex::new(r"\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b").unwrap());
     re.replace_all(s, |caps: &regex::Captures| {
         format!("{}.{}.{}.x", &caps[1], &caps[2], &caps[3])
-    }).to_string()
+    })
+    .to_string()
 }
 
 /// Redact MAC addresses
 fn redact_mac(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"(?i)\b([0-9a-f]{2}[:-]){5}([0-9a-f]{2})\b").unwrap()
-    });
+    let re = RE.get_or_init(|| Regex::new(r"(?i)\b([0-9a-f]{2}[:-]){5}([0-9a-f]{2})\b").unwrap());
     re.replace_all(s, "[MAC]").to_string()
 }
 
@@ -133,18 +121,14 @@ fn redact_username(s: &str) -> String {
     // the next character is `:`, which would otherwise be read as part of a
     // capture-group name.
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"(?i)([A-Z]):[\\/]Users[\\/]([^\\/]+)").unwrap()
-    });
+    let re = RE.get_or_init(|| Regex::new(r"(?i)([A-Z]):[\\/]Users[\\/]([^\\/]+)").unwrap());
     re.replace_all(s, r"${1}:\Users\<user>").to_string()
 }
 
 /// Redact hostname (basic heuristic — any HOSTNAME= pattern)
 fn redact_hostname(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"(?i)hostname\s*=\s*(\S+)").unwrap()
-    });
+    let re = RE.get_or_init(|| Regex::new(r"(?i)hostname\s*=\s*(\S+)").unwrap());
     re.replace_all(s, "hostname=<host>").to_string()
 }
 
@@ -152,9 +136,7 @@ fn redact_hostname(s: &str) -> String {
 fn redact_serial(s: &str) -> String {
     // Redact long hex strings (> 16 chars) as SHA256 prefix(8)
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"\b[0-9a-f]{16,}\b").unwrap()
-    });
+    let re = RE.get_or_init(|| Regex::new(r"\b[0-9a-f]{16,}\b").unwrap());
     re.replace_all(s, "[SERIAL]").to_string()
 }
 

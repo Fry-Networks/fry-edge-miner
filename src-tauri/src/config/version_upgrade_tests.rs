@@ -34,7 +34,10 @@ fn a_v0427_config_loads_with_all_registration_fields_unchanged_under_the_current
         serde_json::from_str(V0427_REGISTERED_DEVICE).expect("v0.4.27 config must still parse");
 
     assert_eq!(cfg.install_id.as_deref(), Some("install-9f2c3d4e-0427"));
-    assert_eq!(cfg.miner_key.as_deref(), Some("FEM-15CCB0C7A857E62200373CCF72EAA7D4"));
+    assert_eq!(
+        cfg.miner_key.as_deref(),
+        Some("FEM-15CCB0C7A857E62200373CCF72EAA7D4")
+    );
     assert_eq!(cfg.device_token.as_deref(), Some("dev-token-abc123"));
     assert_eq!(
         cfg.wallet_address.as_deref(),
@@ -43,8 +46,16 @@ fn a_v0427_config_loads_with_all_registration_fields_unchanged_under_the_current
     assert_eq!(cfg.integrations_enabled.get("mysterium"), Some(&true));
     assert_eq!(cfg.integrations_enabled.get("space_acres"), Some(&false));
     assert_eq!(cfg.integrations_enabled.get("titan"), Some(&true));
-    assert_eq!(cfg.integration_versions.get("mysterium").map(String::as_str), Some("1.4.2"));
-    assert_eq!(cfg.integration_versions.get("titan").map(String::as_str), Some("0.9.1"));
+    assert_eq!(
+        cfg.integration_versions
+            .get("mysterium")
+            .map(String::as_str),
+        Some("1.4.2")
+    );
+    assert_eq!(
+        cfg.integration_versions.get("titan").map(String::as_str),
+        Some("0.9.1")
+    );
 
     // A field that did not exist in 0.4.27 must default to a value that
     // forces one immediate report, never a silent "already reported".

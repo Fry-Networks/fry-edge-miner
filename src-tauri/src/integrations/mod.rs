@@ -278,7 +278,10 @@ impl IntegrationRegistry {
     pub fn restore_enabled_states(&mut self, configured: &HashMap<String, bool>) {
         for (id, &enabled) in configured {
             let Some(integration) = self.get(id) else {
-                tracing::info!(id = id.as_str(), "Config references a removed integration — ignoring");
+                tracing::info!(
+                    id = id.as_str(),
+                    "Config references a removed integration — ignoring"
+                );
                 continue;
             };
             if enabled {
@@ -393,7 +396,11 @@ See 'docker run --help'.";
             "fixture must reproduce the bug: the old code showed only this line"
         );
         let shown = stderr_tail(RUN_FAILURE, 10);
-        assert!(shown.contains("port is already allocated"), "shown was: {}", shown);
+        assert!(
+            shown.contains("port is already allocated"),
+            "shown was: {}",
+            shown
+        );
     }
 
     #[test]

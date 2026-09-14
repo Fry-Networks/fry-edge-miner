@@ -5,7 +5,9 @@ use chrono::Utc;
 use tracing::{info, warn};
 
 use crate::api::client::{ApiClient, ApiError};
-use crate::api::types::{ApiIntegrationStatus, ApiPocHardwareDoc, ApiPocSlot, ApiSoftwareInfo, PocDocumentWrapper};
+use crate::api::types::{
+    ApiIntegrationStatus, ApiPocHardwareDoc, ApiPocSlot, ApiSoftwareInfo, PocDocumentWrapper,
+};
 use crate::integrations::{HealthStatus, IntegrationRegistry};
 use crate::poc::gates::check_gates;
 
@@ -82,40 +84,39 @@ pub fn compute_health_map_with_timeout(
     // Together they mean a stalled check degrades ITS integration instead of
     // wedging the reporting tick (v0.4.8 froze for 4.5h this way). Checks run
     // CONCURRENTLY so the tick's worst case is one timeout, not N serially.
-    let results = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(async {
-            let mut tasks = Vec::with_capacity(to_check.len());
-            for (id, integration) in to_check {
-                tasks.push(tokio::spawn(async move {
-                    let status = match tokio::time::timeout(
-                        health_timeout,
-                        integration.health_check(),
-                    )
-                    .await
-                    {
-                        Ok(status) => status,
-                        Err(_) => {
-                            warn!(
-                                integration = id.as_str(),
-                                secs = health_timeout.as_secs(),
-                                "health check timed out"
-                            );
-                            HealthStatus::Unhealthy("health check timed out".to_string())
-                        }
-                    };
-                    (id, status)
-                }));
-            }
-            let mut out = Vec::with_capacity(tasks.len());
-            for task in tasks {
-                match task.await {
-                    Ok(pair) => out.push(pair),
-                    Err(e) => warn!(error = %e, "health check task failed"),
+    let results =
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut tasks = Vec::with_capacity(to_check.len());
+                for (id, integration) in to_check {
+                    tasks.push(tokio::spawn(async move {
+                        let status =
+                            match tokio::time::timeout(health_timeout, integration.health_check())
+                                .await
+                            {
+                                Ok(status) => status,
+                                Err(_) => {
+                                    warn!(
+                                        integration = id.as_str(),
+                                        secs = health_timeout.as_secs(),
+                                        "health check timed out"
+                                    );
+                                    HealthStatus::Unhealthy("health check timed out".to_string())
+                                }
+                            };
+                        (id, status)
+                    }));
                 }
-            }
-            out
-        })
-    });
+                let mut out = Vec::with_capacity(tasks.len());
+                for task in tasks {
+                    match task.await {
+                        Ok(pair) => out.push(pair),
+                        Err(e) => warn!(error = %e, "health check task failed"),
+                    }
+                }
+                out
+            })
+        });
     for (id, status) in results {
         map.insert(id, status);
     }
@@ -138,7 +139,10 @@ pub fn build_poc_doc(
     for integration in registry.list() {
         let id = integration.id().to_string();
         let enabled = registry.is_enabled(&id);
-        let health = health_map.get(&id).cloned().unwrap_or(HealthStatus::Unknown);
+        let health = health_map
+            .get(&id)
+            .cloned()
+            .unwrap_or(HealthStatus::Unknown);
         let healthy = matches!(health, HealthStatus::Healthy);
         integrations.insert(
             id,
@@ -328,11 +332,7 @@ mod tests {
 
     #[test]
     fn available_count_excludes_integrations_this_machine_cannot_run() {
-        let reg = registry_with(&[
-            ("a", None),
-            ("b", None),
-            ("c", Some("needs 900 GB")),
-        ]);
+        let reg = registry_with(&[("a", None), ("b", None), ("c", Some("needs 900 GB"))]);
         assert_eq!(reg.total_count(), 3);
         assert_eq!(reg.available_count(), 2);
     }
@@ -342,11 +342,7 @@ mod tests {
         // Two healthy out of three registered, one of which this machine can
         // never run. Dividing by total would report 0.667 and quietly dock the
         // user for hardware they do not have; the honest figure is 1.0.
-        let reg = registry_with(&[
-            ("a", None),
-            ("b", None),
-            ("c", Some("needs 900 GB")),
-        ]);
+        let reg = registry_with(&[("a", None), ("b", None), ("c", Some("needs 900 GB"))]);
         let doc = build_poc_doc("FEM-TEST", &reg, &healthy_map(&["a", "b"]));
         assert_eq!(doc.proportion, 1.0, "got {}", doc.proportion);
         assert_eq!(doc.slots[0].multiplier, 1.0);
@@ -374,7 +370,10 @@ mod tests {
         let doc = build_poc_doc("FEM-TEST", &reg, &healthy_map(&["a"]));
         let software = doc.software.expect("software block must be present");
         assert_eq!(software.poc_version_installed, "1.0.0");
-        assert_eq!(software.software_version_installed, env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            software.software_version_installed,
+            env!("CARGO_PKG_VERSION")
+        );
         assert!(!software.os.is_empty());
     }
 
@@ -406,7 +405,12 @@ mod tests {
             ("i", None),
         ]);
         let doc = build_poc_doc("FEM-TEST", &reg, &healthy_map(&["a", "b", "c"]));
-        assert_eq!(doc.proportion, 3.0 / 9.0, "fixture sanity check — got {}", doc.proportion);
+        assert_eq!(
+            doc.proportion,
+            3.0 / 9.0,
+            "fixture sanity check — got {}",
+            doc.proportion
+        );
         assert_eq!(
             doc.slots[0].multiplier, 1.0,
             "3 of 9 healthy must earn the full multiplier, got {}",
@@ -435,17 +439,31 @@ mod health_timeout_tests {
 
     #[async_trait]
     impl Integration for HangingIntegration {
-        fn id(&self) -> &str { "hanger" }
-        fn display_name(&self) -> &str { "hanger" }
-        async fn install(&self) -> Result<()> { Ok(()) }
-        async fn start(&self) -> Result<()> { Ok(()) }
-        async fn stop(&self) -> Result<()> { Ok(()) }
+        fn id(&self) -> &str {
+            "hanger"
+        }
+        fn display_name(&self) -> &str {
+            "hanger"
+        }
+        async fn install(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn start(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn stop(&self) -> Result<()> {
+            Ok(())
+        }
         async fn health_check(&self) -> HealthStatus {
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             HealthStatus::Healthy
         }
-        async fn check_update(&self) -> Result<Option<String>> { Ok(None) }
-        fn collect_poc_data(&self) -> PocGateData { PocGateData::default() }
+        async fn check_update(&self) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn collect_poc_data(&self) -> PocGateData {
+            PocGateData::default()
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -488,17 +506,31 @@ mod health_concurrency_tests {
 
     #[async_trait]
     impl Integration for SlowIntegration {
-        fn id(&self) -> &str { self.0 }
-        fn display_name(&self) -> &str { self.0 }
-        async fn install(&self) -> Result<()> { Ok(()) }
-        async fn start(&self) -> Result<()> { Ok(()) }
-        async fn stop(&self) -> Result<()> { Ok(()) }
+        fn id(&self) -> &str {
+            self.0
+        }
+        fn display_name(&self) -> &str {
+            self.0
+        }
+        async fn install(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn start(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn stop(&self) -> Result<()> {
+            Ok(())
+        }
         async fn health_check(&self) -> HealthStatus {
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             HealthStatus::Healthy
         }
-        async fn check_update(&self) -> Result<Option<String>> { Ok(None) }
-        fn collect_poc_data(&self) -> PocGateData { PocGateData::default() }
+        async fn check_update(&self) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn collect_poc_data(&self) -> PocGateData {
+            PocGateData::default()
+        }
     }
 
     /// Serial evaluation would cost N × timeout; concurrent costs ~1 × timeout.
@@ -524,7 +556,8 @@ mod health_concurrency_tests {
 
         assert_eq!(map.len(), 6);
         assert!(
-            map.values().all(|s| matches!(s, HealthStatus::Unhealthy(r) if r.contains("timed out"))),
+            map.values()
+                .all(|s| matches!(s, HealthStatus::Unhealthy(r) if r.contains("timed out"))),
             "all six should time out: {map:?}"
         );
         // Serial would be ~3s (6 × 500ms); concurrent stays near one timeout.

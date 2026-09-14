@@ -59,9 +59,7 @@ pub(crate) fn recovery_action(
 ) -> RecoveryAction {
     match status {
         // BUG 5/8: waiting on the user is not a fault to recover from.
-        HealthStatus::Unhealthy(reason)
-            if crate::integrations::awaits_user_action(reason) =>
-        {
+        HealthStatus::Unhealthy(reason) if crate::integrations::awaits_user_action(reason) => {
             RecoveryAction::None
         }
         HealthStatus::Unhealthy(_) => RecoveryAction::Restart,
@@ -112,7 +110,8 @@ pub async fn health_check_loop<C, R, E>(
         tokio::time::sleep(config.check_interval).await;
 
         let status = check_fn();
-        let status_changed = std::mem::discriminant(&status) != std::mem::discriminant(&last_status);
+        let status_changed =
+            std::mem::discriminant(&status) != std::mem::discriminant(&last_status);
 
         if status_changed {
             info!(
@@ -244,12 +243,12 @@ mod loop_timing_tests {
         tokio::spawn(health_check_loop(
             "stuck-integration".to_string(),
             cfg,
-            || HealthStatus::Starting,               // never becomes healthy
+            || HealthStatus::Starting, // never becomes healthy
             move || {
                 restarts.fetch_add(1, Ordering::SeqCst);
                 true
             },
-            || true,                                  // enabled
+            || true, // enabled
             tx,
         ));
 
@@ -273,12 +272,14 @@ mod loop_timing_tests {
         }
 
         let elapsed = started.elapsed();
-        let ev = timeout_event.unwrap_or_else(|| {
-            panic!("startup timeout never fired within {}s", elapsed.as_secs())
-        });
+        let ev = timeout_event
+            .unwrap_or_else(|| panic!("startup timeout never fired within {}s", elapsed.as_secs()));
         match ev.status {
             HealthStatus::Unhealthy(reason) => {
-                assert!(reason.contains("Did not finish starting"), "reason: {reason}");
+                assert!(
+                    reason.contains("Did not finish starting"),
+                    "reason: {reason}"
+                );
             }
             other => panic!("expected Unhealthy, got {other:?}"),
         }
@@ -398,7 +399,10 @@ mod recovery_tests {
     fn the_default_startup_budget_is_a_conservative_three_minutes() {
         let c = HealthCheckConfig::default();
         assert_eq!(c.starting_timeout_ticks, 6);
-        assert_eq!(c.check_interval * c.starting_timeout_ticks, Duration::from_secs(180));
+        assert_eq!(
+            c.check_interval * c.starting_timeout_ticks,
+            Duration::from_secs(180)
+        );
     }
 }
 
@@ -438,7 +442,10 @@ mod bug5_awaiting_user_tests {
         let crashed = HealthStatus::Unhealthy(
             "titan-edge process is not running: missing VC++ 2015-2022 x64 runtime".to_string(),
         );
-        assert_eq!(recovery_action(&crashed, true, 0, 6), RecoveryAction::Restart);
+        assert_eq!(
+            recovery_action(&crashed, true, 0, 6),
+            RecoveryAction::Restart
+        );
         assert_eq!(
             recovery_action(&HealthStatus::Stopped, true, 0, 6),
             RecoveryAction::Restart
@@ -447,11 +454,17 @@ mod bug5_awaiting_user_tests {
 
     #[test]
     fn the_awaiting_user_predicate_does_not_match_ordinary_errors() {
-        assert!(crate::integrations::awaits_user_action("Awaiting Storj setup — do a thing"));
+        assert!(crate::integrations::awaits_user_action(
+            "Awaiting Storj setup — do a thing"
+        ));
         assert!(crate::integrations::awaits_user_action(
             "Pawns.app needs your consent before it can share bandwidth"
         ));
-        assert!(!crate::integrations::awaits_user_action("Error detected in daemon logs"));
-        assert!(!crate::integrations::awaits_user_action("process is not running"));
+        assert!(!crate::integrations::awaits_user_action(
+            "Error detected in daemon logs"
+        ));
+        assert!(!crate::integrations::awaits_user_action(
+            "process is not running"
+        ));
     }
 }

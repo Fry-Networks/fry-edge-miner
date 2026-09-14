@@ -194,8 +194,16 @@ mod tests {
     #[test]
     fn every_registered_id_lands_in_exactly_one_category() {
         let all = [
-            "fryvpn", "aem", "mysterium", "diiisco", "space_acres", "storj", "titan", "sentinel",
-            "iagon", "pawns",
+            "fryvpn",
+            "aem",
+            "mysterium",
+            "diiisco",
+            "space_acres",
+            "storj",
+            "titan",
+            "sentinel",
+            "iagon",
+            "pawns",
         ];
         let counts = count_active(all.iter().map(|id| (*id, true, true)));
         assert_eq!(counts.required, 2);

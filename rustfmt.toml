@@ -1,0 +1,8 @@
+# Pins the project's formatting target.
+#
+# Deliberately minimal: this records that the crate follows stock rustfmt for
+# the 2021 edition, so `cargo fmt --check` in CI catches drift. It is not an
+# attempt to invent a house style — every value here is already the default,
+# and stating them makes the target explicit rather than implicit in whichever
+# rustfmt version a contributor happens to have.
+edition = "2021"

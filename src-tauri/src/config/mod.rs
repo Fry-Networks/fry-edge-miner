@@ -1,5 +1,5 @@
-pub mod store;
 pub mod miner_key;
+pub mod store;
 pub mod wallet;
 
 #[cfg(test)]

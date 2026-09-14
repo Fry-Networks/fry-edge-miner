@@ -196,10 +196,7 @@ pub async fn install_update(
         // persisted from/to state — so a manual install from the Updates
         // page gets the same safety net as the automatic path.
         use tauri::Manager;
-        let app_data_dir = app
-            .path()
-            .app_data_dir()
-            .map_err(|e| e.to_string())?;
+        let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
         let exe_path =
             std::env::current_exe().map_err(|e| format!("Could not resolve own exe path: {e}"))?;
         let frynode_path = exe_path
@@ -288,8 +285,10 @@ mod manual_install_tests {
             src.lines()
                 .map(|l| l.split("//").next().unwrap_or(""))
                 .collect::<Vec<_>>()
-                .join("
-")
+                .join(
+                    "
+",
+                )
         }
 
         // Link 1: the manual app branch goes through the pre-install choke point.
@@ -311,8 +310,12 @@ mod manual_install_tests {
             .find("async fn prepare_for_update_install")
             .expect("prepare_for_update_install must exist");
         let body = &updater[fn_start..];
-        let body_end = body.find("
-pub ").unwrap_or(body.len());
+        let body_end = body
+            .find(
+                "
+pub ",
+            )
+            .unwrap_or(body.len());
         assert!(
             body[..body_end].contains("release_install_tree("),
             "prepare_for_update_install no longer releases the install tree, so the manual              install can replace a tree partner processes still hold open"

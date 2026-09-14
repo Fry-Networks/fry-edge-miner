@@ -19,8 +19,8 @@ pub async fn get_system_status() -> Result<SystemStatus, String> {
         SystemStatus {
             docker,
             docker_message: status_user_message(docker),
-            virtualization_supported:
-                crate::integrations::docker_manager::virtualization_supported(),
+            virtualization_supported: crate::integrations::docker_manager::virtualization_supported(
+            ),
         }
     })
     .await

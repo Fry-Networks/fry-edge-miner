@@ -1,14 +1,13 @@
-use crate::supervisor::platform::BoundedOutput;
 use super::download::{download_file, partners_base_dir};
 use super::{tracked_child_probe, HealthStatus, Integration, PocGateData};
+use crate::supervisor::platform::BoundedOutput;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tracing::{info, warn};
 
-const OLOSTEP_DOWNLOAD_URL: &str =
-    "https://olostepbrowser.s3.us-east-1.amazonaws.com/setup.exe";
+const OLOSTEP_DOWNLOAD_URL: &str = "https://olostepbrowser.s3.us-east-1.amazonaws.com/setup.exe";
 
 /// BUG 10 (Discord: ~380 ghost tray icons). OlostepBrowser was spawned via a
 /// bare `Command::spawn()` with the returned `Child` immediately discarded —
@@ -115,7 +114,12 @@ impl AemIntegration {
                     ])
                     .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
                     .ok()
-                    .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok())
+                    .and_then(|o| {
+                        String::from_utf8_lossy(&o.stdout)
+                            .trim()
+                            .parse::<u64>()
+                            .ok()
+                    })
                     .unwrap_or(0)
             }
             #[cfg(not(target_os = "windows"))]
@@ -142,7 +146,12 @@ impl AemIntegration {
             let text = String::from_utf8_lossy(&out.stdout);
             let mut parts = text.trim().split('|');
             let mem = parts.next()?.trim().parse::<u64>().ok()?;
-            let cpu = parts.next()?.trim().replace(',', ".").parse::<f64>().unwrap_or(0.0);
+            let cpu = parts
+                .next()?
+                .trim()
+                .replace(',', ".")
+                .parse::<f64>()
+                .unwrap_or(0.0);
             Some(crate::supervisor::resource_guard::Sample {
                 mem_bytes: mem,
                 cpu_seconds: cpu,
@@ -162,8 +171,7 @@ impl AemIntegration {
         static GUARD: std::sync::OnceLock<std::sync::Mutex<ResourceGuard>> =
             std::sync::OnceLock::new();
         let sample = Self::resource_sample()?;
-        let mem_cap =
-            (Self::total_ram_bytes() as f64 * resource_guard::MEM_CAP_FRACTION) as u64;
+        let mem_cap = (Self::total_ram_bytes() as f64 * resource_guard::MEM_CAP_FRACTION) as u64;
         let cores = std::thread::available_parallelism()
             .map(|n| n.get() as u32)
             .unwrap_or(1);
@@ -172,12 +180,18 @@ impl AemIntegration {
             .lock()
             .ok()?;
         match guard.evaluate(sample, mem_cap, resource_guard::CPU_CAP_FRACTION, cores)? {
-            TripReason::Memory { used_bytes, cap_bytes } => Some(format!(
+            TripReason::Memory {
+                used_bytes,
+                cap_bytes,
+            } => Some(format!(
                 "restarted: resource limit — OlostepBrowser held {:.1} GB of RAM (cap {:.1} GB)",
                 used_bytes as f64 / 1e9,
                 cap_bytes as f64 / 1e9
             )),
-            TripReason::Cpu { fraction, cap_fraction } => Some(format!(
+            TripReason::Cpu {
+                fraction,
+                cap_fraction,
+            } => Some(format!(
                 "restarted: resource limit — OlostepBrowser sustained {:.0}% CPU (cap {:.0}%)",
                 fraction * 100.0,
                 cap_fraction * 100.0
@@ -193,15 +207,15 @@ impl AemIntegration {
             .join("SquirrelSetup.log");
         let contents = std::fs::read_to_string(log).ok()?;
         let tail: Vec<&str> = contents.lines().rev().take(3).collect();
-        let mut joined = tail
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join(" | ");
+        let mut joined = tail.into_iter().rev().collect::<Vec<_>>().join(" | ");
         if joined.len() > 300 {
             joined = joined[joined.len() - 300..].to_string();
         }
-        if joined.is_empty() { None } else { Some(joined) }
+        if joined.is_empty() {
+            None
+        } else {
+            Some(joined)
+        }
     }
 
     /// Force-clean every Olostep artifact so a reinstall starts from zero:
@@ -240,7 +254,10 @@ impl AemIntegration {
     fn config_needs_restage(contents: Option<&str>) -> bool {
         let Some(s) = contents else { return true };
         match serde_json::from_str::<serde_json::Value>(s) {
-            Ok(v) => v.get("mellowtel_opt_in_status").and_then(|x| x.as_bool()).is_none(),
+            Ok(v) => v
+                .get("mellowtel_opt_in_status")
+                .and_then(|x| x.as_bool())
+                .is_none(),
             Err(_) => true,
         }
     }
@@ -358,10 +375,9 @@ impl Integration for AemIntegration {
         // never shows the firewall prompt (the path changes on every Olostep
         // Squirrel self-update, which re-triggered the prompt each time).
         // Non-fatal: a declined UAC just means Windows prompts as before.
-        if let Err(e) = super::firewall::ensure_program_rules(
-            super::firewall::OLOSTEP_RULE_NAME,
-            &binary,
-        ) {
+        if let Err(e) =
+            super::firewall::ensure_program_rules(super::firewall::OLOSTEP_RULE_NAME, &binary)
+        {
             warn!(error = %e, "Olostep firewall rule setup failed — continuing");
         }
         info!(binary = ?binary, "Starting OlostepBrowser");
@@ -569,7 +585,10 @@ mod bug10_tracked_child_tests {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            std::process::Command::new("sleep").arg("30").spawn().expect("spawn sleep")
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn sleep")
         }
     }
 
@@ -583,7 +602,9 @@ mod bug10_tracked_child_tests {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            std::process::Command::new("true").spawn().expect("spawn true")
+            std::process::Command::new("true")
+                .spawn()
+                .expect("spawn true")
         }
     }
 
@@ -598,7 +619,10 @@ mod bug10_tracked_child_tests {
         let child = spawn_long_lived();
         *integration.child.lock().unwrap() = Some(child);
 
-        assert!(integration.is_running(), "a live tracked child must report running");
+        assert!(
+            integration.is_running(),
+            "a live tracked child must report running"
+        );
 
         // Clean up so the test doesn't leak a 30s sleep process.
         let taken = integration.child.lock().unwrap().take();
@@ -620,7 +644,10 @@ mod bug10_tracked_child_tests {
         // proves the exited child does not get stuck reporting "running"
         // forever.
         let running = integration.is_running();
-        assert!(!running, "an exited tracked child with no real instance running must report false");
+        assert!(
+            !running,
+            "an exited tracked child with no real instance running must report false"
+        );
         assert!(
             integration.child.lock().unwrap().is_none(),
             "the exited child must be cleared from the tracked slot"
@@ -639,7 +666,10 @@ mod bug10_tracked_child_tests {
             .split("fn image_name_probe()")
             .nth(1)
             .expect("image_name_probe must exist");
-        let probe_body = after_probe_fn.split("fn is_running").next().unwrap_or(after_probe_fn);
+        let probe_body = after_probe_fn
+            .split("fn is_running")
+            .next()
+            .unwrap_or(after_probe_fn);
         assert!(
             probe_body.contains("unwrap_or(true)"),
             "image_name_probe must fail CLOSED (unwrap_or(true)) on a probe error/timeout"
@@ -661,7 +691,10 @@ mod bug10_tracked_child_tests {
             .split("async fn health_check(&self)")
             .nth(1)
             .expect("health_check must exist");
-        let fn_body = health_check_fn.split("async fn check_update").next().unwrap_or(health_check_fn);
+        let fn_body = health_check_fn
+            .split("async fn check_update")
+            .next()
+            .unwrap_or(health_check_fn);
         assert!(
             !fn_body.contains("return HealthStatus::Unhealthy(reason)"),
             "a resource breach must be logged only, never trigger a restart via Unhealthy"

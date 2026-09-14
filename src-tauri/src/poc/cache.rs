@@ -35,10 +35,7 @@ impl PocCache {
         fs::create_dir_all(&self.root)?;
         let first_write_of_day = !path.exists();
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
 
         let line = serde_json::to_string(slot)?;
         writeln!(file, "{}", line)?;

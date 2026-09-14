@@ -1,12 +1,12 @@
-use std::sync::{Arc, Mutex, RwLock};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use tracing::{info, warn};
 
 use crate::config::store::ConfigStore;
-use crate::integrations::{HealthStatus, IntegrationRegistry};
 use crate::integrations::docker_manager::{docker_status, DockerStatus};
+use crate::integrations::{HealthStatus, IntegrationRegistry};
 
 /// Docker watcher: monitors Docker state and auto-heals deferred integrations.
 ///
@@ -81,7 +81,8 @@ pub async fn spawn_docker_watcher(
             // If DaemonStopped and we haven't exceeded attempt limit and ≥10 min since last attempt
             if docker_status == DockerStatus::DaemonStopped
                 && engine_start_attempts < 3
-                && last_engine_start_time.elapsed() >= Duration::from_secs(600) // 10 min
+                && last_engine_start_time.elapsed() >= Duration::from_secs(600)
+            // 10 min
             {
                 info!("Docker daemon stopped — attempting to start it");
                 match tokio::task::block_in_place(|| {
@@ -100,7 +101,9 @@ pub async fn spawn_docker_watcher(
                                 if reg.is_enabled(id) && integration.requires_docker() {
                                     health_map.insert(
                                         id.to_string(),
-                                        HealthStatus::Unhealthy("Docker engine starting...".to_string()),
+                                        HealthStatus::Unhealthy(
+                                            "Docker engine starting...".to_string(),
+                                        ),
                                     );
                                 }
                             }
@@ -121,8 +124,7 @@ pub async fn spawn_docker_watcher(
 
             info!(
                 ?docker_status,
-                not_ready_count,
-                "Docker not ready — deferring recovery attempts"
+                not_ready_count, "Docker not ready — deferring recovery attempts"
             );
             continue;
         }
@@ -141,8 +143,13 @@ pub async fn spawn_docker_watcher(
         }
 
         // Attempt recovery for deferred Docker-dependent integrations
-        match attempt_docker_dependent_recovery(&registry, &config, &last_health, &last_integration_error)
-            .await
+        match attempt_docker_dependent_recovery(
+            &registry,
+            &config,
+            &last_health,
+            &last_integration_error,
+        )
+        .await
         {
             Ok(recovered_ids) => {
                 if !recovered_ids.is_empty() {
@@ -216,7 +223,10 @@ async fn attempt_docker_dependent_recovery(
         // for any other integration type.
         let installed = tokio::task::block_in_place(|| integration.installed_version()).is_some();
         if !installed {
-            info!(id = id.as_str(), "Docker watcher: enabled but not installed — attempting install");
+            info!(
+                id = id.as_str(),
+                "Docker watcher: enabled but not installed — attempting install"
+            );
             if let Err(e) = integration.install().await {
                 warn!(id = id.as_str(), error = %e, "Docker watcher: install failed — will retry next cycle");
                 if let Ok(mut error_map) = last_integration_error.write() {
@@ -230,7 +240,10 @@ async fn attempt_docker_dependent_recovery(
         // Attempt to start
         match integration.start().await {
             Ok(()) => {
-                info!(id = id.as_str(), "Docker watcher: integration started successfully");
+                info!(
+                    id = id.as_str(),
+                    "Docker watcher: integration started successfully"
+                );
                 recovered.push(id.clone());
 
                 if let Ok(mut health_map) = last_health.write() {
@@ -243,7 +256,10 @@ async fn attempt_docker_dependent_recovery(
             Err(e) => {
                 warn!(id = id.as_str(), error = %e, "Docker watcher: start failed");
                 if let Ok(mut health_map) = last_health.write() {
-                    health_map.insert(id.clone(), HealthStatus::Unhealthy(format!("Docker watcher start failed: {}", e)));
+                    health_map.insert(
+                        id.clone(),
+                        HealthStatus::Unhealthy(format!("Docker watcher start failed: {}", e)),
+                    );
                 }
                 if let Ok(mut error_map) = last_integration_error.write() {
                     error_map.insert(id.clone(), Some(format!("Start error: {}", e)));
@@ -270,14 +286,26 @@ mod pre_check_sleep_tests {
 
     #[test]
     fn later_passes_use_the_normal_ninety_second_interval_under_ten_misses() {
-        assert_eq!(watcher_pre_check_sleep(false, 0), Some(Duration::from_secs(90)));
-        assert_eq!(watcher_pre_check_sleep(false, 9), Some(Duration::from_secs(90)));
+        assert_eq!(
+            watcher_pre_check_sleep(false, 0),
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(
+            watcher_pre_check_sleep(false, 9),
+            Some(Duration::from_secs(90))
+        );
     }
 
     #[test]
     fn later_passes_back_off_to_five_minutes_at_ten_or_more_misses() {
-        assert_eq!(watcher_pre_check_sleep(false, 10), Some(Duration::from_secs(300)));
-        assert_eq!(watcher_pre_check_sleep(false, 15), Some(Duration::from_secs(300)));
+        assert_eq!(
+            watcher_pre_check_sleep(false, 10),
+            Some(Duration::from_secs(300))
+        );
+        assert_eq!(
+            watcher_pre_check_sleep(false, 15),
+            Some(Duration::from_secs(300))
+        );
     }
 }
 
@@ -290,13 +318,7 @@ mod tests {
         // Test that backoff logic computes correct intervals:
         // 0-9 not-ready polls: 90 sec
         // 10+ not-ready polls: 300 sec
-        let test_cases = vec![
-            (0, 90),
-            (5, 90),
-            (9, 90),
-            (10, 300),
-            (15, 300),
-        ];
+        let test_cases = vec![(0, 90), (5, 90), (9, 90), (10, 300), (15, 300)];
 
         for (not_ready_count, expected_interval) in test_cases {
             let interval = if not_ready_count >= 10 { 300 } else { 90 };
@@ -334,7 +356,10 @@ mod tests {
     fn should_attempt_recovery(status: &HealthStatus) -> bool {
         match status {
             HealthStatus::Healthy | HealthStatus::Stopped => false,
-            HealthStatus::Unhealthy(_) | HealthStatus::Unknown | HealthStatus::Starting | HealthStatus::Installing => true,
+            HealthStatus::Unhealthy(_)
+            | HealthStatus::Unknown
+            | HealthStatus::Starting
+            | HealthStatus::Installing => true,
         }
     }
 }

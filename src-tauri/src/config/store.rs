@@ -91,7 +91,9 @@ impl ConfigStore {
                         "ConfigStore: all config copies unreadable — starting with defaults"
                     );
                 } else {
-                    tracing::info!("ConfigStore: no config file found, using defaults (new install)");
+                    tracing::info!(
+                        "ConfigStore: no config file found, using defaults (new install)"
+                    );
                 }
                 FemConfig::default()
             }
@@ -256,7 +258,8 @@ mod isolation_tests {
         // on the live test box) — snapshot it before touching anything, so
         // we can prove it is byte-identical (or still absent) afterward.
         // Read-only use of dirs::config_dir(); never mutated.
-        let real_roaming = dirs::config_dir().map(|d| d.join("FryEdgeMiner").join("fem_config.json"));
+        let real_roaming =
+            dirs::config_dir().map(|d| d.join("FryEdgeMiner").join("fem_config.json"));
         let before = real_roaming
             .as_ref()
             .filter(|p| p.exists())
@@ -285,10 +288,16 @@ mod isolation_tests {
         // this isn't merely "didn't write anywhere," it wrote to the right
         // (and only the right) place.
         let isolated_primary = dir.join("fem_config.json");
-        assert!(isolated_primary.exists(), "primary save must land inside the isolated dir");
+        assert!(
+            isolated_primary.exists(),
+            "primary save must land inside the isolated dir"
+        );
         let saved: FemConfig =
             serde_json::from_str(&std::fs::read_to_string(&isolated_primary).unwrap()).unwrap();
-        assert_eq!(saved.miner_key.as_deref(), Some("FEM-ISOLATION-TEST-MUST-NEVER-ESCAPE"));
+        assert_eq!(
+            saved.miner_key.as_deref(),
+            Some("FEM-ISOLATION-TEST-MUST-NEVER-ESCAPE")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -314,9 +323,14 @@ mod isolation_tests {
         let roaming_file = roaming_dir.join("fem_config.json");
 
         let store = ConfigStore::new(primary_dir.clone(), Some(roaming_file.clone()));
-        store.update(|cfg| cfg.miner_key = Some("FEM-ROAMING-OPT-IN".to_string())).unwrap();
+        store
+            .update(|cfg| cfg.miner_key = Some("FEM-ROAMING-OPT-IN".to_string()))
+            .unwrap();
 
-        assert!(roaming_file.exists(), "explicit roaming path must receive the redundant copy");
+        assert!(
+            roaming_file.exists(),
+            "explicit roaming path must receive the redundant copy"
+        );
         let saved: FemConfig =
             serde_json::from_str(&std::fs::read_to_string(&roaming_file).unwrap()).unwrap();
         assert_eq!(saved.miner_key.as_deref(), Some("FEM-ROAMING-OPT-IN"));

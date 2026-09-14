@@ -102,9 +102,9 @@ where
                 bound.as_secs()
             ),
         )),
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other(
-            format!("process creation thread for {integration_id} ended without a result"),
-        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other(format!(
+            "process creation thread for {integration_id} ended without a result"
+        ))),
     }
 }
 
@@ -353,7 +353,11 @@ mod wp6_spawn_tests {
         // synthetic "MZ"+zeros stub is refused instantly with no dialog and
         // does NOT reproduce the bug (verified 2026-09-07).
         let me = std::env::current_exe().expect("current exe");
-        let real_head: Vec<u8> = std::fs::read(&me).expect("read self").into_iter().take(200).collect();
+        let real_head: Vec<u8> = std::fs::read(&me)
+            .expect("read self")
+            .into_iter()
+            .take(200)
+            .collect();
         assert_eq!(real_head.len(), 200);
         assert_eq!(&real_head[..2], b"MZ");
         std::fs::write(&exe, &real_head).expect("write stub");
@@ -390,11 +394,20 @@ mod wp6_spawn_tests {
         let started = std::time::Instant::now();
         let r = spawn_bounded("wp6-stall", Duration::from_millis(300), || {
             std::thread::sleep(Duration::from_secs(3));
-            Err(io::Error::new(io::ErrorKind::Other, "creation finished far too late"))
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "creation finished far too late",
+            ))
         });
         let elapsed = started.elapsed();
-        assert!(matches!(&r, Err(e) if e.kind() == io::ErrorKind::TimedOut), "{r:?}");
-        assert!(elapsed < Duration::from_secs(2), "spawn_bounded returned only after {elapsed:?}");
+        assert!(
+            matches!(&r, Err(e) if e.kind() == io::ErrorKind::TimedOut),
+            "{r:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "spawn_bounded returned only after {elapsed:?}"
+        );
     }
 
     /// Test-only: liveness of the late child is judged on a SYNCHRONIZE handle
@@ -429,18 +442,26 @@ mod wp6_spawn_tests {
                 .spawn()?;
             // Pin the PID before handing the child back: from here on the
             // process object outlives the kill until the test closes it.
-            let handle = unsafe { late_child_handle::OpenProcess(late_child_handle::SYNCHRONIZE, 0, child.id()) };
+            let handle = unsafe {
+                late_child_handle::OpenProcess(late_child_handle::SYNCHRONIZE, 0, child.id())
+            };
             *slot.lock().unwrap() = Some((child.id(), handle));
             Ok(child)
         });
-        assert!(matches!(&r, Err(e) if e.kind() == io::ErrorKind::TimedOut), "{r:?}");
+        assert!(
+            matches!(&r, Err(e) if e.kind() == io::ErrorKind::TimedOut),
+            "{r:?}"
+        );
         let (pid, handle) = {
             let deadline = std::time::Instant::now() + Duration::from_secs(3);
             loop {
                 if let Some(v) = *late.lock().unwrap() {
                     break v;
                 }
-                assert!(std::time::Instant::now() < deadline, "the late child was never created");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the late child was never created"
+                );
                 std::thread::sleep(Duration::from_millis(50));
             }
         };
@@ -487,7 +508,9 @@ mod wp6_spawn_tests {
                 let child = super::super::platform::command("cmd.exe")
                     .args(["/c", "ping -n 60 127.0.0.1 >nul"])
                     .spawn()?;
-                let handle = unsafe { late_child_handle::OpenProcess(late_child_handle::SYNCHRONIZE, 0, child.id()) };
+                let handle = unsafe {
+                    late_child_handle::OpenProcess(late_child_handle::SYNCHRONIZE, 0, child.id())
+                };
                 *slot_w.lock().unwrap() = Some((child.id(), handle));
                 Ok(child)
             });
@@ -506,7 +529,10 @@ mod wp6_spawn_tests {
                     if let Some(v) = *slot.lock().unwrap() {
                         break v;
                     }
-                    assert!(std::time::Instant::now() < deadline, "attempt {i}: the child was never created");
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "attempt {i}: the child was never created"
+                    );
                     std::thread::sleep(Duration::from_millis(5));
                 }
             };
@@ -517,8 +543,14 @@ mod wp6_spawn_tests {
                 leaked.push(pid);
             }
         }
-        eprintln!("deadline race: {returned} returned to the caller, {timed_out} timed out, {} leaked", leaked.len());
-        assert!(leaked.is_empty(), "children left running after spawn_bounded: {leaked:?}");
+        eprintln!(
+            "deadline race: {returned} returned to the caller, {timed_out} timed out, {} leaked",
+            leaked.len()
+        );
+        assert!(
+            leaked.is_empty(),
+            "children left running after spawn_bounded: {leaked:?}"
+        );
     }
 }
 
@@ -546,7 +578,10 @@ mod bug9_working_dir_tests {
         let base = Path::new(r"D:\FryEdgeMiner\partners");
         assert_eq!(working_dir_for("fryvpn", base), base.join("fryvpn"));
         assert_eq!(working_dir_for("titan", base), base.join("titan"));
-        assert_ne!(working_dir_for("fryvpn", base), working_dir_for("titan", base));
+        assert_ne!(
+            working_dir_for("fryvpn", base),
+            working_dir_for("titan", base)
+        );
     }
 
     /// The headline regression test. Spawns a real child that prints its own
@@ -615,7 +650,10 @@ mod bug9_working_dir_tests {
         let reported = Path::new(logged.trim())
             .canonicalize()
             .expect("child reported a real path");
-        let ours = std::env::current_dir().expect("cwd").canonicalize().expect("canonicalize");
+        let ours = std::env::current_dir()
+            .expect("cwd")
+            .canonicalize()
+            .expect("canonicalize");
 
         assert_eq!(reported, ours, "no directory given must mean no change");
 

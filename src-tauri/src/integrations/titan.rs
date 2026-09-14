@@ -1,13 +1,13 @@
-use crate::supervisor::platform::BoundedOutput;
 use super::download::{download_file_with_options, partners_base_dir};
 use super::{HealthStatus, Integration, PocGateData};
+use crate::supervisor::platform::BoundedOutput;
+use crate::supervisor::Supervisor;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
-use crate::supervisor::Supervisor;
 
 /// BUG 8 (Discord: four Scorpion63 screenshots — VCRUNTIME140.dll /
 /// VCRUNTIME140_1.dll / MSVCP140.dll / MSVCP140_ATOMIC_WAIT.dll not found).
@@ -26,7 +26,10 @@ const VC_REDIST_DOWNLOAD_URL: &str = "https://aka.ms/vs/17/release/vc_redist.x64
 /// DLL? Parameterized so it is testable against a tempdir instead of the
 /// real `%SystemRoot%`.
 fn vc_redist_dll_present(system_root: &Path) -> bool {
-    system_root.join("System32").join(VC_REDIST_MARKER_DLL).exists()
+    system_root
+        .join("System32")
+        .join(VC_REDIST_MARKER_DLL)
+        .exists()
 }
 
 /// Whether the VC++ 2015-2022 x64 runtime titan-edge.exe needs is missing on
@@ -71,7 +74,11 @@ pub(crate) enum VcRedistInstallOutcome {
 /// because a timeout means we never actually observed the elevated
 /// installer's own outcome — only that the OUTER wrapper didn't return
 /// in time.
-fn vc_redist_install_outcome(timed_out: bool, success: bool, exit_code: Option<i32>) -> VcRedistInstallOutcome {
+fn vc_redist_install_outcome(
+    timed_out: bool,
+    success: bool,
+    exit_code: Option<i32>,
+) -> VcRedistInstallOutcome {
     if timed_out {
         return VcRedistInstallOutcome::StillInstalling;
     }
@@ -110,7 +117,9 @@ pub(crate) async fn install_vc_redist_elevated() -> Result<VcRedistInstallOutcom
 
     let outcome = match &result {
         Ok(out) => vc_redist_install_outcome(false, out.status.success(), out.status.code()),
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => vc_redist_install_outcome(true, false, None),
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            vc_redist_install_outcome(true, false, None)
+        }
         Err(e) => return Err(anyhow::anyhow!("VC++ redist install could not run: {e}")),
     };
 
@@ -179,13 +188,10 @@ fn line_indicates_error(line: &str) -> bool {
     // Bare level tokens: "[ERROR]", a leading "ERROR ", or " ERROR " / " FATAL ".
     line.split(|c: char| !c.is_ascii_alphabetic())
         .any(|tok| tok.eq_ignore_ascii_case("error") || tok.eq_ignore_ascii_case("fatal"))
-        && line
-            .split_whitespace()
-            .take(4)
-            .any(|w| {
-                let t = w.trim_matches(|c: char| !c.is_ascii_alphabetic());
-                t.eq_ignore_ascii_case("error") || t.eq_ignore_ascii_case("fatal")
-            })
+        && line.split_whitespace().take(4).any(|w| {
+            let t = w.trim_matches(|c: char| !c.is_ascii_alphabetic());
+            t.eq_ignore_ascii_case("error") || t.eq_ignore_ascii_case("fatal")
+        })
 }
 
 #[cfg(test)]
@@ -300,7 +306,7 @@ impl TitanIntegration {
     }
 
     fn compute_sha256(path: &PathBuf) -> Result<String> {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         use std::io::Read;
 
         let mut file = std::fs::File::open(path)?;
@@ -359,7 +365,12 @@ impl Integration for TitanIntegration {
 
         // Extract using tar command (Windows 10+ includes bsdtar)
         let output = crate::supervisor::platform::command("tar")
-            .args(["-xzf", &archive_path.to_string_lossy(), "-C", &partner_dir.to_string_lossy()])
+            .args([
+                "-xzf",
+                &archive_path.to_string_lossy(),
+                "-C",
+                &partner_dir.to_string_lossy(),
+            ])
             .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
 
         if !output.status.success() {
@@ -485,8 +496,12 @@ impl Integration for TitanIntegration {
         let stdout_path = self.log_dir.join("titan").join("titan_stdout.log");
         let stderr_path = self.log_dir.join("titan").join("titan_stderr.log");
 
-        let stdout_content = tokio::fs::read_to_string(&stdout_path).await.unwrap_or_default();
-        let stderr_content = tokio::fs::read_to_string(&stderr_path).await.unwrap_or_default();
+        let stdout_content = tokio::fs::read_to_string(&stdout_path)
+            .await
+            .unwrap_or_default();
+        let stderr_content = tokio::fs::read_to_string(&stderr_path)
+            .await
+            .unwrap_or_default();
 
         // Combine recent tail (last 50 lines of each)
         let recent_lines: Vec<String> = stdout_content
@@ -500,8 +515,10 @@ impl Integration for TitanIntegration {
         // BUG 3: carry the REAL error through, and tolerate transients.
         // The old code collapsed every matched line to a fixed placeholder and
         // flipped the card on the very first tick.
-        let combined = recent_lines.join("
-");
+        let combined = recent_lines.join(
+            "
+",
+        );
         if first_error_line(&combined).is_some() {
             let failures = TITAN_CONSECUTIVE_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
             if should_report_unhealthy(failures) {
@@ -573,7 +590,11 @@ mod bug8_vc_redist_tests {
     #[test]
     fn the_marker_dll_present_means_the_runtime_is_installed() {
         let root = tmp_system_root("present");
-        std::fs::write(root.join("System32").join(VC_REDIST_MARKER_DLL), b"fake dll").unwrap();
+        std::fs::write(
+            root.join("System32").join(VC_REDIST_MARKER_DLL),
+            b"fake dll",
+        )
+        .unwrap();
         assert!(vc_redist_dll_present(&root));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -633,7 +654,11 @@ mod bug8_h2_vc_redist_timeout_tests {
             VC_REDIST_INSTALL_TIMEOUT > crate::supervisor::platform::PROBE_TIMEOUT,
             "VC_REDIST_INSTALL_TIMEOUT must be materially longer than the generic 20s probe timeout"
         );
-        assert_eq!(VC_REDIST_INSTALL_TIMEOUT, std::time::Duration::from_secs(600), "bounded at 10 minutes");
+        assert_eq!(
+            VC_REDIST_INSTALL_TIMEOUT,
+            std::time::Duration::from_secs(600),
+            "bounded at 10 minutes"
+        );
     }
 
     #[test]
@@ -748,7 +773,11 @@ mod bug3_daemon_error_tests {
             "INFO  error=<nil>",
             "INFO  see https://docs.titannet.io/troubleshooting/error-codes",
         ] {
-            assert_eq!(first_error_line(benign), None, "{benign:?} must not be a failure");
+            assert_eq!(
+                first_error_line(benign),
+                None,
+                "{benign:?} must not be a failure"
+            );
         }
     }
 
@@ -757,12 +786,18 @@ mod bug3_daemon_error_tests {
     #[test]
     fn one_transient_failure_does_not_flip_the_card() {
         assert!(!should_report_unhealthy(1));
-        assert!(!should_report_unhealthy(CONSECUTIVE_FAILURES_BEFORE_UNHEALTHY - 1));
+        assert!(!should_report_unhealthy(
+            CONSECUTIVE_FAILURES_BEFORE_UNHEALTHY - 1
+        ));
     }
 
     #[test]
     fn a_persistent_failure_is_still_reported() {
-        assert!(should_report_unhealthy(CONSECUTIVE_FAILURES_BEFORE_UNHEALTHY));
-        assert!(should_report_unhealthy(CONSECUTIVE_FAILURES_BEFORE_UNHEALTHY + 5));
+        assert!(should_report_unhealthy(
+            CONSECUTIVE_FAILURES_BEFORE_UNHEALTHY
+        ));
+        assert!(should_report_unhealthy(
+            CONSECUTIVE_FAILURES_BEFORE_UNHEALTHY + 5
+        ));
     }
 }

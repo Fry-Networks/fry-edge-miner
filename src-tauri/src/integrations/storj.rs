@@ -1,6 +1,6 @@
-use crate::supervisor::platform::BoundedOutput;
 use super::download::{download_file_with_options, partners_base_dir};
 use super::{HealthStatus, Integration, PocGateData};
+use crate::supervisor::platform::BoundedOutput;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -81,7 +81,11 @@ impl StorjIntegration {
         let mut last_error = None;
 
         for attempt in 1..=max_attempts {
-            info!(url = GITHUB_API_URL, attempt = attempt, "Fetching latest Storj release");
+            info!(
+                url = GITHUB_API_URL,
+                attempt = attempt,
+                "Fetching latest Storj release"
+            );
 
             match client.get(GITHUB_API_URL).send().await {
                 Ok(response) => {
@@ -123,9 +127,7 @@ impl StorjIntegration {
                     let ratelimit_remaining = headers
                         .get("x-ratelimit-remaining")
                         .and_then(|v| v.to_str().ok());
-                    let retry_after = headers
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok());
+                    let retry_after = headers.get("retry-after").and_then(|v| v.to_str().ok());
 
                     warn!(
                         url = GITHUB_API_URL,
@@ -153,7 +155,10 @@ impl StorjIntegration {
                             continue;
                         }
                     } else {
-                        return Err(anyhow::anyhow!("Failed to fetch latest release: HTTP {}", status.as_u16()));
+                        return Err(anyhow::anyhow!(
+                            "Failed to fetch latest release: HTTP {}",
+                            status.as_u16()
+                        ));
                     }
                 }
                 Err(e) => {
@@ -167,7 +172,8 @@ impl StorjIntegration {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Failed to fetch latest release after all retries")))
+        Err(last_error
+            .unwrap_or_else(|| anyhow::anyhow!("Failed to fetch latest release after all retries")))
     }
 }
 
@@ -203,7 +209,6 @@ impl Integration for StorjIntegration {
 
         #[cfg(target_os = "windows")]
         {
-            
             crate::supervisor::platform::command("powershell")
                 .args([
                     "-Command",
@@ -227,7 +232,10 @@ impl Integration for StorjIntegration {
             if let Ok(entries) = std::fs::read_dir(&extract_dir) {
                 for entry in entries.flatten() {
                     let nested = entry.path().join(
-                        binary.file_name().and_then(|n| n.to_str()).unwrap_or("storagenode.exe"),
+                        binary
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("storagenode.exe"),
                     );
                     if entry.path().is_dir() && nested.exists() {
                         std::fs::rename(&nested, &binary)?;
@@ -291,10 +299,9 @@ impl Integration for StorjIntegration {
         //  detection path can be exercised against a real HTTP responder)
 
         // Check if dashboard is accessible on localhost:14002
-        match Self::dashboard_responds(&format!("http://127.0.0.1:{}", STORJ_DASHBOARD_PORT)).await {
-            true => {
-                HealthStatus::Healthy
-            }
+        match Self::dashboard_responds(&format!("http://127.0.0.1:{}", STORJ_DASHBOARD_PORT)).await
+        {
+            true => HealthStatus::Healthy,
             false => {
                 // TODO-COVERAGE-GAP: node-online state requires Storj account auth token (email signup).
                 // Install + eligibility + exclusivity work without the token; this state guides the
@@ -353,7 +360,10 @@ mod tests {
 
     #[test]
     fn picks_the_storagenode_zip_and_nothing_else() {
-        assert_eq!(picked(RELEASE_ASSETS), Some("storagenode_windows_amd64.zip"));
+        assert_eq!(
+            picked(RELEASE_ASSETS),
+            Some("storagenode_windows_amd64.zip")
+        );
     }
 
     #[test]
@@ -443,7 +453,10 @@ ok",
         let detected =
             StorjIntegration::dashboard_responds(&format!("http://127.0.0.1:{port}")).await;
         let _ = stop.send(());
-        assert!(detected, "a live HTTP 200 on the dashboard port must be detected");
+        assert!(
+            detected,
+            "a live HTTP 200 on the dashboard port must be detected"
+        );
     }
 
     /// Nothing listening must NOT be reported as a working dashboard — this is

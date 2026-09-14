@@ -1,14 +1,14 @@
-use crate::supervisor::platform::BoundedOutput;
 use super::{HealthStatus, Integration, PocGateData};
+use crate::api::client::ApiClient;
+use crate::api::types::CredentialInfo;
+use crate::config::store::ConfigStore;
+use crate::supervisor::platform::BoundedOutput;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
-use crate::api::client::ApiClient;
-use crate::api::types::CredentialInfo;
-use crate::config::store::ConfigStore;
 
 const HEALTH_URL: &str = "http://localhost:8181/health";
 
@@ -129,7 +129,11 @@ async fn fetch_credentials_with_retry(
         match &result {
             Err(crate::api::client::ApiError::Request(_)) => {
                 let delay = 2u64.pow(attempt);
-                warn!(attempt, delay_secs = delay, "Credential fetch failed (network error), retrying");
+                warn!(
+                    attempt,
+                    delay_secs = delay,
+                    "Credential fetch failed (network error), retrying"
+                );
                 tokio::time::sleep(Duration::from_secs(delay)).await;
                 result = crate::api::credentials::lookup(api_client, miner_key).await;
             }
@@ -222,9 +226,12 @@ impl Integration for DiiiscoIntegration {
         // Fetch credentials from hardwareapi
         let cfg = self.config.get();
         let miner_key = cfg.miner_key.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("Miner key not set — complete device registration before installing Diiisco")
+            anyhow::anyhow!(
+                "Miner key not set — complete device registration before installing Diiisco"
+            )
         })?;
-        let creds = fetch_credentials_with_retry(&self.api_client, miner_key).await
+        let creds = fetch_credentials_with_retry(&self.api_client, miner_key)
+            .await
             .map_err(credential_fetch_error)?;
         let algo_address = match classify_wallet(creds.algo_address.as_deref()) {
             Ok(addr) => {
@@ -286,11 +293,7 @@ impl Integration for DiiiscoIntegration {
         // whenever the file exists — so a machine that installed an older build
         // would keep its stale compose forever and never pick up fixes like
         // dropping the conflicting 11434 publish.
-        tokio::fs::write(
-            &compose,
-            include_str!("diiisco_deploy/docker-compose.yml"),
-        )
-        .await?;
+        tokio::fs::write(&compose, include_str!("diiisco_deploy/docker-compose.yml")).await?;
 
         // The compose file interpolates ${ALGO_ADDRESS}/${ALGO_MNEMONIC}/
         // ${DIIISCO_API_KEY} on EVERY invocation, `up` included — without
@@ -298,9 +301,12 @@ impl Integration for DiiiscoIntegration {
         // args. Fetch the same credentials install() uses.
         let cfg = self.config.get();
         let miner_key = cfg.miner_key.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("Miner key not set — complete device registration before starting Diiisco")
+            anyhow::anyhow!(
+                "Miner key not set — complete device registration before starting Diiisco"
+            )
         })?;
-        let creds = fetch_credentials_with_retry(&self.api_client, miner_key).await
+        let creds = fetch_credentials_with_retry(&self.api_client, miner_key)
+            .await
             .map_err(credential_fetch_error)?;
         let algo_address = match classify_wallet(creds.algo_address.as_deref()) {
             Ok(addr) => {
@@ -414,17 +420,12 @@ impl Integration for DiiiscoIntegration {
         let client = reqwest::Client::new();
         match tokio::time::timeout(
             tokio::time::Duration::from_secs(5),
-            client
-                .get(HEALTH_URL)
-                .bearer_auth(token)
-                .send(),
+            client.get(HEALTH_URL).bearer_auth(token).send(),
         )
         .await
         {
             Ok(Ok(resp)) if resp.status().is_success() => HealthStatus::Healthy,
-            Ok(Ok(resp)) => {
-                HealthStatus::Unhealthy(format!("HTTP {}", resp.status()))
-            }
+            Ok(Ok(resp)) => HealthStatus::Unhealthy(format!("HTTP {}", resp.status())),
             Ok(Err(_)) => HealthStatus::Stopped, // connection refused = not running
             Err(_) => HealthStatus::Unhealthy("Timeout".to_string()),
         }
@@ -548,7 +549,10 @@ mod wallet_condition_tests {
     fn the_requirement_gate_reports_exactly_the_same_reason() {
         // Whatever the user sees as unavailable_reason has to be this string,
         // or the card and the toggle rejection disagree.
-        assert_eq!(requirements_for(true), Err(WALLET_NOT_PROVISIONED.to_string()));
+        assert_eq!(
+            requirements_for(true),
+            Err(WALLET_NOT_PROVISIONED.to_string())
+        );
         assert_eq!(requirements_for(false), Ok(()));
     }
 
@@ -564,7 +568,10 @@ mod wallet_condition_tests {
         );
 
         record_wallet_state(true);
-        assert!(!wallet_missing(), "a provisioned wallet must clear the cache");
+        assert!(
+            !wallet_missing(),
+            "a provisioned wallet must clear the cache"
+        );
         assert_eq!(requirements_for(wallet_missing()), Ok(()));
     }
 
@@ -572,7 +579,10 @@ mod wallet_condition_tests {
     fn a_cached_miss_is_authoritative_only_inside_the_ttl() {
         let ttl = Duration::from_secs(900);
         let recorded = Instant::now();
-        assert!(cache_is_live(Some(recorded), recorded, ttl), "just recorded");
+        assert!(
+            cache_is_live(Some(recorded), recorded, ttl),
+            "just recorded"
+        );
         assert!(cache_is_live(
             Some(recorded),
             recorded + Duration::from_secs(899),

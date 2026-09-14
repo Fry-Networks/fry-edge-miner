@@ -145,7 +145,9 @@ mod tests {
         assert_eq!(g.evaluate(s(base, 60, GB, 480.0), 12 * GB, 0.5, 8), None);
         let trip = g.evaluate(s(base, 90, GB, 720.0), 12 * GB, 0.5, 8);
         match trip {
-            Some(TripReason::Cpu { fraction, .. }) => assert!(fraction > 0.5, "fraction={fraction}"),
+            Some(TripReason::Cpu { fraction, .. }) => {
+                assert!(fraction > 0.5, "fraction={fraction}")
+            }
             other => panic!("expected CPU trip, got {other:?}"),
         }
     }

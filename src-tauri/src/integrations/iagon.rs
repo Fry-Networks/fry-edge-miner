@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
-const IAGON_RELEASE_URL: &str = "https://github.com/Iagonorg/mainnet-node-CLI/releases/download/v1.1.0/iag-cli-windows.exe";
+const IAGON_RELEASE_URL: &str =
+    "https://github.com/Iagonorg/mainnet-node-CLI/releases/download/v1.1.0/iag-cli-windows.exe";
 const IAGON_SHA256: &str = "0a13a6426f7b3cc5f0ba852b206bcfbd1b03074c87b1c61ba67fc451a9f5915d";
 const USER_AGENT: &str = concat!("FryEdgeMiner/", env!("CARGO_PKG_VERSION"));
 
@@ -74,7 +75,10 @@ impl IagonIntegration {
     /// Read fresh on every call so a user can paste their key and toggle the
     /// integration without restarting the whole app.
     fn node_token() -> Option<String> {
-        if let Some(t) = std::env::var("IAGON_NODE_TOKEN").ok().filter(|s| !s.is_empty()) {
+        if let Some(t) = std::env::var("IAGON_NODE_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty())
+        {
             return Some(t);
         }
         Self::token_from_config(&Self::config_path())
@@ -98,7 +102,7 @@ impl IagonIntegration {
     /// Verify SHA256 of downloaded binary if sha2 is available.
     /// On other platforms, verify file size > 50MB as a basic sanity check.
     async fn verify_binary(path: &PathBuf) -> Result<()> {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         use std::fs::File;
         use std::io::Read;
 
@@ -170,9 +174,14 @@ impl Integration for IagonIntegration {
                 // Don't fail hard — the file size > 50MB is a basic sanity check
                 let metadata = tokio::fs::metadata(&binary).await?;
                 if metadata.len() < 50_000_000 {
-                    anyhow::bail!("Downloaded Iagon binary is suspiciously small ({} bytes)", metadata.len());
+                    anyhow::bail!(
+                        "Downloaded Iagon binary is suspiciously small ({} bytes)",
+                        metadata.len()
+                    );
                 }
-                warn!("Iagon binary size acceptable despite hash mismatch; proceeding with caution");
+                warn!(
+                    "Iagon binary size acceptable despite hash mismatch; proceeding with caution"
+                );
             }
         }
 
@@ -189,7 +198,10 @@ impl Integration for IagonIntegration {
     async fn start(&self) -> Result<()> {
         let binary = Self::binary_path();
         if !binary.exists() {
-            anyhow::bail!("Iagon CLI binary not found at {}; run install() first", binary.display());
+            anyhow::bail!(
+                "Iagon CLI binary not found at {}; run install() first",
+                binary.display()
+            );
         }
 
         // Check for provisioned Iagon node token (fail-closed if missing)
@@ -284,7 +296,11 @@ mod tests {
 
     fn temp_config(contents: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("fem_iagon_cfg_{}_{}.json", std::process::id(), contents.len()));
+        p.push(format!(
+            "fem_iagon_cfg_{}_{}.json",
+            std::process::id(),
+            contents.len()
+        ));
         let mut f = std::fs::File::create(&p).expect("create temp config");
         f.write_all(contents.as_bytes()).expect("write temp config");
         p
@@ -344,7 +360,10 @@ mod tests {
         let err = IagonIntegration::evaluate_requirements(Some(128.0), Some(32.0))
             .expect_err("128 GB is far below the 900 GB minimum");
         assert!(err.contains("900 GB"), "{err}");
-        assert!(err.contains("128 GB"), "message must name what the device has: {err}");
+        assert!(
+            err.contains("128 GB"),
+            "message must name what the device has: {err}"
+        );
     }
 
     #[test]

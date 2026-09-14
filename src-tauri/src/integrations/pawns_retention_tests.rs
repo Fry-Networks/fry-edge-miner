@@ -75,10 +75,24 @@ fn an_old_entry_is_archived_once_the_device_has_a_newer_one() {
     let summary = PawnsIntegration::rotate_consent_log_at(&log, &archive, NOW);
 
     assert_eq!(summary.before, 2, "two entries went in");
-    assert_eq!(summary.retained, 1, "only the recent one stays: {summary:?}");
-    assert_eq!(summary.archived, 1, "the 800-day-old one is archived: {summary:?}");
-    assert_eq!(read_lines(&log), vec![recent], "the active log keeps the newest entry");
-    assert_eq!(read_lines(&archive), vec![old], "the trimmed entry is in the archive, not gone");
+    assert_eq!(
+        summary.retained, 1,
+        "only the recent one stays: {summary:?}"
+    );
+    assert_eq!(
+        summary.archived, 1,
+        "the 800-day-old one is archived: {summary:?}"
+    );
+    assert_eq!(
+        read_lines(&log),
+        vec![recent],
+        "the active log keeps the newest entry"
+    );
+    assert_eq!(
+        read_lines(&archive),
+        vec![old],
+        "the trimmed entry is in the archive, not gone"
+    );
 }
 
 #[test]
@@ -96,9 +110,15 @@ fn an_old_entry_that_is_a_devices_only_record_is_kept() {
 
     let summary = PawnsIntegration::rotate_consent_log_at(&log, &archive, NOW);
 
-    assert_eq!(summary.archived, 0, "a device's only record is never archived: {summary:?}");
+    assert_eq!(
+        summary.archived, 0,
+        "a device's only record is never archived: {summary:?}"
+    );
     assert_eq!(read_lines(&log), vec![ancient]);
-    assert!(!archive.exists(), "nothing to archive means no archive file is created");
+    assert!(
+        !archive.exists(),
+        "nothing to archive means no archive file is created"
+    );
     assert!(
         consent_is_active(&log, "dev-quiet"),
         "consent state survives rotation"
@@ -118,7 +138,10 @@ fn entries_inside_the_window_are_all_kept() {
 
     let summary = PawnsIntegration::rotate_consent_log_at(&log, &archive, NOW);
 
-    assert_eq!(summary.archived, 0, "729 days is inside a 730-day window: {summary:?}");
+    assert_eq!(
+        summary.archived, 0,
+        "729 days is inside a 730-day window: {summary:?}"
+    );
     assert_eq!(read_lines(&log), lines);
 }
 
@@ -134,8 +157,15 @@ fn a_malformed_line_is_kept_rather_than_archived() {
     let summary = PawnsIntegration::rotate_consent_log_at(&log, &archive, NOW);
 
     let kept = read_lines(&log);
-    assert!(kept.contains(&garbage), "an unreadable line is never discarded: {kept:?}");
-    assert_eq!(kept, vec![garbage, recent], "only the superseded old entry moves");
+    assert!(
+        kept.contains(&garbage),
+        "an unreadable line is never discarded: {kept:?}"
+    );
+    assert_eq!(
+        kept,
+        vec![garbage, recent],
+        "only the superseded old entry moves"
+    );
     assert_eq!(read_lines(&archive), vec![old]);
     assert_eq!(summary.archived, 1);
 }
@@ -144,7 +174,8 @@ fn a_malformed_line_is_kept_rather_than_archived() {
 fn an_entry_with_an_unparseable_timestamp_is_kept() {
     let dir = tempfile::tempdir().expect("temp dir");
     let (log, archive) = paths(dir.path());
-    let undated = r#"{"action":"consent","happened_at":"whenever","device_id":"dev-a"}"#.to_string();
+    let undated =
+        r#"{"action":"consent","happened_at":"whenever","device_id":"dev-a"}"#.to_string();
     let recent = entry("consent", "dev-a", 2 * DAY);
     write_lines(&log, &[undated.clone(), recent.clone()]);
 
@@ -181,7 +212,10 @@ fn every_devices_state_reads_the_same_after_rotation() {
         .iter()
         .map(|d| consent_is_active(&log, d))
         .collect();
-    assert_eq!(after, before, "rotation must not change any device's answer");
+    assert_eq!(
+        after, before,
+        "rotation must not change any device's answer"
+    );
 }
 
 #[test]
@@ -219,7 +253,14 @@ fn archived_entries_append_to_an_existing_archive_in_order() {
     write_lines(&archive, &[already.clone()]);
     let first = entry("consent", "dev-a", 900 * DAY);
     let second = entry("withdrawal", "dev-a", 850 * DAY);
-    write_lines(&log, &[first.clone(), second.clone(), entry("consent", "dev-a", 1 * DAY)]);
+    write_lines(
+        &log,
+        &[
+            first.clone(),
+            second.clone(),
+            entry("consent", "dev-a", 1 * DAY),
+        ],
+    );
 
     PawnsIntegration::rotate_consent_log_at(&log, &archive, NOW);
 
@@ -237,6 +278,12 @@ fn a_missing_log_is_not_an_error() {
 
     let summary = PawnsIntegration::rotate_consent_log_at(&log, &archive, NOW);
 
-    assert_eq!((summary.before, summary.retained, summary.archived), (0, 0, 0));
-    assert!(!log.exists() && !archive.exists(), "rotation creates nothing when there is no log");
+    assert_eq!(
+        (summary.before, summary.retained, summary.archived),
+        (0, 0, 0)
+    );
+    assert!(
+        !log.exists() && !archive.exists(),
+        "rotation creates nothing when there is no log"
+    );
 }

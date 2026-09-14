@@ -141,10 +141,7 @@ pub enum RegistrationState {
 /// BIT-IDENTICAL to the historic `miner_key.is_some()` rule — deliberately so.
 /// Tightening `registered` would route a half-registered device back into the
 /// Wizard, re-introducing the "keys and wallet go missing" regression class.
-pub fn registration_state(
-    miner_key: Option<&str>,
-    install_id: Option<&str>,
-) -> RegistrationState {
+pub fn registration_state(miner_key: Option<&str>, install_id: Option<&str>) -> RegistrationState {
     match (miner_key, install_id) {
         (None, _) => RegistrationState::Unregistered,
         (Some(_), None) => RegistrationState::Pending,
@@ -161,8 +158,7 @@ pub fn registration_state(
 /// deliberately rather than deleted, so the designed mechanism is not lost;
 /// wiring it up is a behaviour change that needs its own versioned release.
 #[allow(dead_code)]
-pub const REGISTRATION_RETRY_COOLDOWN: std::time::Duration =
-    std::time::Duration::from_secs(600);
+pub const REGISTRATION_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// PURE: rate-limited reconciliation gate, mirroring the existing
 /// `should_attempt_recovery` / TOKEN_RECOVERY_COOLDOWN idiom so there is one
@@ -241,8 +237,18 @@ pub async fn get_device_info(
     // Debug diagnostics — no secrets logged
     tracing::debug!(
         key_format_valid,
-        device_token_present = config.device_token.is_some() && !config.device_token.as_ref().unwrap().is_empty(),
-        auth_source = if config.device_token.as_ref().filter(|s| !s.is_empty()).is_some() { "device_token" } else { "fallback" },
+        device_token_present =
+            config.device_token.is_some() && !config.device_token.as_ref().unwrap().is_empty(),
+        auth_source = if config
+            .device_token
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .is_some()
+        {
+            "device_token"
+        } else {
+            "fallback"
+        },
         "get_device_info diagnostics"
     );
 
@@ -402,7 +408,9 @@ pub async fn register_device(
                         cfg.device_token = None;
                     })
                     .map_err(|e| e.to_string())?;
-                state.api_client.set_bearer_token(state.config.get().effective_api_token());
+                state
+                    .api_client
+                    .set_bearer_token(state.config.get().effective_api_token());
             }
 
             tracing::info!(
@@ -431,10 +439,8 @@ pub async fn register_device(
             // owns the whole screen. Keep the binding so the reconciler and
             // Settings can take over. An IP conflict is excluded: that is a
             // different device owning the slot, where rollback IS correct.
-            let keep_binding = conflict_means_keep_local_binding(
-                api_error_status(&e),
-                &e.to_string(),
-            );
+            let keep_binding =
+                conflict_means_keep_local_binding(api_error_status(&e), &e.to_string());
             if keep_binding {
                 tracing::warn!(
                     miner_key = miner_key.as_str(),
@@ -454,7 +460,9 @@ pub async fn register_device(
                     })
                     .map_err(|e| e.to_string())?;
                 // Reset API client bearer token to reflect restored state
-                state.api_client.set_bearer_token(state.config.get().effective_api_token());
+                state
+                    .api_client
+                    .set_bearer_token(state.config.get().effective_api_token());
             } else {
                 tracing::warn!(
                     "Registration failed, but a different miner key is now stored — leaving it intact rather than restoring a stale snapshot"
@@ -609,7 +617,10 @@ pub async fn attempt_device_token_migration(
                         tracing::info!(miner_key = %miner_key, "Device auto-migrated to per-device token");
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to persist device_token: {} — continuing on shared token", e);
+                        tracing::warn!(
+                            "Failed to persist device_token: {} — continuing on shared token",
+                            e
+                        );
                     }
                 }
             } else {
@@ -625,7 +636,6 @@ pub async fn attempt_device_token_migration(
         }
     }
 }
-
 
 /// Cooldown between automatic device-token recovery attempts.
 pub const TOKEN_RECOVERY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
@@ -873,8 +883,20 @@ mod recovery_tests {
     #[test]
     fn non_401_failures_do_not_trigger_recovery() {
         let now = Instant::now();
-        assert!(!should_attempt_recovery(Some(500), true, None, now, COOLDOWN));
-        assert!(!should_attempt_recovery(Some(403), true, None, now, COOLDOWN));
+        assert!(!should_attempt_recovery(
+            Some(500),
+            true,
+            None,
+            now,
+            COOLDOWN
+        ));
+        assert!(!should_attempt_recovery(
+            Some(403),
+            true,
+            None,
+            now,
+            COOLDOWN
+        ));
         assert!(!should_attempt_recovery(None, true, None, now, COOLDOWN));
     }
 
@@ -983,8 +1005,17 @@ mod recovery_tests {
     #[test]
     fn non_401_failures_never_trigger_stranded_recovery() {
         let now = Instant::now();
-        assert!(!should_attempt_stranded_recovery(Some(500), false, 10, None, now, COOLDOWN));
-        assert!(!should_attempt_stranded_recovery(None, false, 10, None, now, COOLDOWN));
+        assert!(!should_attempt_stranded_recovery(
+            Some(500),
+            false,
+            10,
+            None,
+            now,
+            COOLDOWN
+        ));
+        assert!(!should_attempt_stranded_recovery(
+            None, false, 10, None, now, COOLDOWN
+        ));
     }
 
     #[test]
@@ -1132,7 +1163,8 @@ pub async fn attempt_version_change_heartbeat(
     // Best-effort lease action. A failure here doesn't block persisting the
     // heartbeat success — the regular PoC tick's own lease renewal covers it.
     let action = crate::api::types::LeaseAction::default();
-    let renew_result = crate::api::leases::renew(api_client, &miner_key, &install_id, &action).await;
+    let renew_result =
+        crate::api::leases::renew(api_client, &miner_key, &install_id, &action).await;
     let lease_ok = match &renew_result {
         Ok(resp) if resp.granted => true,
         _ => {
@@ -1213,11 +1245,23 @@ mod bug10_registration_recovery_tests {
 
     #[test]
     fn a_key_without_an_install_id_is_pending_not_complete() {
-        assert_eq!(registration_state(Some("FEM-A"), None), RegistrationState::Pending);
-        assert_eq!(registration_state(Some("FEM-A"), Some("i-1")), RegistrationState::Complete);
-        assert_eq!(registration_state(None, None), RegistrationState::Unregistered);
+        assert_eq!(
+            registration_state(Some("FEM-A"), None),
+            RegistrationState::Pending
+        );
+        assert_eq!(
+            registration_state(Some("FEM-A"), Some("i-1")),
+            RegistrationState::Complete
+        );
+        assert_eq!(
+            registration_state(None, None),
+            RegistrationState::Unregistered
+        );
         // A stray install_id with no key is not a registration.
-        assert_eq!(registration_state(None, Some("i-1")), RegistrationState::Unregistered);
+        assert_eq!(
+            registration_state(None, Some("i-1")),
+            RegistrationState::Unregistered
+        );
     }
 
     /// SAFETY NET: `registered` must stay bit-identical to the old rule, or a
@@ -1246,12 +1290,24 @@ mod bug10_registration_recovery_tests {
         let now = std::time::Instant::now();
         let cooldown = std::time::Duration::from_secs(600);
         // Never attempted -> go now.
-        assert!(should_attempt_registration_completion(true, false, None, now, cooldown));
+        assert!(should_attempt_registration_completion(
+            true, false, None, now, cooldown
+        ));
         // Just attempted -> wait.
-        assert!(!should_attempt_registration_completion(true, false, Some(now), now, cooldown));
+        assert!(!should_attempt_registration_completion(
+            true,
+            false,
+            Some(now),
+            now,
+            cooldown
+        ));
         // Cooldown elapsed -> go again.
         assert!(should_attempt_registration_completion(
-            true, false, Some(now - cooldown - std::time::Duration::from_secs(1)), now, cooldown
+            true,
+            false,
+            Some(now - cooldown - std::time::Duration::from_secs(1)),
+            now,
+            cooldown
         ));
     }
 
@@ -1259,23 +1315,42 @@ mod bug10_registration_recovery_tests {
     fn a_complete_or_unregistered_device_is_never_reconciled() {
         let now = std::time::Instant::now();
         let cooldown = std::time::Duration::from_secs(600);
-        assert!(!should_attempt_registration_completion(true, true, None, now, cooldown));
-        assert!(!should_attempt_registration_completion(false, false, None, now, cooldown));
+        assert!(!should_attempt_registration_completion(
+            true, true, None, now, cooldown
+        ));
+        assert!(!should_attempt_registration_completion(
+            false, false, None, now, cooldown
+        ));
     }
 
     #[test]
     fn an_already_registered_conflict_keeps_the_local_binding() {
         assert!(conflict_means_keep_local_binding(Some(409), ""));
-        assert!(conflict_means_keep_local_binding(Some(400), "device already registered"));
-        assert!(conflict_means_keep_local_binding(None, "Already Registered"));
+        assert!(conflict_means_keep_local_binding(
+            Some(400),
+            "device already registered"
+        ));
+        assert!(conflict_means_keep_local_binding(
+            None,
+            "Already Registered"
+        ));
     }
 
     /// An IP conflict is a DIFFERENT device owning the slot — this key genuinely
     /// did not register, so rolling back is correct there.
     #[test]
     fn an_ip_conflict_still_rolls_back() {
-        assert!(!conflict_means_keep_local_binding(Some(409), "IP_ALREADY_REGISTERED"));
-        assert!(!conflict_means_keep_local_binding(Some(500), "internal error"));
-        assert!(!conflict_means_keep_local_binding(Some(401), "unauthorized"));
+        assert!(!conflict_means_keep_local_binding(
+            Some(409),
+            "IP_ALREADY_REGISTERED"
+        ));
+        assert!(!conflict_means_keep_local_binding(
+            Some(500),
+            "internal error"
+        ));
+        assert!(!conflict_means_keep_local_binding(
+            Some(401),
+            "unauthorized"
+        ));
     }
 }

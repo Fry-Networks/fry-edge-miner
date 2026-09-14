@@ -83,10 +83,18 @@ pub async fn save_settings(
             if let Some(integrations) = settings.integrations_enabled {
                 cfg.integrations_enabled = integrations;
             }
-            if let Some(v) = settings.start_on_boot { cfg.start_on_boot = v; }
-            if let Some(v) = settings.minimize_to_tray { cfg.minimize_to_tray = v; }
-            if let Some(v) = settings.auto_update { cfg.auto_update = v; }
-            if let Some(v) = settings.notifications { cfg.notifications = v; }
+            if let Some(v) = settings.start_on_boot {
+                cfg.start_on_boot = v;
+            }
+            if let Some(v) = settings.minimize_to_tray {
+                cfg.minimize_to_tray = v;
+            }
+            if let Some(v) = settings.auto_update {
+                cfg.auto_update = v;
+            }
+            if let Some(v) = settings.notifications {
+                cfg.notifications = v;
+            }
         })
         .map_err(|e| e.to_string())?;
 
@@ -179,8 +187,7 @@ pub async fn set_storage_location(
             .ok()
             .and_then(|e| e.parent().map(|d| d.to_path_buf()))
             .unwrap_or_default();
-        crate::storage_location::validate_pure(p, &install_dir)
-            .map_err(|e| e.message())?;
+        crate::storage_location::validate_pure(p, &install_dir).map_err(|e| e.message())?;
         let root = crate::storage_location::storage_root_for(p);
         crate::storage_location::probe_writable(&root).map_err(|e| e.message())?;
     }

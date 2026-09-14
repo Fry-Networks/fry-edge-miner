@@ -23,10 +23,7 @@ fn line(action: &str, device_id: &str, happened_at: &str) -> String {
 
 fn write_log(dir: &Path, lines: &[String]) -> std::path::PathBuf {
     let path = dir.join("consent-log.jsonl");
-    let body = lines
-        .iter()
-        .map(|l| format!("{}\n", l))
-        .collect::<String>();
+    let body = lines.iter().map(|l| format!("{}\n", l)).collect::<String>();
     std::fs::write(&path, body).expect("test log should be writable");
     path
 }
@@ -34,7 +31,10 @@ fn write_log(dir: &Path, lines: &[String]) -> std::path::PathBuf {
 #[test]
 fn a_recorded_consent_makes_sharing_allowed() {
     let dir = tempfile::tempdir().unwrap();
-    let path = write_log(&dir.path(), &[line("consent", "dev-a", "2026-08-19T10:00:00Z")]);
+    let path = write_log(
+        &dir.path(),
+        &[line("consent", "dev-a", "2026-08-19T10:00:00Z")],
+    );
 
     let entry = last_consent_entry_in(&path, "dev-a").expect("the entry should be found");
     assert_eq!(entry.action, "consent");
@@ -174,7 +174,12 @@ fn a_written_consent_line_still_carries_every_field_the_addendum_records() {
         "terms_url",
         "terms_version",
     ] {
-        assert!(obj.contains_key(field), "field {} was dropped: {}", field, body);
+        assert!(
+            obj.contains_key(field),
+            "field {} was dropped: {}",
+            field,
+            body
+        );
     }
     assert_eq!(obj.len(), 11, "the record gained or lost a field: {}", body);
 
@@ -194,7 +199,10 @@ fn a_record_written_before_the_terms_fields_existed_is_still_read() {
     // from an earlier build must keep counting — extending the format cannot
     // retroactively un-consent anyone.
     let dir = tempfile::tempdir().unwrap();
-    let path = write_log(&dir.path(), &[line("consent", "dev-a", "2026-08-19T10:00:00Z")]);
+    let path = write_log(
+        &dir.path(),
+        &[line("consent", "dev-a", "2026-08-19T10:00:00Z")],
+    );
 
     assert!(consent_is_active(&path, "dev-a"));
 }
@@ -225,9 +233,7 @@ fn a_start_under_an_existing_consent_does_not_record_a_second_one() {
     let consents = body
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .filter(|l| {
-            serde_json::from_str::<serde_json::Value>(l).unwrap()["action"] == "consent"
-        })
+        .filter(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["action"] == "consent")
         .count();
     assert_eq!(
         consents, 1,

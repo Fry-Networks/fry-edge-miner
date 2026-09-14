@@ -138,16 +138,26 @@ mod tests {
 
     fn chain(msgs: &[&'static str]) -> FakeErr {
         let mut it = msgs.iter().rev();
-        let mut err = FakeErr { msg: it.next().unwrap(), source: None };
+        let mut err = FakeErr {
+            msg: it.next().unwrap(),
+            source: None,
+        };
         for msg in it {
-            err = FakeErr { msg, source: Some(Box::new(err)) };
+            err = FakeErr {
+                msg,
+                source: Some(Box::new(err)),
+            };
         }
         err
     }
 
     #[test]
     fn dns_marker_in_chain_classifies_as_dns() {
-        let e = chain(&["error sending request", "client error (Connect)", "dns error: failed to lookup address information"]);
+        let e = chain(&[
+            "error sending request",
+            "client error (Connect)",
+            "dns error: failed to lookup address information",
+        ]);
         assert_eq!(classify_error_chain(&e), RequestErrorKind::Dns);
     }
 
@@ -171,7 +181,10 @@ mod tests {
 
     #[test]
     fn plain_connect_refusal_is_other_at_chain_level() {
-        let e = chain(&["error trying to connect", "tcp connect error: Connection refused (os error 111)"]);
+        let e = chain(&[
+            "error trying to connect",
+            "tcp connect error: Connection refused (os error 111)",
+        ]);
         assert_eq!(classify_error_chain(&e), RequestErrorKind::Other);
     }
 
@@ -186,9 +199,15 @@ mod tests {
 
     #[test]
     fn connect_and_timeout_and_tls_messages_exist() {
-        assert!(user_facing_message(RequestErrorKind::Connect).unwrap().contains("hardwareapi.frynetworks.com"));
-        assert!(user_facing_message(RequestErrorKind::Timeout).unwrap().contains("timed out"));
-        assert!(user_facing_message(RequestErrorKind::Tls).unwrap().contains("TLS"));
+        assert!(user_facing_message(RequestErrorKind::Connect)
+            .unwrap()
+            .contains("hardwareapi.frynetworks.com"));
+        assert!(user_facing_message(RequestErrorKind::Timeout)
+            .unwrap()
+            .contains("timed out"));
+        assert!(user_facing_message(RequestErrorKind::Tls)
+            .unwrap()
+            .contains("TLS"));
     }
 
     #[test]

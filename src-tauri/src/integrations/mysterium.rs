@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, warn};
 
-const GITHUB_API_URL: &str = "https://api.github.com/repos/Fry-Foundation/fem-partner-binaries/releases/latest";
+const GITHUB_API_URL: &str =
+    "https://api.github.com/repos/Fry-Foundation/fem-partner-binaries/releases/latest";
 const USER_AGENT: &str = concat!("FryEdgeMiner/", env!("CARGO_PKG_VERSION"));
 
 /// Log level passed to sdk_client.exe — confirmed from live NSSM earner's AppParameters.
@@ -67,7 +68,11 @@ impl MysteriumIntegration {
         let mut last_error = None;
 
         for attempt in 1..=max_attempts {
-            info!(url = GITHUB_API_URL, attempt = attempt, "Fetching latest MystNodes release");
+            info!(
+                url = GITHUB_API_URL,
+                attempt = attempt,
+                "Fetching latest MystNodes release"
+            );
 
             match client.get(GITHUB_API_URL).send().await {
                 Ok(response) => {
@@ -100,7 +105,8 @@ impl MysteriumIntegration {
                                 if let Some(name) = asset["name"].as_str() {
                                     if name.contains("sdk_client")
                                         && name.contains(host_arch)
-                                        && (platform_suffix.is_empty() || name.ends_with(platform_suffix))
+                                        && (platform_suffix.is_empty()
+                                            || name.ends_with(platform_suffix))
                                     {
                                         return asset["browser_download_url"]
                                             .as_str()
@@ -112,7 +118,8 @@ impl MysteriumIntegration {
                             .ok_or_else(|| {
                                 anyhow::anyhow!(
                                     "No sdk_client asset found for arch {} in release {}",
-                                    host_arch, tag_name
+                                    host_arch,
+                                    tag_name
                                 )
                             })?;
 
@@ -123,9 +130,7 @@ impl MysteriumIntegration {
                     let ratelimit_remaining = headers
                         .get("x-ratelimit-remaining")
                         .and_then(|v| v.to_str().ok());
-                    let retry_after = headers
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok());
+                    let retry_after = headers.get("retry-after").and_then(|v| v.to_str().ok());
 
                     warn!(
                         url = GITHUB_API_URL,
@@ -153,7 +158,10 @@ impl MysteriumIntegration {
                             continue;
                         }
                     } else {
-                        return Err(anyhow::anyhow!("Failed to fetch latest release: HTTP {}", status.as_u16()));
+                        return Err(anyhow::anyhow!(
+                            "Failed to fetch latest release: HTTP {}",
+                            status.as_u16()
+                        ));
                     }
                 }
                 Err(e) => {
@@ -167,7 +175,8 @@ impl MysteriumIntegration {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Failed to fetch latest release after all retries")))
+        Err(last_error
+            .unwrap_or_else(|| anyhow::anyhow!("Failed to fetch latest release after all retries")))
     }
 
     /// Strip ANSI escape sequences from a log line (zerolog colored output).
@@ -248,7 +257,9 @@ impl Integration for MysteriumIntegration {
         // Credential fetch (Diiisco pattern)
         let cfg = self.config.get();
         let miner_key = cfg.miner_key.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("Miner key not set — complete device registration before starting MystNodes")
+            anyhow::anyhow!(
+                "Miner key not set — complete device registration before starting MystNodes"
+            )
         })?;
 
         // F8: mirror the Diiisco credential path — a lookup right after
@@ -261,15 +272,20 @@ impl Integration for MysteriumIntegration {
             match &cred_result {
                 Err(crate::api::client::ApiError::Request(_)) => {
                     let delay = 2u64.pow(attempt);
-                    warn!(attempt, delay_secs = delay, "MystNodes credential fetch failed (network error), retrying");
+                    warn!(
+                        attempt,
+                        delay_secs = delay,
+                        "MystNodes credential fetch failed (network error), retrying"
+                    );
                     tokio::time::sleep(Duration::from_secs(delay)).await;
-                    cred_result = crate::api::credentials::lookup(&self.api_client, miner_key).await;
+                    cred_result =
+                        crate::api::credentials::lookup(&self.api_client, miner_key).await;
                 }
                 _ => break,
             }
         }
-        let creds = cred_result
-            .map_err(|e| anyhow::anyhow!("Failed to fetch credentials: {}", e))?;
+        let creds =
+            cred_result.map_err(|e| anyhow::anyhow!("Failed to fetch credentials: {}", e))?;
 
         // Extract mystnodes_user_token — fail-closed if missing (no user-claimable fallback)
         let token = creds
@@ -341,8 +357,12 @@ impl Integration for MysteriumIntegration {
         let stdout_path = self.log_dir.join("mysterium").join("mysterium_stdout.log");
         let stderr_path = self.log_dir.join("mysterium").join("mysterium_stderr.log");
 
-        let stdout_content = tokio::fs::read_to_string(&stdout_path).await.unwrap_or_default();
-        let stderr_content = tokio::fs::read_to_string(&stderr_path).await.unwrap_or_default();
+        let stdout_content = tokio::fs::read_to_string(&stdout_path)
+            .await
+            .unwrap_or_default();
+        let stderr_content = tokio::fs::read_to_string(&stderr_path)
+            .await
+            .unwrap_or_default();
 
         // Combine recent tail (last 50 lines of each)
         let recent_lines: Vec<String> = stdout_content

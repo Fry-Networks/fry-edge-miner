@@ -250,7 +250,10 @@ impl FryVpnIntegration {
             }
         };
 
-        match identity_plan(creds.algo_address.as_deref(), creds.algo_mnemonic.as_deref()) {
+        match identity_plan(
+            creds.algo_address.as_deref(),
+            creds.algo_mnemonic.as_deref(),
+        ) {
             IdentityPlan::StartWithoutIdentity => {
                 info!("No device wallet key available - starting fryDVPN without a node identity");
                 Ok(None)
@@ -401,7 +404,11 @@ impl Integration for FryVpnIntegration {
                 .await
                 .unwrap_or_default();
             let tail = super::stderr_tail(&stderr_content, 3);
-            let tail = if tail == "no error output" { String::new() } else { tail };
+            let tail = if tail == "no error output" {
+                String::new()
+            } else {
+                tail
+            };
             return HealthStatus::Unhealthy(process_not_running_reason(&tail));
         }
 
@@ -501,7 +508,10 @@ mod tests {
     #[test]
     fn test_fryvpn_id() {
         let integration = FryVpnIntegration {
-            config: Arc::new(crate::config::store::ConfigStore::new(std::path::PathBuf::from("/tmp"), None)),
+            config: Arc::new(crate::config::store::ConfigStore::new(
+                std::path::PathBuf::from("/tmp"),
+                None,
+            )),
             // BUG 6: field added so fryvpn can fetch the device's provisioned
             // Algorand identity. Fixture value only — these two tests assert on
             // id()/display_name() and never touch the client. No assertion changed.
@@ -520,7 +530,10 @@ mod tests {
     #[test]
     fn test_fryvpn_display_name() {
         let integration = FryVpnIntegration {
-            config: Arc::new(crate::config::store::ConfigStore::new(std::path::PathBuf::from("/tmp"), None)),
+            config: Arc::new(crate::config::store::ConfigStore::new(
+                std::path::PathBuf::from("/tmp"),
+                None,
+            )),
             // BUG 6: field added so fryvpn can fetch the device's provisioned
             // Algorand identity. Fixture value only — these two tests assert on
             // id()/display_name() and never touch the client. No assertion changed.
@@ -567,7 +580,10 @@ mod tests {
             Some(PathBuf::from("C:/app/resources/frynode.exe")),
         );
         assert!(resolved.ends_with("frynode.exe"), "{resolved}");
-        assert!(resolved.contains("resources"), "must be the full resource path: {resolved}");
+        assert!(
+            resolved.contains("resources"),
+            "must be the full resource path: {resolved}"
+        );
     }
 
     #[test]
@@ -594,9 +610,12 @@ mod tests {
         env.set("eu-west");
         assert_eq!(FryVpnIntegration::region(), "eu-west");
         env.set("   ");
-        assert_eq!(FryVpnIntegration::region(), "us", "blank override must fall back");
+        assert_eq!(
+            FryVpnIntegration::region(),
+            "us",
+            "blank override must fall back"
+        );
     }
-
 
     /// FIX 5: the guard must restore the ORIGINAL value even when the test
     /// holding it panics. A cleanup line at the end of a test body cannot do
@@ -674,7 +693,10 @@ mod tests {
     #[test]
     fn a_dead_process_with_log_output_includes_it_in_the_reason() {
         let reason = process_not_running_reason("failed to load config: REGION is required");
-        assert!(reason.contains("frynode process is not running"), "{reason}");
+        assert!(
+            reason.contains("frynode process is not running"),
+            "{reason}"
+        );
         assert!(reason.contains("REGION is required"), "{reason}");
     }
 
@@ -707,8 +729,14 @@ mod bug6_balance_tests {
     fn a_zero_balance_wallet_is_refused_before_any_transaction_is_attempted() {
         let err = registration_affordability(0, 100_000, "Z2HCYEXAMPLEADDRESS")
             .expect_err("0 ALGO must not proceed to an on-chain call");
-        assert!(err.contains("Z2HCYEXAMPLEADDRESS"), "the user must be told WHICH wallet: {err}");
-        assert!(err.contains("ALGO"), "the user must be told what to add: {err}");
+        assert!(
+            err.contains("Z2HCYEXAMPLEADDRESS"),
+            "the user must be told WHICH wallet: {err}"
+        );
+        assert!(
+            err.contains("ALGO"),
+            "the user must be told what to add: {err}"
+        );
         assert!(
             !err.to_lowercase().contains("overspend"),
             "must not surface the raw blockchain error: {err}"
@@ -727,7 +755,10 @@ mod bug6_balance_tests {
     #[test]
     fn the_message_quantifies_the_shortfall_in_whole_algo() {
         let err = registration_affordability(25_000, 100_000, "ADDR").unwrap_err();
-        assert!(err.contains("0.075"), "shortfall in ALGO must be explicit: {err}");
+        assert!(
+            err.contains("0.075"),
+            "shortfall in ALGO must be explicit: {err}"
+        );
     }
 
     /// Balance parsing must come from the real algod account shape.
@@ -752,7 +783,6 @@ mod bug6_balance_tests {
     }
 }
 
-
 /// BUG 6 follow-up, found by the LIVE CANARY and not by the unit tests.
 ///
 /// The first cut refused to start frynode whenever the device's mnemonic was
@@ -771,7 +801,10 @@ mod bug6_identity_fallback_tests {
             identity_plan(Some("ZWWFC7ADDR"), None),
             IdentityPlan::StartWithoutIdentity
         );
-        assert_eq!(identity_plan(None, None), IdentityPlan::StartWithoutIdentity);
+        assert_eq!(
+            identity_plan(None, None),
+            IdentityPlan::StartWithoutIdentity
+        );
     }
 
     #[test]

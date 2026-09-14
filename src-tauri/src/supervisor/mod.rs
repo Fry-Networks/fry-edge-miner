@@ -65,10 +65,8 @@ impl Supervisor {
         // instead of letting it inherit FEM's CWD (`C:\Windows\System32` when
         // FEM starts from its Run key), which is what made frynode fail with
         // `mkdir node-identity: Access is denied`.
-        let working_dir = process::working_dir_for(
-            id,
-            &crate::integrations::download::partners_base_dir(),
-        );
+        let working_dir =
+            process::working_dir_for(id, &crate::integrations::download::partners_base_dir());
         let process = ManagedProcess::spawn_full(
             id,
             command,
@@ -77,11 +75,7 @@ impl Supervisor {
             Some(working_dir.as_path()),
             env,
         )?;
-        info!(
-            integration = id,
-            pid = process.pid(),
-            "Integration started"
-        );
+        info!(integration = id, pid = process.pid(), "Integration started");
         self.processes.insert(id.to_string(), process);
         Ok(())
     }

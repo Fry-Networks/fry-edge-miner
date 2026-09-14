@@ -31,8 +31,7 @@ pub async fn run_migration(
     wallet: String,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<migration::MigrationResult, String> {
-    let installation = migration::detect_fryhub()
-        .ok_or("No FryHub installation detected")?;
+    let installation = migration::detect_fryhub().ok_or("No FryHub installation detected")?;
 
     let plan = migration::plan_migration(&installation, Some(wallet.clone()));
 
@@ -74,7 +73,9 @@ pub async fn run_migration(
         tauri::async_runtime::spawn(async move {
             match crate::api::migration::notify_migration(&api, &fem_key, &old_keys).await {
                 Ok(()) => tracing::info!(fem_key = %fem_key, "Old keys deactivated on backend"),
-                Err(e) => tracing::warn!(fem_key = %fem_key, error = %e, "Old key deactivation failed (non-fatal)"),
+                Err(e) => {
+                    tracing::warn!(fem_key = %fem_key, error = %e, "Old key deactivation failed (non-fatal)")
+                }
             }
         });
     }

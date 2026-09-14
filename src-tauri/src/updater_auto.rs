@@ -1,9 +1,9 @@
+use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use serde::{Deserialize, Serialize};
 use tauri_plugin_updater::UpdaterExt;
 use tracing::{info, warn};
 
@@ -39,9 +39,15 @@ pub(crate) fn kill_startup_orphans() {
             .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
         {
             Ok(o) if o.status.success() => {
-                info!(image, "Killed leftover untracked partner process at startup")
+                info!(
+                    image,
+                    "Killed leftover untracked partner process at startup"
+                )
             }
-            Ok(_) => info!(image, "No leftover untracked partner process was running at startup"),
+            Ok(_) => info!(
+                image,
+                "No leftover untracked partner process was running at startup"
+            ),
             Err(e) => warn!(image, error = %e, "Startup orphan cleanup could not run — continuing"),
         }
     }
@@ -90,7 +96,9 @@ pub(crate) struct UpdateInProgressGuard {
 impl UpdateInProgressGuard {
     fn arm() -> Self {
         UPDATE_IN_PROGRESS.store(true, Ordering::SeqCst);
-        Self { reset_on_drop: true }
+        Self {
+            reset_on_drop: true,
+        }
     }
 
     /// Call ONLY after `download_and_install` has genuinely succeeded — the
@@ -173,10 +181,7 @@ fn read_update_state(path: &Path) -> Option<UpdateState> {
 /// mid-copy) leaves a known-good fallback the operator can restore by hand.
 /// Best-effort per file — a missing `frynode.exe` (never installed on this
 /// device) must not fail the whole backup.
-pub fn backup_pre_update_binaries(
-    files: &[(&Path, &str)],
-    prev_dir: &Path,
-) -> std::io::Result<()> {
+pub fn backup_pre_update_binaries(files: &[(&Path, &str)], prev_dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(prev_dir)?;
     for (src, dest_name) in files {
         if !src.exists() {
@@ -494,7 +499,11 @@ pub(crate) async fn prepare_for_update_install(
     // walk straight into the NSIS WiX uninstall path this exists to prevent.
     let probe = tokio::task::block_in_place(probe_msi_ownership);
     let probe_reason = match &probe {
-        MsiProbe::Found(e) => Some(("msi-present", e.uninstall_string.clone(), e.display_name.clone())),
+        MsiProbe::Found(e) => Some((
+            "msi-present",
+            e.uninstall_string.clone(),
+            e.display_name.clone(),
+        )),
         MsiProbe::Inconclusive(why) => Some(("probe-inconclusive", String::new(), why.clone())),
         MsiProbe::NotFound => None,
     };
@@ -570,7 +579,9 @@ pub(crate) async fn prepare_for_update_install(
                         warn!(error = %e, "Could not persist hardening_applied_version before update");
                     }
                 }
-                Err(e) => warn!(error = %e, "Pre-update hardening declined or failed — continuing update anyway"),
+                Err(e) => {
+                    warn!(error = %e, "Pre-update hardening declined or failed — continuing update anyway")
+                }
             }
         }
     }
@@ -663,7 +674,10 @@ async fn check_and_install_update(
     // from/to state for the next launch to confirm. Replaces the bare
     // `release_install_tree` call (B7) with the full pre-install sequence.
     use tauri::Manager;
-    let app_data_dir = app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir());
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
     let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fry-edge-miner.exe"));
     let frynode_path = exe_path
         .parent()
@@ -731,24 +745,15 @@ fn compute_jitter_secs(config: &Arc<ConfigStore>) -> u64 {
     const MAX_JITTER_SECS: u64 = 600; // 10 minutes
 
     let cfg = config.get();
-    let seed_str = cfg
-        .install_id
-        .as_ref()
-        .cloned()
-        .unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_nanos().to_string())
-                .unwrap_or_else(|_| "fallback".to_string())
-        });
+    let seed_str = cfg.install_id.as_ref().cloned().unwrap_or_else(|| {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos().to_string())
+            .unwrap_or_else(|_| "fallback".to_string())
+    });
 
     // Simple hash: sum the bytes mod MAX_JITTER_SECS
-    let hash = seed_str
-        .as_bytes()
-        .iter()
-        .map(|b| *b as u64)
-        .sum::<u64>()
-        % MAX_JITTER_SECS;
+    let hash = seed_str.as_bytes().iter().map(|b| *b as u64).sum::<u64>() % MAX_JITTER_SECS;
 
     hash
 }
@@ -764,8 +769,8 @@ mod tests {
         // - Current version < latest: install
         // - Config.auto_update = false: skip cycle
         let test_cases = vec![
-            ("0.2.30", "0.2.30", true, false),  // same version, enabled → no install
-            ("0.2.30", "0.2.31", true, true),   // new version, enabled → install
+            ("0.2.30", "0.2.30", true, false), // same version, enabled → no install
+            ("0.2.30", "0.2.31", true, true),  // new version, enabled → install
             ("0.2.30", "0.2.31", false, false), // new version, disabled → no install
         ];
 
@@ -804,11 +809,7 @@ mod tests {
     /// Deterministic jitter using install_id hash (no config dependency for testing)
     fn compute_hash_jitter(seed: &str) -> u64 {
         const MAX_JITTER_SECS: u64 = 600;
-        seed.as_bytes()
-            .iter()
-            .map(|b| *b as u64)
-            .sum::<u64>()
-            % MAX_JITTER_SECS
+        seed.as_bytes().iter().map(|b| *b as u64).sum::<u64>() % MAX_JITTER_SECS
     }
 
     fn should_auto_install(current: &str, latest: &str, auto_update: bool) -> bool {
@@ -1000,17 +1001,31 @@ mod update_safety_tests {
 
     #[test]
     fn a_matching_version_after_restart_is_success() {
-        let state = UpdateState { from: "0.4.27".into(), to: "0.4.28".into(), ts: 0 };
-        assert_eq!(evaluate_update_outcome(&state, "0.4.28"), UpdateOutcome::Succeeded);
+        let state = UpdateState {
+            from: "0.4.27".into(),
+            to: "0.4.28".into(),
+            ts: 0,
+        };
+        assert_eq!(
+            evaluate_update_outcome(&state, "0.4.28"),
+            UpdateOutcome::Succeeded
+        );
     }
 
     #[test]
     fn a_different_version_after_restart_is_a_mismatch_with_both_versions_named() {
-        let state = UpdateState { from: "0.4.27".into(), to: "0.4.28".into(), ts: 0 };
+        let state = UpdateState {
+            from: "0.4.27".into(),
+            to: "0.4.28".into(),
+            ts: 0,
+        };
         let outcome = evaluate_update_outcome(&state, "0.4.27");
         assert_eq!(
             outcome,
-            UpdateOutcome::Mismatched { expected: "0.4.28".into(), actual: "0.4.27".into() }
+            UpdateOutcome::Mismatched {
+                expected: "0.4.28".into(),
+                actual: "0.4.27".into()
+            }
         );
     }
 
@@ -1020,7 +1035,11 @@ mod update_safety_tests {
     fn update_state_round_trips_through_disk() {
         let dir = tmp_dir("state-roundtrip");
         let path = update_state_path(&dir);
-        let state = UpdateState { from: "0.4.27".into(), to: "0.4.28".into(), ts: 12345 };
+        let state = UpdateState {
+            from: "0.4.27".into(),
+            to: "0.4.28".into(),
+            ts: 12345,
+        };
         write_update_state(&path, &state).expect("write must succeed");
         let read_back = read_update_state(&path).expect("state file must be readable");
         assert_eq!(read_back, state);
@@ -1060,7 +1079,10 @@ mod update_safety_tests {
         let prev = dir.join(".prev");
 
         let result = backup_pre_update_binaries(&[(&missing, "frynode.exe")], &prev);
-        assert!(result.is_ok(), "a never-installed optional binary must not fail the backup");
+        assert!(
+            result.is_ok(),
+            "a never-installed optional binary must not fail the backup"
+        );
         assert!(!prev.join("frynode.exe").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1070,22 +1092,36 @@ mod update_safety_tests {
     #[test]
     fn a_successful_outcome_cleans_up_state_and_prev_dir() {
         let dir = tmp_dir("launch-success");
-        let state = UpdateState { from: "0.4.27".into(), to: "0.4.28".into(), ts: 0 };
+        let state = UpdateState {
+            from: "0.4.27".into(),
+            to: "0.4.28".into(),
+            ts: 0,
+        };
         write_update_state(&update_state_path(&dir), &state).unwrap();
         std::fs::create_dir_all(prev_binaries_dir(&dir)).unwrap();
         std::fs::write(prev_binaries_dir(&dir).join("fry-edge-miner.exe"), b"old").unwrap();
 
         let outcome = check_update_outcome_on_launch(&dir, "0.4.28");
         assert_eq!(outcome, Some(UpdateOutcome::Succeeded));
-        assert!(!update_state_path(&dir).exists(), "state file must be cleared on success");
-        assert!(!prev_binaries_dir(&dir).exists(), ".prev must be cleared on success");
+        assert!(
+            !update_state_path(&dir).exists(),
+            "state file must be cleared on success"
+        );
+        assert!(
+            !prev_binaries_dir(&dir).exists(),
+            ".prev must be cleared on success"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_mismatched_outcome_leaves_prev_dir_and_state_for_manual_recovery() {
         let dir = tmp_dir("launch-mismatch");
-        let state = UpdateState { from: "0.4.27".into(), to: "0.4.28".into(), ts: 0 };
+        let state = UpdateState {
+            from: "0.4.27".into(),
+            to: "0.4.28".into(),
+            ts: 0,
+        };
         write_update_state(&update_state_path(&dir), &state).unwrap();
         std::fs::create_dir_all(prev_binaries_dir(&dir)).unwrap();
         std::fs::write(prev_binaries_dir(&dir).join("fry-edge-miner.exe"), b"old").unwrap();
@@ -1095,9 +1131,15 @@ mod update_safety_tests {
         let outcome = check_update_outcome_on_launch(&dir, "0.4.27");
         assert_eq!(
             outcome,
-            Some(UpdateOutcome::Mismatched { expected: "0.4.28".into(), actual: "0.4.27".into() })
+            Some(UpdateOutcome::Mismatched {
+                expected: "0.4.28".into(),
+                actual: "0.4.27".into()
+            })
         );
-        assert!(update_state_path(&dir).exists(), "state file must survive for diagnosis");
+        assert!(
+            update_state_path(&dir).exists(),
+            "state file must survive for diagnosis"
+        );
         assert!(
             prev_binaries_dir(&dir).join("fry-edge-miner.exe").exists(),
             ".prev must survive so the operator can restore the last-known-good binary"
@@ -1180,18 +1222,32 @@ mod bug10_msi_gate_tests {
             targets.is_array(),
             "bundle.targets must be an explicit list, not \"all\" (got {targets})"
         );
-        let listed: Vec<&str> = targets.as_array().unwrap().iter().filter_map(|t| t.as_str()).collect();
+        let listed: Vec<&str> = targets
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.as_str())
+            .collect();
         assert!(
             !listed.iter().any(|t| t.eq_ignore_ascii_case("msi")),
             "shipping an MSI re-arms the NSIS WiX uninstall path: {listed:?}"
         );
-        assert!(listed.contains(&"nsis"), "the updater feed needs the NSIS installer");
+        assert!(
+            listed.contains(&"nsis"),
+            "the updater feed needs the NSIS installer"
+        );
     }
 
     #[test]
     fn an_inconclusive_probe_never_reads_as_no_msi_installed() {
-        assert!(matches!(msi_probe_outcome(None, ""), MsiProbe::Inconclusive(_)));
-        assert!(matches!(msi_probe_outcome(Some(1), ""), MsiProbe::Inconclusive(_)));
+        assert!(matches!(
+            msi_probe_outcome(None, ""),
+            MsiProbe::Inconclusive(_)
+        ));
+        assert!(matches!(
+            msi_probe_outcome(Some(1), ""),
+            MsiProbe::Inconclusive(_)
+        ));
         // A clean run that genuinely found nothing is the ONLY NotFound.
         assert!(matches!(msi_probe_outcome(Some(0), ""), MsiProbe::NotFound));
     }
@@ -1208,7 +1264,10 @@ mod bug10_msi_gate_tests {
             publisher: "Fry Networks".into(),
             uninstall_string: "MsiExec.exe /X{GUID}".into(),
         };
-        assert!(matches!(msi_gate(MsiProbe::Found(entry)), MsiGate::Blocked(_)));
+        assert!(matches!(
+            msi_gate(MsiProbe::Found(entry)),
+            MsiGate::Blocked(_)
+        ));
     }
 
     /// The registry sweep is far slower than a generic CLI probe, and timing
@@ -1224,8 +1283,14 @@ mod bug10_msi_gate_tests {
     #[test]
     fn the_remediation_command_suppresses_the_reboot_that_caused_the_incident() {
         let cmd = msi_remediation_command("MsiExec.exe /X{ABC-123}");
-        assert!(cmd.contains("/X{ABC-123}"), "must target the real product: {cmd}");
+        assert!(
+            cmd.contains("/X{ABC-123}"),
+            "must target the real product: {cmd}"
+        );
         assert!(cmd.contains("/qn"), "must be silent: {cmd}");
-        assert!(cmd.contains("REBOOT=ReallySuppress"), "must not reboot the machine: {cmd}");
+        assert!(
+            cmd.contains("REBOOT=ReallySuppress"),
+            "must not reboot the machine: {cmd}"
+        );
     }
 }

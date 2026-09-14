@@ -16,11 +16,15 @@ pub fn default_partners_base_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| {
             #[cfg(windows)]
-            { PathBuf::from("C:/ProgramData") }
+            {
+                PathBuf::from("C:/ProgramData")
+            }
             #[cfg(not(windows))]
-            { dirs::home_dir()
-                .map(|h| h.join(".local").join("share"))
-                .unwrap_or_else(|| PathBuf::from("/tmp")) }
+            {
+                dirs::home_dir()
+                    .map(|h| h.join(".local").join("share"))
+                    .unwrap_or_else(|| PathBuf::from("/tmp"))
+            }
         })
         .join("FryEdgeMiner")
         .join("partners")
@@ -77,17 +81,13 @@ pub fn partners_base_dir() -> PathBuf {
 }
 
 /// Default User-Agent for all partner downloads.
-pub const DEFAULT_USER_AGENT: &str =
-    concat!("FryEdgeMiner/", env!("CARGO_PKG_VERSION"));
+pub const DEFAULT_USER_AGENT: &str = concat!("FryEdgeMiner/", env!("CARGO_PKG_VERSION"));
 
 /// Download a file from URL to destination path with retry/backoff.
 ///
 /// Retries up to `max_attempts` on HTTP 403/429 (GitHub rate-limit/abuse)
 /// with exponential backoff starting at 2s.
-pub async fn download_file(
-    url: &str,
-    dest: &Path,
-) -> anyhow::Result<()> {
+pub async fn download_file(url: &str, dest: &Path) -> anyhow::Result<()> {
     download_file_with_options(url, dest, DEFAULT_USER_AGENT, None).await
 }
 
@@ -150,9 +150,7 @@ pub async fn download_file_with_options(
                 let ratelimit_remaining = headers
                     .get("x-ratelimit-remaining")
                     .and_then(|v| v.to_str().ok());
-                let retry_after = headers
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok());
+                let retry_after = headers.get("retry-after").and_then(|v| v.to_str().ok());
 
                 warn!(
                     url = url,
@@ -194,7 +192,8 @@ pub async fn download_file_with_options(
         }
     }
 
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Download of {} failed after all retries", url)))
+    Err(last_error
+        .unwrap_or_else(|| anyhow::anyhow!("Download of {} failed after all retries", url)))
 }
 
 /// Write the response body to `dest` chunk by chunk, returning bytes written.
@@ -284,6 +283,10 @@ mod bug1_storage_root_tests {
         let root = resolve_partners_base_dir(Some(r"D:\"), default_partners_base_dir());
         assert_eq!(root, PathBuf::from(r"D:\FryEdgeMiner\partners"));
         let aem = root.join("aem");
-        assert_ne!(aem, PathBuf::from(r"D:\aem"), "force-clean would target the drive root");
+        assert_ne!(
+            aem,
+            PathBuf::from(r"D:\aem"),
+            "force-clean would target the drive root"
+        );
     }
 }

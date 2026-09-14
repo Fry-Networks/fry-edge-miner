@@ -75,7 +75,10 @@ pub fn has_drive_letter(path: &str) -> bool {
 /// living inside `...\Fry Edge Miner`.
 pub fn is_inside_install_dir(candidate: &str, install_dir: &Path) -> bool {
     fn norm(s: &str) -> String {
-        s.trim().replace('/', "\\").trim_end_matches('\\').to_lowercase()
+        s.trim()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
     }
     let c = norm(candidate);
     let i = norm(&install_dir.to_string_lossy());
@@ -141,13 +144,13 @@ pub fn validate_pure(user_path: &str, install_dir: &Path) -> Result<(), StorageD
 /// real write also catches a read-only mounted volume, a BitLocker-locked
 /// drive, and a Defender Controlled-Folder-Access block.
 pub fn probe_writable(root: &Path) -> Result<(), StorageDirError> {
-    std::fs::create_dir_all(root)
-        .map_err(|e| StorageDirError::NotCreatable(e.to_string()))?;
+    std::fs::create_dir_all(root).map_err(|e| StorageDirError::NotCreatable(e.to_string()))?;
     // `tempfile` is already a normal dependency; its Drop guard means a panic
     // between create and delete cannot leave litter behind.
     let f = tempfile::NamedTempFile::new_in(root)
         .map_err(|e| StorageDirError::NotWritable(e.to_string()))?;
-    f.close().map_err(|e| StorageDirError::NotWritable(e.to_string()))
+    f.close()
+        .map_err(|e| StorageDirError::NotWritable(e.to_string()))
 }
 
 #[cfg(test)]
@@ -164,7 +167,10 @@ mod validation_tests {
         );
         // WHY it must be caught here: the probe cannot read it, and an
         // unmeasurable disk makes the 900 GB gate pass rather than fail.
-        assert_eq!(crate::system_info::drive_letter(Path::new(r"\\nas\share")), None);
+        assert_eq!(
+            crate::system_info::drive_letter(Path::new(r"\\nas\share")),
+            None
+        );
     }
 
     #[test]
@@ -181,11 +187,20 @@ mod validation_tests {
     #[test]
     fn a_path_inside_the_install_dir_is_rejected() {
         let install = Path::new(r"C:\Users\u\AppData\Local\Fry Edge Miner");
-        assert!(is_inside_install_dir(r"C:\Users\u\AppData\Local\Fry Edge Miner\data", install));
+        assert!(is_inside_install_dir(
+            r"C:\Users\u\AppData\Local\Fry Edge Miner\data",
+            install
+        ));
         // case-insensitive
-        assert!(is_inside_install_dir(r"c:\users\u\appdata\local\fry edge miner\x", install));
+        assert!(is_inside_install_dir(
+            r"c:\users\u\appdata\local\fry edge miner\x",
+            install
+        ));
         // and the exact directory itself
-        assert!(is_inside_install_dir(r"C:\Users\u\AppData\Local\Fry Edge Miner", install));
+        assert!(is_inside_install_dir(
+            r"C:\Users\u\AppData\Local\Fry Edge Miner",
+            install
+        ));
     }
 
     #[test]
@@ -200,15 +215,24 @@ mod validation_tests {
     #[test]
     fn a_normal_local_path_passes_every_pure_rule() {
         assert_eq!(
-            validate_pure(r"D:\FryEdgeMiner", Path::new(r"C:\Users\u\AppData\Local\Fry Edge Miner")),
+            validate_pure(
+                r"D:\FryEdgeMiner",
+                Path::new(r"C:\Users\u\AppData\Local\Fry Edge Miner")
+            ),
             Ok(())
         );
     }
 
     #[test]
     fn a_configured_root_always_ends_in_the_fem_leaf() {
-        assert_eq!(storage_root_for(r"D:\"), PathBuf::from(r"D:\FryEdgeMiner\partners"));
-        assert_eq!(storage_root_for(r"D:\Stuff"), PathBuf::from(r"D:\Stuff\FryEdgeMiner\partners"));
+        assert_eq!(
+            storage_root_for(r"D:\"),
+            PathBuf::from(r"D:\FryEdgeMiner\partners")
+        );
+        assert_eq!(
+            storage_root_for(r"D:\Stuff"),
+            PathBuf::from(r"D:\Stuff\FryEdgeMiner\partners")
+        );
     }
 
     #[test]
@@ -260,7 +284,10 @@ mod write_probe_tests {
         std::fs::write(&file, b"x").expect("fixture file");
         let under = file.join("sub");
         assert!(
-            matches!(probe_writable(&under), Err(StorageDirError::NotCreatable(_))),
+            matches!(
+                probe_writable(&under),
+                Err(StorageDirError::NotCreatable(_))
+            ),
             "creating a directory under a FILE must fail"
         );
         let _ = std::fs::remove_file(&file);

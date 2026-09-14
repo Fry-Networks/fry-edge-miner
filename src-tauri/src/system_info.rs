@@ -54,11 +54,7 @@ fn volume_key(path: &Path) -> String {
 }
 
 /// PURE lookup, split out so keying and the TTL are testable without a disk.
-fn cache_lookup(
-    map: &HashMap<String, (f64, Instant)>,
-    key: &str,
-    now: Instant,
-) -> Option<f64> {
+fn cache_lookup(map: &HashMap<String, (f64, Instant)>, key: &str, now: Instant) -> Option<f64> {
     let &(value, at) = map.get(key)?;
     (now.duration_since(at) < CACHE_TTL).then_some(value)
 }
@@ -200,13 +196,17 @@ mod tests {
 
     #[test]
     fn parses_df_available_column() {
-        let df = "Filesystem 1G-blocks Used Available Use% Mounted on\n/dev/sda1 500G 372G 128G 75% /\n";
+        let df =
+            "Filesystem 1G-blocks Used Available Use% Mounted on\n/dev/sda1 500G 372G 128G 75% /\n";
         assert_eq!(parse_df_gb(df), Some(128.0));
     }
 
     #[test]
     fn df_without_a_data_row_is_none() {
-        assert_eq!(parse_df_gb("Filesystem 1G-blocks Used Available Use% Mounted on\n"), None);
+        assert_eq!(
+            parse_df_gb("Filesystem 1G-blocks Used Available Use% Mounted on\n"),
+            None
+        );
     }
 
     #[test]
@@ -234,7 +234,11 @@ mod bug1_disk_cache_tests {
     /// could not be kept in agreement even in principle.
     #[test]
     fn the_cache_key_and_the_probe_read_the_same_drive() {
-        for p in [r"C:\Users\u\AppData\Roaming", r"D:\FryEdgeMiner\partners", r"e:\x"] {
+        for p in [
+            r"C:\Users\u\AppData\Roaming",
+            r"D:\FryEdgeMiner\partners",
+            r"e:\x",
+        ] {
             let path = Path::new(p);
             let letter = drive_letter(path).expect("a lettered path must yield a letter");
             assert_eq!(
@@ -254,8 +258,16 @@ mod bug1_disk_cache_tests {
         m.insert("C".to_string(), (71.0, now));
         m.insert("D".to_string(), (1863.0, now));
 
-        assert_eq!(cache_lookup(&m, "D", now), Some(1863.0), "D: must get D:'s answer");
-        assert_eq!(cache_lookup(&m, "C", now), Some(71.0), "C: must get C:'s answer");
+        assert_eq!(
+            cache_lookup(&m, "D", now),
+            Some(1863.0),
+            "D: must get D:'s answer"
+        );
+        assert_eq!(
+            cache_lookup(&m, "C", now),
+            Some(71.0),
+            "C: must get C:'s answer"
+        );
     }
 
     /// TTL preservation: re-keying must not turn one probe per 600 s into one
@@ -263,8 +275,14 @@ mod bug1_disk_cache_tests {
     /// the registry mutex on every UI poll and every PoC report.
     #[test]
     fn paths_on_the_same_drive_share_one_probe() {
-        assert_eq!(volume_key(Path::new(r"D:\a\b")), volume_key(Path::new(r"D:\c")));
-        assert_eq!(volume_key(Path::new(r"d:\a")), volume_key(Path::new(r"D:\b")));
+        assert_eq!(
+            volume_key(Path::new(r"D:\a\b")),
+            volume_key(Path::new(r"D:\c"))
+        );
+        assert_eq!(
+            volume_key(Path::new(r"d:\a")),
+            volume_key(Path::new(r"D:\b"))
+        );
     }
 
     #[test]
@@ -274,7 +292,10 @@ mod bug1_disk_cache_tests {
         m.insert("D".to_string(), (1863.0, now));
         let later = now + CACHE_TTL + Duration::from_secs(1);
         assert_eq!(cache_lookup(&m, "D", later), None);
-        assert_eq!(cache_lookup(&m, "D", now + Duration::from_secs(1)), Some(1863.0));
+        assert_eq!(
+            cache_lookup(&m, "D", now + Duration::from_secs(1)),
+            Some(1863.0)
+        );
     }
 
     /// A UNC path has no drive letter. It must key on itself so it can never

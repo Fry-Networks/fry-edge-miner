@@ -41,7 +41,9 @@ pub fn parse(key: &str) -> Result<(String, String)> {
         ));
     }
     if !key_part.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(anyhow!("Invalid key body: must contain only alphanumeric characters"));
+        return Err(anyhow!(
+            "Invalid key body: must contain only alphanumeric characters"
+        ));
     }
     Ok((prefix.to_string(), key_part.to_string()))
 }
@@ -74,7 +76,8 @@ pub fn validate_fem_key_preserve_case(input: &str) -> Result<String, String> {
     if key_part.len() != HEX_LEN {
         return Err(format!(
             "Invalid FEM key format: expected {} alphanumeric chars, got {}",
-            HEX_LEN, key_part.len()
+            HEX_LEN,
+            key_part.len()
         ));
     }
     if !key_part.chars().all(|c| c.is_ascii_alphanumeric()) {
@@ -105,7 +108,8 @@ pub fn normalize_fem_key(input: &str) -> Result<String, String> {
     if key_part.len() != HEX_LEN {
         return Err(format!(
             "Invalid FEM key format: expected {} alphanumeric chars, got {}",
-            HEX_LEN, key_part.len()
+            HEX_LEN,
+            key_part.len()
         ));
     }
     if !key_part.chars().all(|c| c.is_ascii_alphanumeric()) {

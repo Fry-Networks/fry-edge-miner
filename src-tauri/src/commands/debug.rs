@@ -40,19 +40,23 @@ pub async fn export_debug_bundle(
     let bundle_file = std::fs::File::create(&dest_path).map_err(|e| e.to_string())?;
     let mut zip = ZipWriter::new(bundle_file);
 
-    let add = |zip: &mut ZipWriter<std::fs::File>, path: &PathBuf, name: &str| -> Result<(), String> {
-        let Ok(contents) = fs::read(path) else { return Ok(()) };
-        let contents_str = String::from_utf8_lossy(&contents);
-        let scrubbed = contents_str
-            .lines()
-            .map(scrubber::scrub_line)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let options: zip::write::FileOptions<()> = Default::default();
-        zip.start_file(name, options).map_err(|e| e.to_string())?;
-        zip.write_all(scrubbed.as_bytes()).map_err(|e| e.to_string())?;
-        Ok(())
-    };
+    let add =
+        |zip: &mut ZipWriter<std::fs::File>, path: &PathBuf, name: &str| -> Result<(), String> {
+            let Ok(contents) = fs::read(path) else {
+                return Ok(());
+            };
+            let contents_str = String::from_utf8_lossy(&contents);
+            let scrubbed = contents_str
+                .lines()
+                .map(scrubber::scrub_line)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let options: zip::write::FileOptions<()> = Default::default();
+            zip.start_file(name, options).map_err(|e| e.to_string())?;
+            zip.write_all(scrubbed.as_bytes())
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        };
 
     // Add log files if found. The supervisor writes each partner's stdout/stderr
     // into a per-integration subdirectory, so recurse one level — a top-level
@@ -62,17 +66,30 @@ pub async fn export_debug_bundle(
             if let Ok(entries) = fs::read_dir(&log_path) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    let Ok(metadata) = entry.metadata() else { continue };
+                    let Ok(metadata) = entry.metadata() else {
+                        continue;
+                    };
                     if metadata.is_file() {
-                        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("log").to_string();
+                        let name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("log")
+                            .to_string();
                         add(&mut zip, &path, &name)?;
                     } else if metadata.is_dir() {
-                        let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("integration").to_string();
+                        let dir_name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("integration")
+                            .to_string();
                         if let Ok(sub) = fs::read_dir(&path) {
                             for sub_entry in sub.flatten() {
                                 let sub_path = sub_entry.path();
                                 if sub_path.is_file() {
-                                    let leaf = sub_path.file_name().and_then(|n| n.to_str()).unwrap_or("log");
+                                    let leaf = sub_path
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or("log");
                                     add(&mut zip, &sub_path, &format!("{}/{}", dir_name, leaf))?;
                                 }
                             }

@@ -32,18 +32,35 @@ pub(crate) fn reconcile_commands(rule_name: &str, program: &str) -> Vec<Vec<Stri
     let prog_arg = format!("program={program}");
     vec![
         vec![
-            "advfirewall".into(), "firewall".into(), "delete".into(), "rule".into(),
+            "advfirewall".into(),
+            "firewall".into(),
+            "delete".into(),
+            "rule".into(),
             name_arg.clone(),
         ],
         vec![
-            "advfirewall".into(), "firewall".into(), "add".into(), "rule".into(),
-            name_arg.clone(), "dir=in".into(), "action=allow".into(),
-            prog_arg.clone(), "enable=yes".into(), "profile=any".into(),
+            "advfirewall".into(),
+            "firewall".into(),
+            "add".into(),
+            "rule".into(),
+            name_arg.clone(),
+            "dir=in".into(),
+            "action=allow".into(),
+            prog_arg.clone(),
+            "enable=yes".into(),
+            "profile=any".into(),
         ],
         vec![
-            "advfirewall".into(), "firewall".into(), "add".into(), "rule".into(),
-            name_arg, "dir=out".into(), "action=allow".into(),
-            prog_arg, "enable=yes".into(), "profile=any".into(),
+            "advfirewall".into(),
+            "firewall".into(),
+            "add".into(),
+            "rule".into(),
+            name_arg,
+            "dir=out".into(),
+            "action=allow".into(),
+            prog_arg,
+            "enable=yes".into(),
+            "profile=any".into(),
         ],
     ]
 }
@@ -56,8 +73,12 @@ pub(crate) fn reconcile_commands(rule_name: &str, program: &str) -> Vec<Vec<Stri
 pub(crate) fn current_rule_program(rule_name: &str) -> Option<String> {
     let out = crate::supervisor::platform::command("netsh")
         .args([
-            "advfirewall", "firewall", "show", "rule",
-            &format!("name={rule_name}"), "verbose",
+            "advfirewall",
+            "firewall",
+            "show",
+            "rule",
+            &format!("name={rule_name}"),
+            "verbose",
         ])
         .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
         .ok()?;
@@ -76,7 +97,10 @@ pub fn ensure_program_rules(rule_name: &str, program: &Path) -> Result<()> {
     let program_str = program.to_string_lossy().to_string();
     if let Some(existing) = current_rule_program(rule_name) {
         if existing == program_str.to_lowercase() {
-            info!(rule = rule_name, "Firewall rule already matches binary path");
+            info!(
+                rule = rule_name,
+                "Firewall rule already matches binary path"
+            );
             return Ok(());
         }
         info!(rule = rule_name, old = %existing, new = %program_str, "Firewall rule path is stale — refreshing");
@@ -94,7 +118,11 @@ pub fn ensure_program_rules(rule_name: &str, program: &Path) -> Result<()> {
                 .iter()
                 .map(|a| {
                     if a.starts_with("program=") {
-                        format!("{}={}", "program", ps_quote(a.trim_start_matches("program=")))
+                        format!(
+                            "{}={}",
+                            "program",
+                            ps_quote(a.trim_start_matches("program="))
+                        )
                     } else {
                         a.clone()
                     }
@@ -110,10 +138,7 @@ pub fn ensure_program_rules(rule_name: &str, program: &Path) -> Result<()> {
         .join("FryEdgeMiner")
         .join("logs");
     let _ = std::fs::create_dir_all(&log_dir);
-    let transcript = log_dir.join(format!(
-        "firewall-{}.log",
-        chrono::Utc::now().timestamp()
-    ));
+    let transcript = log_dir.join(format!("firewall-{}.log", chrono::Utc::now().timestamp()));
 
     // Inner elevated command; Start-Process -Wait keeps the outer (unelevated)
     // powershell blocking until the elevated one exits.
@@ -160,7 +185,11 @@ pub fn delete_rules(rule_name: &str) {
         .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
     {
         Ok(o) if o.status.success() => info!(rule = rule_name, "Firewall rules deleted"),
-        Ok(o) => warn!(rule = rule_name, code = o.status.code(), "Firewall rule delete failed"),
+        Ok(o) => warn!(
+            rule = rule_name,
+            code = o.status.code(),
+            "Firewall rule delete failed"
+        ),
         Err(e) => warn!(rule = rule_name, error = %e, "Firewall rule delete could not run"),
     }
 }
@@ -180,7 +209,10 @@ mod tests {
 
     #[test]
     fn missing_program_line_is_none() {
-        assert_eq!(parse_rule_program("No rules match the specified criteria.\r\n"), None);
+        assert_eq!(
+            parse_rule_program("No rules match the specified criteria.\r\n"),
+            None
+        );
     }
 
     #[test]

@@ -109,5 +109,9 @@ fn a_config_with_no_unknown_keys_gains_nothing() {
         "known defaults should still be written: {}",
         out
     );
-    assert!(!obj.contains_key("extra"), "the catch-all must stay flattened, not nested: {}", out);
+    assert!(
+        !obj.contains_key("extra"),
+        "the catch-all must stay flattened, not nested: {}",
+        out
+    );
 }

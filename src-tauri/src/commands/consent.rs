@@ -43,10 +43,11 @@ pub async fn check_consent(integration_id: String) -> Result<ConsentStatus, Stri
     ensure_consent_integration(&integration_id)?;
 
     let record = PawnsIntegration::consent_record();
-    let active = record.as_ref().map(|r| r.action == "consent").unwrap_or(false);
-    let recorded_at = record
-        .map(|r| r.happened_at)
-        .filter(|t| !t.is_empty());
+    let active = record
+        .as_ref()
+        .map(|r| r.action == "consent")
+        .unwrap_or(false);
+    let recorded_at = record.map(|r| r.happened_at).filter(|t| !t.is_empty());
 
     Ok(ConsentStatus {
         integration_id,

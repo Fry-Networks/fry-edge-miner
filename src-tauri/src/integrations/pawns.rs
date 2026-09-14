@@ -60,7 +60,8 @@ pub(crate) fn consent_required_status() -> String {
         .to_string()
 }
 
-const CONSENT_DISCLOSURE: &str = "Pawns.app bandwidth sharing: internet traffic from Pawns.app and \
+const CONSENT_DISCLOSURE: &str =
+    "Pawns.app bandwidth sharing: internet traffic from Pawns.app and \
 its customers is routed through this device and its internet connection; the device's public IP \
 address and technical connection data are visible to those customers; sharing uses processor \
 capacity, battery and data allowance and can slow the connection. Only enable it if you are the \
@@ -476,7 +477,11 @@ fn append_lines(path: &Path, lines: &[&str]) -> bool {
         }
     }
     let body = lines.iter().map(|l| format!("{}\n", l)).collect::<String>();
-    match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         Ok(mut f) => {
             use std::io::Write;
             if let Err(e) = f.write_all(body.as_bytes()) {
@@ -844,8 +849,10 @@ mod tests {
 
     const SHARING: &str = r#"{"happened_at":"2026-08-11T21:48:52Z","name":"balance_ready","parameters":{"balance":"0.000 USD","traffic":"0.0000 GB"}}"#;
     const BLOCKED: &str = r#"{"happened_at":"2026-08-11T21:49:03Z","name":"not_running","parameters":{"error":"ip_used","message":"getting free port failed (ip has alive peer)"}}"#;
-    const STARTING: &str = r#"{"happened_at":"2026-08-11T21:48:50Z","name":"starting","parameters":{}}"#;
-    const RUNNING: &str = r#"{"happened_at":"2026-08-12T17:59:40Z","name":"running","parameters":{}}"#;
+    const STARTING: &str =
+        r#"{"happened_at":"2026-08-11T21:48:50Z","name":"starting","parameters":{}}"#;
+    const RUNNING: &str =
+        r#"{"happened_at":"2026-08-12T17:59:40Z","name":"running","parameters":{}}"#;
 
     #[test]
     fn reports_sharing_when_the_agent_last_reported_a_balance() {
@@ -1032,7 +1039,10 @@ mod tests {
             config: config.clone(),
         };
 
-        pawns.install().await.expect("install should pull the agent image");
+        pawns
+            .install()
+            .await
+            .expect("install should pull the agent image");
         assert_eq!(pawns.installed_version().as_deref(), Some("latest"));
 
         pawns.start().await.expect("start should launch the agent");
@@ -1120,7 +1130,10 @@ mod account_credential_tests {
             "pawns_account_password": "s3cret-value"
         }"#;
         let info: CredentialInfo = serde_json::from_str(body).expect("deserialises");
-        assert_eq!(info.pawns_account_email.as_deref(), Some("shared@example.test"));
+        assert_eq!(
+            info.pawns_account_email.as_deref(),
+            Some("shared@example.test")
+        );
         assert_eq!(info.pawns_account_password.as_deref(), Some("s3cret-value"));
     }
 
@@ -1134,7 +1147,6 @@ mod account_credential_tests {
         assert!(info.pawns_account_password.is_none());
     }
 }
-
 
 /// BUG 8 (minerman): "Pawns shows a consent/terms wall instead of auto-enabling."
 ///
@@ -1194,7 +1206,10 @@ mod bug8_consent_presentation_tests {
             "age of majority",
             "off at any time",
         ] {
-            assert!(lower.contains(required), "Addendum point missing: {required}");
+            assert!(
+                lower.contains(required),
+                "Addendum point missing: {required}"
+            );
         }
     }
 

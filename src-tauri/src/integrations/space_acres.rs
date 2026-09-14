@@ -1,6 +1,6 @@
-use crate::supervisor::platform::BoundedOutput;
 use super::download::{download_file_with_options, partners_base_dir};
 use super::{tracked_child_probe, HealthStatus, Integration, PocGateData};
+use crate::supervisor::platform::BoundedOutput;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -96,7 +96,9 @@ fn parse_version_components(v: &str) -> Vec<u32> {
 /// is not, and matches `check_update`'s prior always-available behavior for
 /// that specific case.
 fn update_available(installed: Option<&str>, latest: &str) -> bool {
-    let Some(installed) = installed else { return true };
+    let Some(installed) = installed else {
+        return true;
+    };
     let mut a = parse_version_components(installed);
     let mut b = parse_version_components(latest);
     let n = a.len().max(b.len());
@@ -213,7 +215,10 @@ fn file_is_valid_pe(path: &std::path::Path) -> bool {
 #[cfg(target_os = "windows")]
 fn pe_head_fits_file(head: &[u8], file_len: u64) -> bool {
     let u16_at = |o: usize| head.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
-    let u32_at = |o: usize| head.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let u32_at = |o: usize| {
+        head.get(o..o + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
     let Some(e_lfanew) = u32_at(0x3C).map(|v| v as usize) else {
         return false;
     };
@@ -298,7 +303,12 @@ impl SpaceAcresIntegration {
         // "don't trust the staged copy" branch `pick_binary` already has.
         let staged_is_corrupt = staged_exists && !staged_is_installer && !file_is_valid_pe(&staged);
         let mut roots: Vec<PathBuf> = Vec::new();
-        for var in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
+        for var in [
+            "LOCALAPPDATA",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "ProgramData",
+        ] {
             if let Ok(base) = std::env::var(var) {
                 roots.extend(roots_for_base(std::path::Path::new(&base)));
             }
@@ -314,7 +324,12 @@ impl SpaceAcresIntegration {
             && !staged_is_corrupt
             && discovered
                 .as_ref()
-                .map(|d| staged_is_stale(Self::file_product_version(&staged).as_deref(), Self::file_product_version(d).as_deref()))
+                .map(|d| {
+                    staged_is_stale(
+                        Self::file_product_version(&staged).as_deref(),
+                        Self::file_product_version(d).as_deref(),
+                    )
+                })
                 .unwrap_or(false);
         let staged_untrusted = staged_is_installer || staged_is_corrupt || staged_is_stale_copy;
         let staged = staged_exists.then_some(staged);
@@ -362,8 +377,12 @@ impl SpaceAcresIntegration {
         }
         let dest = Self::partner_dir().join("space-acres-installer.exe");
         match std::fs::rename(&staged, &dest) {
-            Ok(()) => info!(from = ?staged, to = ?dest, "Quarantined mis-staged SpaceAcres installer"),
-            Err(e) => warn!(error = %e, path = ?staged, "Could not quarantine mis-staged SpaceAcres installer"),
+            Ok(()) => {
+                info!(from = ?staged, to = ?dest, "Quarantined mis-staged SpaceAcres installer")
+            }
+            Err(e) => {
+                warn!(error = %e, path = ?staged, "Could not quarantine mis-staged SpaceAcres installer")
+            }
         }
     }
 
@@ -380,7 +399,12 @@ impl SpaceAcresIntegration {
             return;
         }
         let mut roots: Vec<PathBuf> = Vec::new();
-        for var in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
+        for var in [
+            "LOCALAPPDATA",
+            "ProgramFiles",
+            "ProgramFiles(x86)",
+            "ProgramData",
+        ] {
             if let Ok(base) = std::env::var(var) {
                 roots.extend(roots_for_base(std::path::Path::new(&base)));
             }
@@ -396,8 +420,12 @@ impl SpaceAcresIntegration {
         }
         let dest = Self::partner_dir().join("space-acres-stale.exe");
         match std::fs::rename(&staged, &dest) {
-            Ok(()) => info!(from = ?staged, to = ?dest, discovered = ?discovered, "Quarantined stale staged SpaceAcres copy"),
-            Err(e) => warn!(error = %e, path = ?staged, "Could not quarantine stale staged SpaceAcres copy"),
+            Ok(()) => {
+                info!(from = ?staged, to = ?dest, discovered = ?discovered, "Quarantined stale staged SpaceAcres copy")
+            }
+            Err(e) => {
+                warn!(error = %e, path = ?staged, "Could not quarantine stale staged SpaceAcres copy")
+            }
         }
     }
 
@@ -430,7 +458,11 @@ impl SpaceAcresIntegration {
         let mut last_error = None;
 
         for attempt in 1..=max_attempts {
-            info!(url = GITHUB_API_URL, attempt = attempt, "Fetching latest SpaceAcres release");
+            info!(
+                url = GITHUB_API_URL,
+                attempt = attempt,
+                "Fetching latest SpaceAcres release"
+            );
 
             match client.get(GITHUB_API_URL).send().await {
                 Ok(response) => {
@@ -490,9 +522,7 @@ impl SpaceAcresIntegration {
                     let ratelimit_remaining = headers
                         .get("x-ratelimit-remaining")
                         .and_then(|v| v.to_str().ok());
-                    let retry_after = headers
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok());
+                    let retry_after = headers.get("retry-after").and_then(|v| v.to_str().ok());
 
                     warn!(
                         url = GITHUB_API_URL,
@@ -520,7 +550,10 @@ impl SpaceAcresIntegration {
                             continue;
                         }
                     } else {
-                        return Err(anyhow::anyhow!("Failed to fetch latest release: HTTP {}", status.as_u16()));
+                        return Err(anyhow::anyhow!(
+                            "Failed to fetch latest release: HTTP {}",
+                            status.as_u16()
+                        ));
                     }
                 }
                 Err(e) => {
@@ -534,7 +567,8 @@ impl SpaceAcresIntegration {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Failed to fetch latest release after all retries")))
+        Err(last_error
+            .unwrap_or_else(|| anyhow::anyhow!("Failed to fetch latest release after all retries")))
     }
 
     /// Image-name tasklist probe — fallback for an adopted/untracked
@@ -918,7 +952,6 @@ impl Integration for SpaceAcresIntegration {
     }
 }
 
-
 /// Detect if system has an SSD.
 /// Cached: the probe spawns a full PowerShell process (~1-3s) and this is
 /// called from the 30s health-check loop — uncached it burns CPU forever,
@@ -1074,9 +1107,6 @@ const SSD_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 static SSD_CACHE: std::sync::Mutex<Option<(Option<bool>, std::time::Instant)>> =
     std::sync::Mutex::new(None);
 
-
-
-
 /// F6 follow-up: upstream's WiX package (res/windows/wix/space-acres.wxs)
 /// installs the farmer to `<root>\Space Acres\bin\space-acres.exe` — a `bin`
 /// level the discovery probe missed, so every fresh MSI install read as "not
@@ -1091,11 +1121,15 @@ mod discovery_tests {
         let roots = vec![PathBuf::from(r"C:\Program Files\Space Acres")];
         let candidates = binary_candidates(&roots);
         assert!(
-            candidates.contains(&PathBuf::from(r"C:\Program Files\Space Acres\bin\space-acres.exe")),
+            candidates.contains(&PathBuf::from(
+                r"C:\Program Files\Space Acres\bin\space-acres.exe"
+            )),
             "candidates must include the WiX bin layout: {candidates:?}"
         );
         assert!(
-            candidates.contains(&PathBuf::from(r"C:\Program Files\Space Acres\space-acres.exe")),
+            candidates.contains(&PathBuf::from(
+                r"C:\Program Files\Space Acres\space-acres.exe"
+            )),
             "the flat layout must keep working: {candidates:?}"
         );
     }
@@ -1108,7 +1142,9 @@ mod discovery_tests {
         // re-ran the installer — the Modify/Repair dialog users reported.
         let roots = roots_for_base(std::path::Path::new(r"C:\Users\x\AppData\Local"));
         assert!(
-            roots.contains(&PathBuf::from(r"C:\Users\x\AppData\Local\Programs\Space Acres")),
+            roots.contains(&PathBuf::from(
+                r"C:\Users\x\AppData\Local\Programs\Space Acres"
+            )),
             "per-user capitalised root must be probed: {roots:?}"
         );
         let candidates = binary_candidates(&roots);
@@ -1157,13 +1193,16 @@ mod discovery_tests {
 
     #[test]
     fn farmer_binary_is_not_mistaken_for_a_burn_bundle() {
-        let head = b"MZ\x90\x00.text\x00\x00\x00.rdata\x00\x00.data\x00\x00\x00.rsrc\x00\x00\x00".to_vec();
+        let head =
+            b"MZ\x90\x00.text\x00\x00\x00.rdata\x00\x00.data\x00\x00\x00.rsrc\x00\x00\x00".to_vec();
         assert!(!head_is_burn_bundle(&head));
     }
 
     #[test]
     fn staged_installer_is_skipped_in_favour_of_the_real_install() {
-        let staged = PathBuf::from(r"C:\Users\u\AppData\Roaming\FryEdgeMiner\partners\space_acres\space-acres.exe");
+        let staged = PathBuf::from(
+            r"C:\Users\u\AppData\Roaming\FryEdgeMiner\partners\space_acres\space-acres.exe",
+        );
         let discovered = PathBuf::from(r"C:\Program Files\Space Acres\bin\space-acres.exe");
         // Staged copy is really the Burn installer: launching it shows the
         // "Modify Setup" dialog, so the installed farmer must win instead.
@@ -1193,9 +1232,13 @@ mod discovery_tests {
     /// must fail before it can ever reach `pick_binary`.
     #[test]
     fn head_is_valid_pe_requires_the_mz_magic() {
-        assert!(head_is_valid_pe(b"MZ\x90\x00.text\x00\x00\x00.rdata\x00\x00"));
+        assert!(head_is_valid_pe(
+            b"MZ\x90\x00.text\x00\x00\x00.rdata\x00\x00"
+        ));
         // WP6/WP3-style corruption: plain ASCII, no MZ header.
-        assert!(!head_is_valid_pe(b"WP6-TEST-CORRUPTION-NOT-A-VALID-EXECUTABLE"));
+        assert!(!head_is_valid_pe(
+            b"WP6-TEST-CORRUPTION-NOT-A-VALID-EXECUTABLE"
+        ));
         assert!(!head_is_valid_pe(b""));
         // Too short to even carry the 2-byte magic.
         assert!(!head_is_valid_pe(b"M"));
@@ -1211,7 +1254,9 @@ mod discovery_tests {
     /// exact combined flag the production call site now computes.
     #[test]
     fn a_non_pe_staged_file_is_not_trusted_over_a_real_install() {
-        let staged = PathBuf::from(r"C:\Users\u\AppData\Roaming\FryEdgeMiner\partners\space_acres\space-acres.exe");
+        let staged = PathBuf::from(
+            r"C:\Users\u\AppData\Roaming\FryEdgeMiner\partners\space_acres\space-acres.exe",
+        );
         let discovered = PathBuf::from(r"C:\Program Files\Space Acres\bin\space-acres.exe");
         let staged_is_installer = false; // not a Burn bundle — the OLD check would have trusted it
         let staged_is_corrupt = !head_is_valid_pe(b"WP6-TEST-CORRUPTION-NOT-A-VALID-EXECUTABLE");
@@ -1345,7 +1390,10 @@ mod requirement_tests {
     #[test]
     fn a_machine_below_the_disk_minimum_is_unavailable() {
         let err = evaluate_requirements(Some(true), Some(10.0)).unwrap_err();
-        assert!(err.contains("10"), "reason should quote the free space: {err}");
+        assert!(
+            err.contains("10"),
+            "reason should quote the free space: {err}"
+        );
         assert!(err.contains(&SPACE_ACRES_MIN_GB.to_string()));
     }
 
@@ -1366,7 +1414,10 @@ mod requirement_tests {
     #[test]
     fn unmeasurable_specs_fail_open() {
         assert!(evaluate_requirements(None, None).is_ok());
-        assert!(evaluate_requirements(None, Some(10.0)).is_err(), "a measured shortfall still fails");
+        assert!(
+            evaluate_requirements(None, Some(10.0)).is_err(),
+            "a measured shortfall still fails"
+        );
         assert!(evaluate_requirements(Some(true), None).is_ok());
     }
 }
@@ -1389,7 +1440,9 @@ mod bug3_tracked_child_tests {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            std::process::Command::new("true").spawn().expect("spawn true")
+            std::process::Command::new("true")
+                .spawn()
+                .expect("spawn true")
         }
     }
 
@@ -1403,7 +1456,10 @@ mod bug3_tracked_child_tests {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            std::process::Command::new("sleep").arg("30").spawn().expect("spawn sleep")
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn sleep")
         }
     }
 
@@ -1431,7 +1487,10 @@ mod bug3_tracked_child_tests {
         let _ = child.wait();
         let mut slot = Some(child);
         assert_eq!(tracked_child_probe(&mut slot), Some(false));
-        assert!(slot.is_none(), "an exited child must be cleared from the slot");
+        assert!(
+            slot.is_none(),
+            "an exited child must be cleared from the slot"
+        );
     }
 
     // --- staged_is_stale (pure) ----------------------------------------------
@@ -1561,7 +1620,11 @@ mod bug7_ssd_classifier_tests {
         let nvme = classify_ssd(Some(0), Some(false), 0, 0);
         let hdd = classify_ssd(Some(0), Some(false), 0, 3);
         assert_eq!(nvme, None, "NVMe: unmeasurable, must fail open");
-        assert_eq!(hdd, Some(false), "HDD: affirmative rotation, must fail closed");
+        assert_eq!(
+            hdd,
+            Some(false),
+            "HDD: affirmative rotation, must fail closed"
+        );
         assert_ne!(nvme, hdd);
     }
 
@@ -1594,6 +1657,9 @@ mod bug7_ssd_classifier_tests {
     /// NVMe case that used to be permanently untoggleable.
     #[test]
     fn an_unmeasurable_machine_is_no_longer_blocked_by_the_toggle() {
-        assert_eq!(eligibility_from(evaluate_requirements(None, None)), (true, None));
+        assert_eq!(
+            eligibility_from(evaluate_requirements(None, None)),
+            (true, None)
+        );
     }
 }

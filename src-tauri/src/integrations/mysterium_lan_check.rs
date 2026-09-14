@@ -86,7 +86,10 @@ fn check_local_myst_process() -> Option<String> {
 /// Scan local /24 subnet for Mysterium tequilapi port (4449).
 async fn scan_subnet() -> Result<Option<String>> {
     let local_ip = get_local_ip().await?;
-    let subnet = format!("{}.0", local_ip.rsplit_once('.').map(|(a, _)| a).unwrap_or("0"));
+    let subnet = format!(
+        "{}.0",
+        local_ip.rsplit_once('.').map(|(a, _)| a).unwrap_or("0")
+    );
 
     // Build candidate IPs: subnet.1 through subnet.254 (skip .0 and .255)
     let mut tasks = Vec::new();
@@ -103,7 +106,9 @@ async fn scan_subnet() -> Result<Option<String>> {
     }
 
     for task in tasks {
-        if let Ok(Some(conflict)) = task.await { return Ok(Some(conflict)) }
+        if let Ok(Some(conflict)) = task.await {
+            return Ok(Some(conflict));
+        }
     }
 
     Ok(None)
@@ -113,12 +118,10 @@ async fn scan_subnet() -> Result<Option<String>> {
 async fn probe_ip(ip: &str) -> Option<String> {
     let addr = format!("{}:{}", ip, TEQUILAPI_PORT);
     match tokio::time::timeout(SCAN_TIMEOUT, tokio::net::TcpStream::connect(&addr)).await {
-        Ok(Ok(_)) => {
-            Some(format!(
-                "Mysterium node detected on LAN at {}:{} — enable myst_lan_override to proceed",
-                ip, TEQUILAPI_PORT
-            ))
-        }
+        Ok(Ok(_)) => Some(format!(
+            "Mysterium node detected on LAN at {}:{} — enable myst_lan_override to proceed",
+            ip, TEQUILAPI_PORT
+        )),
         _ => None,
     }
 }

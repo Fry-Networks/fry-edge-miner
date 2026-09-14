@@ -64,54 +64,55 @@ pub async fn get_integrations(
 
     // Read the most recent health check results written by the health loop in main.rs.
     let last = state.last_health.read().map_err(|e| e.to_string())?;
-    let last_errors = state.last_integration_error.read().map_err(|e| e.to_string())?;
+    let last_errors = state
+        .last_integration_error
+        .read()
+        .map_err(|e| e.to_string())?;
 
     let statuses = entries
         .into_iter()
-        .map(|(id, display_name, enabled, version, requires_docker, unavailable_reason)| {
-            let health = if enabled {
-                last.get(&id)
-                    .cloned()
-                    .unwrap_or(HealthStatus::Starting)
-            } else {
-                last.get(&id)
-                    .cloned()
-                    .unwrap_or(HealthStatus::Stopped)
-            };
-
-            let lifecycle = if !enabled {
-                LifecycleState::Disabled
-            } else {
-                match &health {
-                    HealthStatus::Healthy => LifecycleState::Running,
-                    HealthStatus::Unhealthy(_) => LifecycleState::Unhealthy,
-                    HealthStatus::Installing => LifecycleState::Installing,
-                    _ => LifecycleState::Starting,
-                }
-            };
-
-            // Healthy-based so the UI matches what the PoC reporter actually
-            // submits (reporter proportion counts Healthy only).
-            let healthy = matches!(health, HealthStatus::Healthy);
-
-            IntegrationStatus {
-                id: id.clone(),
-                display_name,
-                enabled,
-                health,
-                lifecycle,
-                version,
-                poc_contribution: if enabled && healthy && available > 0 {
-                    1.0 / available as f64
+        .map(
+            |(id, display_name, enabled, version, requires_docker, unavailable_reason)| {
+                let health = if enabled {
+                    last.get(&id).cloned().unwrap_or(HealthStatus::Starting)
                 } else {
-                    0.0
-                },
-                tier: crate::integrations::tier_for(&id),
-                requires_docker,
-                error: last_errors.get(&id).and_then(|e| e.clone()),
-                unavailable_reason,
-            }
-        })
+                    last.get(&id).cloned().unwrap_or(HealthStatus::Stopped)
+                };
+
+                let lifecycle = if !enabled {
+                    LifecycleState::Disabled
+                } else {
+                    match &health {
+                        HealthStatus::Healthy => LifecycleState::Running,
+                        HealthStatus::Unhealthy(_) => LifecycleState::Unhealthy,
+                        HealthStatus::Installing => LifecycleState::Installing,
+                        _ => LifecycleState::Starting,
+                    }
+                };
+
+                // Healthy-based so the UI matches what the PoC reporter actually
+                // submits (reporter proportion counts Healthy only).
+                let healthy = matches!(health, HealthStatus::Healthy);
+
+                IntegrationStatus {
+                    id: id.clone(),
+                    display_name,
+                    enabled,
+                    health,
+                    lifecycle,
+                    version,
+                    poc_contribution: if enabled && healthy && available > 0 {
+                        1.0 / available as f64
+                    } else {
+                        0.0
+                    },
+                    tier: crate::integrations::tier_for(&id),
+                    requires_docker,
+                    error: last_errors.get(&id).and_then(|e| e.clone()),
+                    unavailable_reason,
+                }
+            },
+        )
         .collect();
 
     Ok(statuses)
@@ -164,11 +165,13 @@ pub async fn toggle_integration(
 
         // Check SpaceAcres eligibility
         if id == "space_acres" {
-            let (eligible, reason) = crate::integrations::space_acres::SpaceAcresIntegration::check_eligibility().await;
+            let (eligible, reason) =
+                crate::integrations::space_acres::SpaceAcresIntegration::check_eligibility().await;
             if !eligible {
                 return Err(format!(
                     "{}. Try Storj instead.",
-                    reason.unwrap_or_else(|| "SpaceAcres is not eligible on this device".to_string())
+                    reason
+                        .unwrap_or_else(|| "SpaceAcres is not eligible on this device".to_string())
                 ));
             }
         }
@@ -314,7 +317,10 @@ pub async fn force_reinstall_integration(
             .ok_or_else(|| format!("Integration '{}' not found", id))?
     };
 
-    tracing::info!(integration = id, "Force reinstall: cleaning previous install");
+    tracing::info!(
+        integration = id,
+        "Force reinstall: cleaning previous install"
+    );
     tokio::task::block_in_place(crate::integrations::aem::AemIntegration::force_clean);
 
     if let Err(e) = integration.install().await {
@@ -369,7 +375,10 @@ mod bug2_timeout_tests {
         let msg = timeout_message("install", "mysterium");
         assert!(msg.contains("mysterium"), "{msg}");
         assert!(msg.contains("install"), "{msg}");
-        assert!(msg.contains(&TOGGLE_STEP_TIMEOUT.as_secs().to_string()), "{msg}");
+        assert!(
+            msg.contains(&TOGGLE_STEP_TIMEOUT.as_secs().to_string()),
+            "{msg}"
+        );
     }
 
     /// A genuinely-stalled future (never resolves) must still make
@@ -382,7 +391,10 @@ mod bug2_timeout_tests {
         let never = std::future::pending::<()>();
         let started = std::time::Instant::now();
         let result = tokio::time::timeout(Duration::from_millis(50), never).await;
-        assert!(result.is_err(), "a pending future must trip the timeout, not resolve");
+        assert!(
+            result.is_err(),
+            "a pending future must trip the timeout, not resolve"
+        );
         assert!(
             started.elapsed() < Duration::from_millis(500),
             "timeout took {:?} — bound not enforced",

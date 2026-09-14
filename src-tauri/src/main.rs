@@ -76,7 +76,9 @@ mod bug12_health_persistence_tests {
         let last_health: RwLock<HashMap<String, HealthStatus>> = RwLock::new(HashMap::new());
         let event = HealthEvent {
             integration_id: "titan".to_string(),
-            status: HealthStatus::Unhealthy("Did not finish starting within 180s — retrying".to_string()),
+            status: HealthStatus::Unhealthy(
+                "Did not finish starting within 180s — retrying".to_string(),
+            ),
             restart_count: 1,
         };
 
@@ -104,7 +106,9 @@ mod bug12_health_persistence_tests {
             &last_health,
             &HealthEvent {
                 integration_id: "titan".to_string(),
-                status: HealthStatus::Unhealthy("Did not finish starting within 180s — retrying".to_string()),
+                status: HealthStatus::Unhealthy(
+                    "Did not finish starting within 180s — retrying".to_string(),
+                ),
                 restart_count: 1,
             },
         );
@@ -116,7 +120,10 @@ mod bug12_health_persistence_tests {
                 restart_count: 1,
             },
         );
-        assert_eq!(last_health.read().unwrap().get("titan"), Some(&HealthStatus::Healthy));
+        assert_eq!(
+            last_health.read().unwrap().get("titan"),
+            Some(&HealthStatus::Healthy)
+        );
     }
 
     #[test]
@@ -139,7 +146,10 @@ mod bug12_health_persistence_tests {
             },
         );
         let map = last_health.read().unwrap();
-        assert_eq!(map.get("titan"), Some(&HealthStatus::Unhealthy("missing VC++ runtime".to_string())));
+        assert_eq!(
+            map.get("titan"),
+            Some(&HealthStatus::Unhealthy("missing VC++ runtime".to_string()))
+        );
         assert_eq!(map.get("mysterium"), Some(&HealthStatus::Healthy));
     }
 }

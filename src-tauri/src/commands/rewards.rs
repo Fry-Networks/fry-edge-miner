@@ -1,5 +1,5 @@
-use chrono::Local;
 use crate::integrations::reward_model;
+use chrono::Local;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 
@@ -140,7 +140,10 @@ pub async fn get_reward_summary(
     let bits = state.cached_base_reward.load(Ordering::Relaxed);
     let cached = f64::from_bits(bits);
 
-    let config = state.cached_reward_config.read().map_err(|e| e.to_string())?;
+    let config = state
+        .cached_reward_config
+        .read()
+        .map_err(|e| e.to_string())?;
     let (
         reward_amount,
         reward_token_asa_id,
@@ -177,7 +180,10 @@ pub async fn get_reward_summary(
     // Stake multiplier: look up from cached stake_tiers (from /versions/FEM)
     // and cached verified status (from /credentials/{key}/verified)
     let tiers = state.cached_stake_tiers.read().map_err(|e| e.to_string())?;
-    let verified = state.cached_verified_status.read().map_err(|e| e.to_string())?;
+    let verified = state
+        .cached_verified_status
+        .read()
+        .map_err(|e| e.to_string())?;
     let has_key = state.config.get().miner_key.is_some();
     let (config_ready, stake_data_ready) =
         readiness(config.is_some(), cached, verified.is_some(), has_key);
@@ -187,26 +193,31 @@ pub async fn get_reward_summary(
             // /credentials call succeeded → device IS registered.
             // verified = "has verification stake", NOT "is registered".
             // Look up tier from staked.type; default to "none" (registered, no stake = 1×)
-            let tier_key = vs.staked.as_ref()
+            let tier_key = vs
+                .staked
+                .as_ref()
                 .and_then(|s| s.stake_type.as_deref())
                 .unwrap_or("none");
-            tiers.get(tier_key).map_or(
-                (1.0, "No stake".to_string()),
-                |t| (t.multiplier, t.label.clone()),
-            )
+            tiers
+                .get(tier_key)
+                .map_or((1.0, "No stake".to_string()), |t| {
+                    (t.multiplier, t.label.clone())
+                })
         }
         (Some(tiers), None) => {
             // Verified status not yet fetched — check if device is registered
             if has_key {
-                tiers.get("none").map_or(
-                    (1.0, "No stake".to_string()),
-                    |t| (t.multiplier, t.label.clone()),
-                )
+                tiers
+                    .get("none")
+                    .map_or((1.0, "No stake".to_string()), |t| {
+                        (t.multiplier, t.label.clone())
+                    })
             } else {
-                tiers.get("unregistered").map_or(
-                    (0.0, "Not registered".to_string()),
-                    |t| (t.multiplier, t.label.clone()),
-                )
+                tiers
+                    .get("unregistered")
+                    .map_or((0.0, "Not registered".to_string()), |t| {
+                        (t.multiplier, t.label.clone())
+                    })
             }
         }
         _ => {

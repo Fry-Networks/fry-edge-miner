@@ -151,10 +151,7 @@ fn find_miner_key_in_dir(dir: &Path, code: &str) -> Option<DetectedMinerKey> {
 }
 
 /// Plan a migration from FryHub miner keys to FEM
-pub fn plan_migration(
-    installation: &FryHubInstallation,
-    wallet: Option<String>,
-) -> MigrationPlan {
+pub fn plan_migration(installation: &FryHubInstallation, wallet: Option<String>) -> MigrationPlan {
     let fem_key = miner_key::generate();
 
     let mut integrations: Vec<String> = Vec::new();
@@ -200,18 +197,27 @@ mod tests {
     }
 
     fn build_fixture() -> TempFixture {
-        let root = std::env::temp_dir().join(format!("fem_migration_fixture_{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("fem_migration_fixture_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         // RDN: real key file
         let rdn_cfg = root.join("miner-RDN").join("config");
         std::fs::create_dir_all(&rdn_cfg).unwrap();
-        std::fs::write(rdn_cfg.join("miner_key.txt"), "RDN-TESTFIXTURE00000000000000000000").unwrap();
+        std::fs::write(
+            rdn_cfg.join("miner_key.txt"),
+            "RDN-TESTFIXTURE00000000000000000000",
+        )
+        .unwrap();
         // BM: config dir exists but no key file — exercises the fallback path
         std::fs::create_dir_all(root.join("miner-BM").join("config")).unwrap();
         // SDN: real key file
         let sdn_cfg = root.join("miner-SDN").join("config");
         std::fs::create_dir_all(&sdn_cfg).unwrap();
-        std::fs::write(sdn_cfg.join("miner_key.txt"), "SDN-TESTFIXTURE00000000000000000000").unwrap();
+        std::fs::write(
+            sdn_cfg.join("miner_key.txt"),
+            "SDN-TESTFIXTURE00000000000000000000",
+        )
+        .unwrap();
         TempFixture(root)
     }
 
