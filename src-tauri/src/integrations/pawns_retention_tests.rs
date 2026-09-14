@@ -11,6 +11,13 @@
 //! Like the other consent tests these run entirely in a temp directory, so a
 //! test run can never rotate the consent log of the machine it runs on.
 
+// clippy::identity_op — the fixture tables below write ages as `N * DAY`
+// (`800 * DAY`, `1100 * DAY`, `700 * DAY`, `5 * DAY`). Collapsing the `1 * DAY`
+// cases to a bare `DAY` is what clippy suggests and is behaviour-preserving, but
+// it breaks the column alignment that makes those tables readable at a glance.
+// The parallelism is deliberate, so the lint is silenced rather than obeyed.
+#![allow(clippy::identity_op)]
+
 use super::*;
 use std::path::Path;
 
@@ -102,7 +109,7 @@ fn an_old_entry_that_is_a_devices_only_record_is_kept() {
     // Consent given three years ago and never revisited: it is still this
     // device's consent state, so rotating it away would silently revoke sharing.
     let ancient = entry("consent", "dev-quiet", 1100 * DAY);
-    write_lines(&log, &[ancient.clone()]);
+    write_lines(&log, std::slice::from_ref(&ancient));
     assert!(
         consent_is_active(&log, "dev-quiet"),
         "precondition: the ancient consent is the active state"
@@ -250,7 +257,7 @@ fn archived_entries_append_to_an_existing_archive_in_order() {
     let dir = tempfile::tempdir().expect("temp dir");
     let (log, archive) = paths(dir.path());
     let already = entry("consent", "dev-old", 2000 * DAY);
-    write_lines(&archive, &[already.clone()]);
+    write_lines(&archive, std::slice::from_ref(&already));
     let first = entry("consent", "dev-a", 900 * DAY);
     let second = entry("withdrawal", "dev-a", 850 * DAY);
     write_lines(

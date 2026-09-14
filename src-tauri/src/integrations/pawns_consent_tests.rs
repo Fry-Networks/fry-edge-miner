@@ -32,7 +32,7 @@ fn write_log(dir: &Path, lines: &[String]) -> std::path::PathBuf {
 fn a_recorded_consent_makes_sharing_allowed() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_log(
-        &dir.path(),
+        dir.path(),
         &[line("consent", "dev-a", "2026-08-19T10:00:00Z")],
     );
 
@@ -46,7 +46,7 @@ fn a_recorded_consent_makes_sharing_allowed() {
 fn a_recorded_withdrawal_takes_consent_away_again() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_log(
-        &dir.path(),
+        dir.path(),
         &[
             line("consent", "dev-a", "2026-08-19T10:00:00Z"),
             line("withdrawal", "dev-a", "2026-08-19T11:00:00Z"),
@@ -71,7 +71,7 @@ fn a_device_that_never_consented_is_not_sharing() {
 fn the_last_entry_decides_after_consent_withdrawal_consent() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_log(
-        &dir.path(),
+        dir.path(),
         &[
             line("consent", "dev-a", "2026-08-19T10:00:00Z"),
             line("withdrawal", "dev-a", "2026-08-19T11:00:00Z"),
@@ -92,7 +92,7 @@ fn the_last_entry_decides_after_consent_withdrawal_consent() {
 fn a_malformed_line_is_skipped_instead_of_losing_the_whole_record() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_log(
-        &dir.path(),
+        dir.path(),
         &[
             line("consent", "dev-a", "2026-08-19T10:00:00Z"),
             "{ this is not json".to_string(),
@@ -114,7 +114,7 @@ fn a_malformed_line_is_skipped_instead_of_losing_the_whole_record() {
 fn another_devices_entry_does_not_decide_this_devices_state() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_log(
-        &dir.path(),
+        dir.path(),
         &[
             line("consent", "dev-a", "2026-08-19T10:00:00Z"),
             line("withdrawal", "dev-b", "2026-08-19T11:00:00Z"),
@@ -200,7 +200,7 @@ fn a_record_written_before_the_terms_fields_existed_is_still_read() {
     // retroactively un-consent anyone.
     let dir = tempfile::tempdir().unwrap();
     let path = write_log(
-        &dir.path(),
+        dir.path(),
         &[line("consent", "dev-a", "2026-08-19T10:00:00Z")],
     );
 
