@@ -758,55 +758,148 @@ fn compute_jitter_secs(config: &Arc<ConfigStore>) -> u64 {
     hash
 }
 
+/// These two tests used to define their own private copies of the jitter maths
+/// and of an `auto_update && current != latest` predicate, and called nothing
+/// from the parent module — which is why the `use super::*` above them was
+/// flagged as unused. They could not fail for any change to shipped code.
+///
+/// The two halves are not symmetric, and that decides how each is rewritten:
+///
+/// * Jitter has a real function — `compute_jitter_secs` — so these call it.
+/// * The auto-install decision has NO real counterpart anywhere in the crate.
+///   It is two `if`s in two different `async fn`s with an awaited network call
+///   between them, so it cannot be called from a test at all. It is pinned by
+///   source assertion instead, which is what the rest of this crate does for
+///   loops that never return.
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn test_should_auto_install_decision() {
-        // This test verifies the decision logic:
-        // - Current version == latest: no install
-        // - Current version < latest: install
-        // - Config.auto_update = false: skip cycle
-        let test_cases = vec![
-            ("0.2.30", "0.2.30", true, false), // same version, enabled → no install
-            ("0.2.30", "0.2.31", true, true),  // new version, enabled → install
-            ("0.2.30", "0.2.31", false, false), // new version, disabled → no install
-        ];
+    use super::*;
+    use std::sync::Arc;
 
-        for (current, latest, auto_update, should_install) in test_cases {
-            let decision = should_auto_install(current, latest, auto_update);
+    /// A real `ConfigStore` on a real (temporary) directory. The `TempDir` is
+    /// returned rather than dropped: dropping it deletes the directory out from
+    /// under the store.
+    fn store_with(install_id: Option<&str>) -> (tempfile::TempDir, Arc<ConfigStore>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(ConfigStore::new(dir.path().to_path_buf(), None));
+        store
+            .update(|c| c.install_id = install_id.map(|s| s.to_string()))
+            .expect("seed install_id");
+        (dir, store)
+    }
+
+    /// Fleet-wide simultaneous restarts are the thing jitter exists to prevent,
+    /// and the window is what bounds the damage.
+    #[test]
+    fn jitter_stays_inside_the_ten_minute_window() {
+        for id in ["install-abc123", "install-xyz789", ""] {
+            let (_dir, store) = store_with(Some(id));
+            let jitter = compute_jitter_secs(&store);
+            assert!(jitter < 600, "jitter {jitter} out of bounds for id {id:?}");
+        }
+    }
+
+    /// A device must land in the same slot every cycle. Jitter that moved on
+    /// each call would spread one device across the window instead of spreading
+    /// the fleet across it.
+    #[test]
+    fn jitter_is_deterministic_for_one_device() {
+        let (_dir, store) = store_with(Some("install-abc123"));
+        let first = compute_jitter_secs(&store);
+        for _ in 0..5 {
             assert_eq!(
-                decision, should_install,
-                "Failed for current={}, latest={}, auto_update={}",
-                current, latest, auto_update
+                compute_jitter_secs(&store),
+                first,
+                "the same install_id must always produce the same jitter"
             );
         }
     }
 
+    /// The seed must actually be the install_id. If the function ignored it,
+    /// every device in the fleet would compute the SAME offset and jitter would
+    /// be decorative — the exact failure it exists to prevent.
     #[test]
-    fn test_jitter_computation_bounds() {
-        // Jitter should always be within [0, 600) seconds
-        let test_ids = vec!["install-abc123", "install-xyz789", ""];
+    fn the_install_id_is_what_seeds_the_jitter() {
+        let (_a, store_a) = store_with(Some("aaaa"));
+        let (_b, store_b) = store_with(Some("aaab"));
+        assert_ne!(
+            compute_jitter_secs(&store_a),
+            compute_jitter_secs(&store_b),
+            "two different install_ids must not collide on the same jitter"
+        );
+    }
 
-        for install_id in test_ids {
-            let jitter = compute_hash_jitter(install_id);
-
-            assert!(
-                jitter < 600,
-                "Jitter {} out of bounds for install_id '{}'",
-                jitter,
-                install_id
-            );
+    /// The branch the old private copy did not have at all: with no install_id
+    /// the real function falls back to `SystemTime` nanos, which is a moving
+    /// value and must still be bounded.
+    #[test]
+    fn a_device_with_no_install_id_still_gets_bounded_jitter() {
+        let (_dir, store) = store_with(None);
+        assert!(store.get().install_id.is_none(), "fixture must have no id");
+        for _ in 0..20 {
+            let jitter = compute_jitter_secs(&store);
+            assert!(jitter < 600, "fallback jitter {jitter} out of bounds");
         }
     }
 
-    /// Deterministic jitter using install_id hash (no config dependency for testing)
-    fn compute_hash_jitter(seed: &str) -> u64 {
-        const MAX_JITTER_SECS: u64 = 600;
-        seed.as_bytes().iter().map(|b| *b as u64).sum::<u64>() % MAX_JITTER_SECS
+    fn code_only(src: &str) -> String {
+        src.lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
-    fn should_auto_install(current: &str, latest: &str, auto_update: bool) -> bool {
-        auto_update && current != latest
+    /// Source between two markers, comments stripped. Scoped to a region rather
+    /// than the whole file so a match somewhere else cannot satisfy it.
+    fn region(from: &str, to: &str) -> String {
+        let code = code_only(include_str!("updater_auto.rs"));
+        let start = code.find(from).unwrap_or_else(|| panic!("missing {from}"));
+        let end = code[start..]
+            .find(to)
+            .map(|i| start + i)
+            .unwrap_or(code.len());
+        code[start..end].to_string()
+    }
+
+    /// The auto_update config flag must gate the cycle. Deleting this check
+    /// would make FEM install updates on devices whose owner turned auto-update
+    /// off — which is why it is worth pinning even though it cannot be called.
+    #[test]
+    fn the_update_cycle_is_gated_on_the_auto_update_flag() {
+        let spawn = region(
+            "pub async fn spawn_auto_updater",
+            "async fn check_and_install",
+        );
+        // Assembled at runtime: this file is what the assertion scans, so a
+        // contiguous literal here would match itself.
+        let gate = format!("!cfg.auto{}update", '_');
+        let call = format!("check_and_install{}update(", '_');
+        assert!(
+            spawn.contains(&gate),
+            "the update cycle must skip when auto_update is off"
+        );
+        let gate_at = spawn.find(&gate).expect("gate present");
+        let call_at = spawn.find(&call).expect("the cycle must run the check");
+        assert!(
+            gate_at < call_at,
+            "the flag must be checked BEFORE the update check runs, or a device \
+             with auto-update disabled still reaches the installer"
+        );
+    }
+
+    /// The defensive equality check that stops a re-install of the version
+    /// already running.
+    #[test]
+    fn an_update_matching_the_running_version_is_not_installed() {
+        let check = region(
+            "async fn check_and_install_update",
+            "fn compute_jitter_secs",
+        );
+        let needle = format!("update.version == cur{}", "rent");
+        assert!(
+            check.contains(&needle),
+            "the installer must skip an update whose version equals the running one"
+        );
     }
 }
 
