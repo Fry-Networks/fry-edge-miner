@@ -109,6 +109,13 @@ mod tests {
 
     /// The ordering is a product contract: adding the second required
     /// integration must always be worth more than any single optional.
+    ///
+    /// clippy calls these "constant" assertions, and they are -- today. That is
+    /// exactly what makes them a guard rather than a tautology: change any of
+    /// the three constants so the ordering no longer holds and this test turns
+    /// red. Silenced, not "fixed", because rewriting it to read the constants
+    /// indirectly would only hide the check from the linter.
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn boost_ordering_contract_holds() {
         assert!(SECOND_REQUIRED_BOOST > OFFICIAL_PARTNER_BOOST);

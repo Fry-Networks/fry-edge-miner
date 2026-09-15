@@ -394,10 +394,7 @@ mod wp6_spawn_tests {
         let started = std::time::Instant::now();
         let r = spawn_bounded("wp6-stall", Duration::from_millis(300), || {
             std::thread::sleep(Duration::from_secs(3));
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                "creation finished far too late",
-            ))
+            Err(io::Error::other("creation finished far too late"))
         });
         let elapsed = started.elapsed();
         assert!(

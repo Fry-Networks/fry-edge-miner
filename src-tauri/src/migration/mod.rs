@@ -184,6 +184,17 @@ pub fn plan_migration(installation: &FryHubInstallation, wallet: Option<String>)
     }
 }
 
+/// Execute the migration plan
+pub fn execute_migration(plan: &MigrationPlan) -> MigrationResult {
+    info!(fem_key = plan.fem_key, "Executing migration");
+
+    MigrationResult {
+        fem_key: plan.fem_key.clone(),
+        enabled_integrations: plan.integrations.clone(),
+        migrated_keys: plan.source_keys.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,16 +294,5 @@ mod tests {
 
         // No production API calls: this test only calls detect + plan,
         // never execute_migration or notify_migration
-    }
-}
-
-/// Execute the migration plan
-pub fn execute_migration(plan: &MigrationPlan) -> MigrationResult {
-    info!(fem_key = plan.fem_key, "Executing migration");
-
-    MigrationResult {
-        fem_key: plan.fem_key.clone(),
-        enabled_integrations: plan.integrations.clone(),
-        migrated_keys: plan.source_keys.clone(),
     }
 }

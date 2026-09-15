@@ -32,7 +32,7 @@ mod tests {
     #[test]
     fn test_valid_address() {
         // 58 chars of valid base32
-        let addr = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA4";
+        let _addr = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA4";
         // Actually needs to be exactly 58 valid base32 chars
         let addr = "A".repeat(58);
         assert!(validate_address(&addr).is_ok());

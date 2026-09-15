@@ -831,10 +831,11 @@ mod recovery_tests {
     const COOLDOWN: Duration = Duration::from_secs(300);
 
     fn cfg_with(device_token: Option<&str>) -> crate::config::FemConfig {
-        let mut cfg = crate::config::FemConfig::default();
-        cfg.api_token = "bootstrap-token".to_string();
-        cfg.device_token = device_token.map(|s| s.to_string());
-        cfg
+        crate::config::FemConfig {
+            api_token: "bootstrap-token".to_string(),
+            device_token: device_token.map(|s| s.to_string()),
+            ..Default::default()
+        }
     }
 
     // Field reports (georgeparis, tickler): "keys and wallet go missing after

@@ -760,8 +760,6 @@ fn compute_jitter_secs(config: &Arc<ConfigStore>) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_should_auto_install_decision() {
         // This test verifies the decision logic:
@@ -790,12 +788,7 @@ mod tests {
         let test_ids = vec!["install-abc123", "install-xyz789", ""];
 
         for install_id in test_ids {
-            // Simulate a config
-            let jitter = if install_id.is_empty() {
-                compute_hash_jitter(install_id)
-            } else {
-                compute_hash_jitter(install_id)
-            };
+            let jitter = compute_hash_jitter(install_id);
 
             assert!(
                 jitter < 600,
