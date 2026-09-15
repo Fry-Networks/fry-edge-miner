@@ -68,10 +68,12 @@ jobs:
           # Formatting gate. rustfmt.toml pins the target (stock 2021-edition
           # rustfmt), so this catches drift rather than imposing a new style.
           cargo fmt --check
-          # Lint gate. Scoped to the bin target on purpose: --all-targets also
-          # lints test code, where 10 warnings live inside the protected
-          # pawns_*_tests.rs files that the harness contract forbids editing.
-          cargo clippy --release -- -D warnings
+          # Lint gate, now including test code. It was bin-only while warnings
+          # still lived in the test modules; those are cleared, so the gate can
+          # cover what it was always meant to. Test code is where the tripwires
+          # live, and an unused import there is how a tripwire quietly stops
+          # testing what it claims to.
+          cargo clippy --all-targets --release -- -D warnings
           # Tests now run in PARALLEL. They previously needed --test-threads=1
           # because three fryvpn tests raced on process-global env vars; that is
           # fixed with a mutex + RAII restore guard, so the default runner is
