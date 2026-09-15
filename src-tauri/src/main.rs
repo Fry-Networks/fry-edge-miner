@@ -240,6 +240,11 @@ fn main() {
             logging::init_logging(&log_dir)
                 .unwrap_or_else(|e| eprintln!("Warning: failed to initialize logging: {}", e));
 
+            // Restore the user's debug-logging choice. The sink is always
+            // installed; this is what decides whether it writes. Must happen
+            // after init_logging, which is what creates the sink.
+            logging::debug_sink::set_enabled(config_store.get().debug_logging_enabled);
+
             let supervisor = Arc::new(Mutex::new(Supervisor::new(log_dir.clone())));
 
             // Integration registry
@@ -1047,6 +1052,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::debug::export_debug_bundle,
+            commands::debug::get_debug_log_path,
+            commands::debug::toggle_debug_logging,
             commands::integration::get_integrations,
             commands::integration::install_integration,
             commands::integration::toggle_integration,

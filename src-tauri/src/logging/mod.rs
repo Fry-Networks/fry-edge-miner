@@ -1,3 +1,4 @@
+pub mod debug_sink;
 pub mod scrubber;
 
 use std::path::Path;
@@ -42,43 +43,71 @@ pub(crate) fn build_file_writer(log_dir: &Path) -> std::io::Result<(NonBlocking,
 /// - Serial-like long hex → [SERIAL]
 pub fn init_logging(log_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use tracing_subscriber::fmt::format::FmtSpan;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::Layer;
 
-    #[cfg(debug_assertions)]
-    {
-        // Dev: stdout only
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    // The env filter is now a PER-LAYER filter on the main sink rather than a
+    // global one. That keeps `fem.log` behaving exactly as before (including
+    // RUST_LOG overrides) while still letting the debug layer see DEBUG events,
+    // which a global "info" filter would discard before any layer ran.
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    // Opt-in debug sink. Always constructed; the toggle is enforced inside its
+    // writer, not by adding or removing this layer — see `debug_sink`.
+    let debug_dir = debug_sink::debug_log_dir(log_dir);
+    let debug_layer = match debug_sink::build_debug_writer(&debug_dir) {
+        Ok((writer, guard)) => {
+            // Same trap as LOG_GUARD: park it or every line is discarded.
+            debug_sink::park_guard(guard);
+            if let Err(e) = debug_sink::prune_debug_logs(&debug_dir, debug_sink::DEBUG_LOG_MAX_AGE)
+            {
+                eprintln!("Warning: could not prune old debug logs: {}", e);
+            }
+            Some(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(debug_sink::ScrubbingMakeWriter::new(writer))
+                    .with_ansi(false)
+                    .with_span_events(FmtSpan::CLOSE)
+                    .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG),
             )
-            .with_span_events(FmtSpan::CLOSE)
-            .init();
-        return Ok(());
-    }
+        }
+        Err(e) => {
+            // A debug sink that cannot be created must not take logging down
+            // with it.
+            eprintln!("Warning: debug logging unavailable: {}", e);
+            None
+        }
+    };
+
+    // Dev: stdout. Release: daily rotating files.
+    #[cfg(debug_assertions)]
+    let main_layer = tracing_subscriber::fmt::layer()
+        .with_span_events(FmtSpan::CLOSE)
+        .with_filter(env_filter);
 
     #[cfg(not(debug_assertions))]
-    {
-        // Release: daily rotating files with scrubbing
+    let main_layer = {
         let (non_blocking, guard) = build_file_writer(log_dir)?;
-
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-            )
+        // Park the guard for the process lifetime. Letting it drop here is
+        // exactly the bug this replaces.
+        let _ = LOG_GUARD.set(guard);
+        tracing_subscriber::fmt::layer()
             .with_writer(non_blocking)
             // Without this the file gets terminal colour escapes — 372 of them
             // in a 22-line sample — which makes a support bundle painful to read.
             .with_ansi(false)
             .with_span_events(FmtSpan::CLOSE)
-            .init();
+            .with_filter(env_filter)
+    };
 
-        // Park the guard for the process lifetime. Letting it drop here is
-        // exactly the bug this replaces.
-        let _ = LOG_GUARD.set(guard);
+    tracing_subscriber::registry()
+        .with(main_layer)
+        .with(debug_layer)
+        .init();
 
-        Ok(())
-    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -149,6 +178,86 @@ mod tests {
             !text.contains("guard-dropped-marker"),
             "a dropped guard must not deliver log lines, but got: {:?}",
             text
+        );
+    }
+
+    /// The debug sink must be ADDITIVE. `init_logging` moved from a single
+    /// `fmt()` subscriber to a layered registry, and the failure mode of that
+    /// refactor is the new DEBUG-level layer dragging debug events into
+    /// `fem.log` too — quietly changing what every shipped device writes.
+    ///
+    /// Asserts on the composition itself (two sinks, the real per-layer
+    /// filters) rather than on `init_logging`, which installs a global
+    /// subscriber and can only run once per process.
+    #[test]
+    fn debug_events_reach_the_debug_sink_but_never_the_main_log() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::Layer;
+
+        #[derive(Clone, Default)]
+        struct Shared(Arc<Mutex<Vec<u8>>>);
+        impl Shared {
+            fn text(&self) -> String {
+                String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+            }
+        }
+        impl std::io::Write for Shared {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Shared {
+            type Writer = Shared;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let main_sink = Shared::default();
+        let debug_sink_out = Shared::default();
+
+        let subscriber = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(main_sink.clone())
+                    .with_ansi(false)
+                    .with_filter(tracing_subscriber::EnvFilter::new("info")),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(debug_sink_out.clone())
+                    .with_ansi(false)
+                    .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG),
+            );
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!("debug-only-marker");
+            tracing::info!("info-marker");
+        });
+
+        let main = main_sink.text();
+        let dbg = debug_sink_out.text();
+
+        assert!(
+            !main.contains("debug-only-marker"),
+            "fem.log must keep its INFO floor, got: {main:?}"
+        );
+        assert!(
+            main.contains("info-marker"),
+            "fem.log must still receive INFO, got: {main:?}"
+        );
+        assert!(
+            dbg.contains("debug-only-marker"),
+            "the debug sink must receive DEBUG, got: {dbg:?}"
+        );
+        assert!(
+            dbg.contains("info-marker"),
+            "the debug sink is DEBUG-and-above, so INFO belongs in it too: {dbg:?}"
         );
     }
 

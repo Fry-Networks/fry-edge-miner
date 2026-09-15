@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ExternalLink, HardDrive, Info, Key, Monitor, Shield, Wallet } from 'lucide-react'
+import { Bug, ExternalLink, HardDrive, Info, Key, Monitor, Shield, Wallet } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import Btn from '../components/primitives/Btn'
 import CopyField from '../components/primitives/CopyField'
@@ -7,7 +7,7 @@ import Divider from '../components/primitives/Divider'
 import Lbl from '../components/primitives/Lbl'
 import SettingRow from '../components/SettingRow'
 import Tog from '../components/primitives/Tog'
-import type { FemConfig } from '../lib/types'
+import type { DebugLogInfo, FemConfig } from '../lib/types'
 import { extractErrorMessage } from '../lib/error'
 import { invokeWithFallback, safeInvoke } from '../lib/tauri'
 import { useDevice } from '../hooks/useDevice'
@@ -84,6 +84,11 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
   const [walletDraft, setWalletDraft] = useState('')
   const [walletError, setWalletError] = useState('')
   const [walletSaving, setWalletSaving] = useState(false)
+  // Debug logging: a scrubbed, shareable copy of the log stream, off by default.
+  const [debugLog, setDebugLog] = useState<DebugLogInfo | null>(null)
+  const [debugLogError, setDebugLogError] = useState('')
+  const [debugLogSaving, setDebugLogSaving] = useState(false)
+
   // BUG 1/4: storage location.
   const [storage, setStorage] = useState<StorageLocation | null>(null)
   const [storageDraft, setStorageDraft] = useState('')
@@ -144,6 +149,30 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
       setExportResult({ ok: false, text: extractErrorMessage(err) })
     } finally {
       setExporting(false)
+    }
+  }
+
+  // The path is resolved by the backend rather than rebuilt here: the UI must
+  // show the folder that is actually being written to, not a guess at it.
+  useEffect(() => {
+    safeInvoke<DebugLogInfo>('get_debug_log_path')
+      .then((info) => setDebugLog(info))
+      .catch(() => setDebugLog(null))
+  }, [])
+
+  const handleDebugLogToggle = async (next: boolean) => {
+    setDebugLogError('')
+    setDebugLogSaving(true)
+    // Do not move the switch optimistically. If the save fails the backend
+    // rolls its runtime state back, and a switch showing "on" over a sink that
+    // is not writing is worse than a switch that did not move.
+    try {
+      const info = await safeInvoke<DebugLogInfo>('toggle_debug_logging', { enabled: next })
+      setDebugLog(info)
+    } catch (err) {
+      setDebugLogError(extractErrorMessage(err))
+    } finally {
+      setDebugLogSaving(false)
     }
   }
 
@@ -470,6 +499,34 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
               Use default
             </Btn>
           )}
+        </div>
+      </SettingSection>
+
+      <SettingSection Icon={Bug} ico="var(--amb)" label="Debug Logging">
+        <SettingRow
+          label="Write detailed debug logs"
+          sub="Integration health checks, process starts and crashes, API and reward activity"
+        >
+          <Tog
+            checked={debugLog?.enabled ?? false}
+            label="Debug logging"
+            data-testid="debug-logging-toggle"
+            disabled={debugLogSaving || debugLog === null}
+            onChange={(v) => handleDebugLogToggle(v)}
+          />
+        </SettingRow>
+        {debugLogError && (
+          <div style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--red)', marginTop: 8 }}>
+            {debugLogError}
+          </div>
+        )}
+        <Lbl sx={{ marginTop: 12, marginBottom: 6 }}>Log folder</Lbl>
+        <CopyField val={debugLog?.path ?? ''} />
+        <div style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t2)', marginTop: 10, lineHeight: 1.5 }}>
+          Share this folder with Fry Networks support when reporting issues. Wallet addresses,
+          tokens and your Windows username are removed before anything is written, so these files
+          are safe to send. Off by default; nothing is written until you turn it on. Logs older
+          than 7 days are deleted automatically.
         </div>
       </SettingSection>
 

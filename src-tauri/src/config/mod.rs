@@ -76,6 +76,13 @@ pub struct FemConfig {
     /// re-upsert the same row. Cleared once registration completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_install_id: Option<String>,
+    /// User-facing debug logging. OFF by default: no device changes behaviour
+    /// until someone opts in from Settings.
+    ///
+    /// When on, FEM writes a scrubbed, DEBUG-and-above copy of its log stream
+    /// to `<app_log_dir>/debug-logs/` for the user to hand to support.
+    #[serde(default)]
+    pub debug_logging_enabled: bool,
     /// B3: every key in fem_config.json this build does not recognise.
     ///
     /// `ConfigStore` saves by serializing this whole struct over the file, so
@@ -130,6 +137,7 @@ impl Default for FemConfig {
             hardening_applied_version: None,
             storage_dir: None,
             pending_install_id: None,
+            debug_logging_enabled: false,
             extra: serde_json::Map::new(),
         }
     }

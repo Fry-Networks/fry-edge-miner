@@ -120,8 +120,13 @@ fn redact_username(s: &str) -> String {
     // reading a bundle and identifies nobody. `${1}` rather than `$1` because
     // the next character is `:`, which would otherwise be read as part of a
     // capture-group name.
+    // The separator is `+`, not a single character, because `tracing`'s fmt
+    // layer ESCAPES backslashes inside field values: a spawn event reaches disk
+    // as `command="C:\\Users\\name\\..."`. The single-separator pattern skipped
+    // every one of those, which is the most common way a Windows path appears
+    // in a real log. Found on a live device, not by the tests above.
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"(?i)([A-Z]):[\\/]Users[\\/]([^\\/]+)").unwrap());
+    let re = RE.get_or_init(|| Regex::new(r"(?i)([A-Z]):[\\/]+Users[\\/]+([^\\/]+)").unwrap());
     re.replace_all(s, r"${1}:\Users\<user>").to_string()
 }
 
@@ -156,6 +161,32 @@ mod tests {
             "username leaked from a D: path: {scrubbed}"
         );
         assert!(scrubbed.contains("<user>"), "{scrubbed}");
+    }
+
+    /// Found by the live canary, not by a unit test: `tracing`'s fmt layer
+    /// ESCAPES backslashes inside field values, so a spawn event lands on disk
+    /// as `C:\Users\name` with a doubled separator. The single-separator
+    /// pattern missed it, which meant the most common shape of a Windows path
+    /// in a real log -- inside a field value -- leaked the username verbatim.
+    #[test]
+    fn an_escaped_backslash_user_path_is_redacted() {
+        // Two backslashes per separator, exactly as the canary wrote it. The
+        // first version of this test had one, passed immediately, and proved
+        // nothing -- the single-separator form already worked.
+        let line = r#"command="C:\\Users\\jdoe\\AppData\\Local\\app.exe""#;
+        assert!(
+            line.contains(r"C:\\Users"),
+            "this test is only meaningful against the DOUBLED separator"
+        );
+        let out = scrub_line(line);
+        assert!(
+            !out.contains("jdoe"),
+            "username must be redacted, got {out:?}"
+        );
+        assert!(
+            out.contains("<user>"),
+            "expected the <user> marker, got {out:?}"
+        );
     }
 
     #[test]

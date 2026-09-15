@@ -120,6 +120,8 @@ export interface FemConfig {
   storage_dir?: string | null
   /** BUG 1/4: the root actually in use this session (differs until restart). */
   storage_dir_active?: string
+  /** Scrubbed debug-log sink; off by default. */
+  debug_logging_enabled?: boolean
   config_warning?: string | null
   integrations_enabled: Record<string, boolean>
   api_base_url: string
@@ -188,4 +190,10 @@ export function awaitsUserSetup(health: HealthStatus): boolean {
 export function sentinelFundingAddress(health: HealthStatus): string | null {
   const reason = unhealthyReason(health)
   return reason?.match(/sent1[0-9a-z]+/)?.[0] ?? null
+}
+
+/** Where the scrubbed debug logs go, and whether anything is going there. */
+export interface DebugLogInfo {
+  path: string
+  enabled: boolean
 }

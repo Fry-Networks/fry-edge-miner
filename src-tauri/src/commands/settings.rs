@@ -23,6 +23,8 @@ pub struct FemConfigView {
     /// `storage_dir` until the app is restarted, which is how the UI knows to
     /// show "restart to use this location".
     pub storage_dir_active: String,
+    /// Whether the scrubbed debug-log sink is currently writing.
+    pub debug_logging_enabled: bool,
 }
 
 impl From<FemConfig> for FemConfigView {
@@ -43,6 +45,7 @@ impl From<FemConfig> for FemConfigView {
             storage_dir_active: crate::integrations::download::partners_base_dir()
                 .to_string_lossy()
                 .into_owned(),
+            debug_logging_enabled: cfg.debug_logging_enabled,
         }
     }
 }

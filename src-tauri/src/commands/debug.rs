@@ -158,3 +158,57 @@ mod tests {
         assert!(!info.is_empty());
     }
 }
+
+/// What the Settings page needs to render the Debug Logging section: where the
+/// files go, and whether anything is being written there right now.
+#[derive(Debug, serde::Serialize)]
+pub struct DebugLogInfo {
+    /// Absolute path, shown to the user so they can find the folder. Resolved
+    /// rather than described, because a user cannot act on "%LOCALAPPDATA%".
+    pub path: String,
+    pub enabled: bool,
+}
+
+fn resolve_debug_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    let log_dir = app
+        .path()
+        .app_log_dir()
+        .map_err(|e| format!("Could not resolve the log directory: {}", e))?;
+    Ok(crate::logging::debug_sink::debug_log_dir(&log_dir))
+}
+
+#[tauri::command]
+pub async fn get_debug_log_path(app: tauri::AppHandle) -> Result<DebugLogInfo, String> {
+    Ok(DebugLogInfo {
+        path: resolve_debug_dir(&app)?.to_string_lossy().into_owned(),
+        enabled: crate::logging::debug_sink::is_enabled(),
+    })
+}
+
+/// Flip debug logging and persist the choice.
+///
+/// The live toggle is flipped FIRST so the switch takes effect in this process
+/// immediately; persistence only decides what happens after the next restart.
+/// If the write fails the runtime state is rolled back, so what the UI reports
+/// and what the process is doing cannot drift apart.
+#[tauri::command]
+pub async fn toggle_debug_logging(
+    app: tauri::AppHandle,
+    enabled: bool,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<DebugLogInfo, String> {
+    let previous = crate::logging::debug_sink::is_enabled();
+    crate::logging::debug_sink::set_enabled(enabled);
+
+    if let Err(e) = state.config.update(|c| c.debug_logging_enabled = enabled) {
+        crate::logging::debug_sink::set_enabled(previous);
+        return Err(format!("Could not save the debug logging setting: {}", e));
+    }
+
+    tracing::info!(enabled, "Debug logging toggled");
+    Ok(DebugLogInfo {
+        path: resolve_debug_dir(&app)?.to_string_lossy().into_owned(),
+        enabled,
+    })
+}
