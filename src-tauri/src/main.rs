@@ -192,6 +192,27 @@ fn main() {
                 cfg.effective_api_token(),
             ));
 
+            let log_dir = app
+                .path()
+                .app_log_dir()
+                .expect("failed to resolve app log dir");
+
+            // Initialize logging with scrubbing (rotating 10×5MB files in release).
+            //
+            // This MUST come before the startup hooks spawned below. It used to
+            // sit after them, so everything those tasks logged at startup was
+            // emitted with no subscriber installed and silently dropped — the
+            // version-change heartbeat's own INFO line never appeared in any
+            // log while the WARN it emits seconds later did, which is why a
+            // token-rotation bug in that hook survived several releases.
+            logging::init_logging(&log_dir)
+                .unwrap_or_else(|e| eprintln!("Warning: failed to initialize logging: {}", e));
+
+            // Restore the user's debug-logging choice. The sink is always
+            // installed; this is what decides whether it writes. Must happen
+            // after init_logging, which is what creates the sink.
+            logging::debug_sink::set_enabled(config_store.get().debug_logging_enabled);
+
             // BUG 10/RC4: finish a half-done registration FIRST. The two hooks
             // below both match on (miner_key, install_id) and return early
             // without an install_id, so on a half-registered device they can
@@ -231,20 +252,6 @@ fn main() {
             }
 
             // Process supervisor (created before registry — MysteriumIntegration needs Arc<Mutex<Supervisor>>)
-            let log_dir = app
-                .path()
-                .app_log_dir()
-                .expect("failed to resolve app log dir");
-
-            // Initialize logging with scrubbing (rotating 10×5MB files in release)
-            logging::init_logging(&log_dir)
-                .unwrap_or_else(|e| eprintln!("Warning: failed to initialize logging: {}", e));
-
-            // Restore the user's debug-logging choice. The sink is always
-            // installed; this is what decides whether it writes. Must happen
-            // after init_logging, which is what creates the sink.
-            logging::debug_sink::set_enabled(config_store.get().debug_logging_enabled);
-
             let supervisor = Arc::new(Mutex::new(Supervisor::new(log_dir.clone())));
 
             // Integration registry

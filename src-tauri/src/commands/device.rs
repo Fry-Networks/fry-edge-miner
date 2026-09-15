@@ -1126,6 +1126,20 @@ pub fn should_report_version_change(stored: Option<&str>, current: &str) -> bool
     stored != Some(current)
 }
 
+/// PURE: may a version-change heartbeat be recorded as successful, given what
+/// the server sent back?
+///
+/// The installation endpoint treats a FEM key as open registration and mints a
+/// NEW device token on every upsert, so a heartbeat that does not come back
+/// with one has left this device holding a token the server has already
+/// replaced. Recording that as success would persist `last_reported_version`
+/// and stop us ever retrying, while the device sits on dead credentials.
+/// Treating it as a failure costs one duplicate POST on the next launch, which
+/// is idempotent.
+pub fn version_heartbeat_succeeded(device_token: Option<&str>) -> bool {
+    device_token.map(str::trim).is_some_and(|t| !t.is_empty())
+}
+
 /// BUG 11/12: on every launch of a device that is already registered
 /// (miner_key + install_id present), if the installed binary version
 /// differs from the last version this device told the server about, send an
@@ -1171,8 +1185,35 @@ pub async fn attempt_version_change_heartbeat(
         device_name: cfg.device_name.clone(),
     };
 
+    // The server mints a NEW device token on every installation upsert, so the
+    // response must be adopted — discarding it (as this call site used to)
+    // leaves the process authenticating with a token the server just replaced,
+    // which 401s the very next PoC submission. Mirrors attempt_token_recovery.
     let heartbeat_ok = match crate::api::installations::register(api_client, &heartbeat).await {
-        Ok(_) => true,
+        Ok(resp) => {
+            if !version_heartbeat_succeeded(resp.device_token.as_deref()) {
+                tracing::warn!(
+                    miner_key = %miner_key,
+                    "Version-change heartbeat returned no device token — not recording it, \
+                     so the next launch retries rather than stranding this device"
+                );
+                false
+            } else {
+                let token = resp.device_token.unwrap_or_default();
+                match config.update(|c| c.device_token = Some(token.clone())) {
+                    Ok(()) => {
+                        // Adopt it in-process too: persisting alone would leave
+                        // THIS run 401ing until the app restarts.
+                        api_client.set_bearer_token(token);
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Rotated device token could not be persisted");
+                        false
+                    }
+                }
+            }
+        }
         Err(e) => {
             tracing::warn!(error = %e, "Version-change heartbeat failed — will retry on next launch");
             false
@@ -1234,6 +1275,85 @@ mod version_change_tests {
     fn no_prior_report_on_a_registered_device_must_report() {
         // e.g. a device registered before this field existed.
         assert!(should_report_version_change(None, "0.4.28"));
+    }
+}
+
+/// The version-change heartbeat POSTs to the installation endpoint, which for a
+/// FEM key is open registration and therefore mints a NEW device token every
+/// time. v0.4.32 and earlier discarded the response (`Ok(_) => true`) while the
+/// other four heartbeat call sites all persisted it, so every auto-update left
+/// the device holding a token the server had just replaced.
+///
+/// Observed on a real device, v0.4.31 -> v0.4.32:
+///   01:22:04  WARN Version-change lease action did not grant
+///   01:22:16  WARN PoC submission failed  HTTP 401 Unauthorized: Invalid token
+///   01:22:21  WARN Server rejected the device token (HTTP 401) — re-registering
+///
+/// which is the Discord report quoted above ("auto-update disconnects the
+/// device from the dashboard"). The stale `software_version_installed` in
+/// PoC.installations was the visible residue of the same thing.
+#[cfg(test)]
+mod version_heartbeat_token_tests {
+    use super::version_heartbeat_succeeded;
+
+    #[test]
+    fn a_returned_token_means_the_heartbeat_can_be_recorded() {
+        assert!(version_heartbeat_succeeded(Some("fem_abc123")));
+    }
+
+    /// The case that matters: no token back means this device is now holding
+    /// credentials the server has already rotated away from. Recording that as
+    /// success persists `last_reported_version` and guarantees we never retry.
+    #[test]
+    fn no_returned_token_must_not_be_recorded_as_success() {
+        assert!(
+            !version_heartbeat_succeeded(None),
+            "a heartbeat that returned no token has left this device on a dead \
+             token — it must retry, not persist last_reported_version"
+        );
+    }
+
+    /// A blank token is not a token. Adopting one would set the bearer header
+    /// to an empty string and 401 every subsequent request.
+    #[test]
+    fn a_blank_token_is_treated_as_no_token() {
+        assert!(!version_heartbeat_succeeded(Some("")));
+        assert!(!version_heartbeat_succeeded(Some("   ")));
+    }
+
+    /// The predicate above has been unit-testable all along; what actually broke
+    /// was the CALL SITE, which discarded the response entirely. That path is an
+    /// async fn doing real network I/O and cannot be unit-tested, so it is
+    /// pinned by source assertion — scoped to this one function, comments
+    /// stripped, needles assembled at runtime so the assertion cannot match
+    /// itself.
+    #[test]
+    fn the_version_change_heartbeat_adopts_the_rotated_token() {
+        let code: String = include_str!("device.rs")
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let start = code
+            .find("pub async fn attempt_version_change_heartbeat")
+            .expect("the version-change hook must exist");
+        let end = code[start..]
+            .find("\n#[cfg(test)]")
+            .map(|i| start + i)
+            .unwrap_or(code.len());
+        let body = &code[start..end];
+
+        let persist = format!("c.device_token = Som{}", "e(token");
+        let adopt = format!("api_client.set_bearer{}token(", '_');
+        assert!(
+            body.contains(&persist),
+            "the rotated token must be persisted, or the next launch starts on a dead token"
+        );
+        assert!(
+            body.contains(&adopt),
+            "the rotated token must also be adopted in-process, or THIS run keeps \
+             401ing until the app is restarted"
+        );
     }
 }
 

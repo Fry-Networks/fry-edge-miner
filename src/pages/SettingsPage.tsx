@@ -523,10 +523,11 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
         <Lbl sx={{ marginTop: 12, marginBottom: 6 }}>Log folder</Lbl>
         <CopyField val={debugLog?.path ?? ''} />
         <div style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t2)', marginTop: 10, lineHeight: 1.5 }}>
-          Share this folder with Fry Networks support when reporting issues. Wallet addresses,
-          tokens and your Windows username are removed before anything is written, so these files
-          are safe to send. Off by default; nothing is written until you turn it on. Logs older
-          than 7 days are deleted automatically.
+          Share this folder with Fry Networks support when reporting issues, or just use Export
+          Debug Bundle below — it already includes these logs. Wallet addresses, tokens and your
+          Windows username are removed before anything is written, so these files are safe to
+          send. Off by default; nothing is written until you turn it on. Logs older than 7 days
+          are deleted automatically.
         </div>
       </SettingSection>
 
