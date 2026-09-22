@@ -33,6 +33,7 @@ export type IntgHintState =
   | 'unavailable'
   | 'installing'
   | 'setupRequired'
+  | 'setupRequiredFunding'
   | 'unhealthy'
 
 export function intgHintOverrides(state: string): Partial<IntegrationStatus> {
@@ -59,6 +60,15 @@ export function intgHintOverrides(state: string): Partial<IntegrationStatus> {
       return {
         enabled: true,
         health: { Unhealthy: 'Awaiting Storj setup — create a node auth token' },
+        lifecycle: 'Unhealthy',
+        version: '1.0.0'
+      }
+    case 'setupRequiredFunding':
+      // Verbatim shape of the Sentinel unfunded-account reason (sentinel.rs)
+      // — carries a sent1 address so sentinelFundingAddress() extracts it.
+      return {
+        enabled: true,
+        health: { Unhealthy: 'Sentinel node account not funded — send DVPN to sent1qqqqexample to activate this node' },
         lifecycle: 'Unhealthy',
         version: '1.0.0'
       }

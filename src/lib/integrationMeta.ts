@@ -177,3 +177,35 @@ export function isRequiredIntegration(id: string): boolean {
 }
 
 export const GATES = ['data', 'online', 'mac', 'pol', 'poi', 'poa']
+
+/**
+ * B17 D5: what to do about a "Setup required" badge, and where — frontend-
+ * only, no wire/Rust change. Deliberately makes no claim about provider
+ * cost (the Done-when forbids "unverified claims about provider costs");
+ * link to the provider's own page instead. Sentinel's `what` intentionally
+ * does not restate the funding sentence IntCard.tsx already shows in its own
+ * funding block, so the two cannot contradict.
+ */
+export interface SetupGuidance {
+  what: string
+  url: string
+  urlLabel: string
+}
+
+export const SETUP_GUIDANCE: Record<string, SetupGuidance> = {
+  iagon: {
+    what: 'Register a node at Iagon, then paste its authorization key below.',
+    url: 'https://app.iagon.com',
+    urlLabel: 'app.iagon.com'
+  },
+  storj: {
+    what: 'Create a node auth token and complete node identity at Storj.',
+    url: 'https://storj.io/host-a-node/',
+    urlLabel: 'storj.io'
+  },
+  sentinel: {
+    what: 'Sentinel Hub will not register this node until its own account holds DVPN.',
+    url: 'https://docs.sentinel.co/',
+    urlLabel: 'docs.sentinel.co'
+  }
+}

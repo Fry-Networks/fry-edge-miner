@@ -5,7 +5,7 @@ import { consentBadge } from '../lib/consentDialog'
 import { DISABLE_CONFIRM_MS, shouldConfirmDisable } from '../lib/disableConfirm'
 import { condenseError } from '../lib/error'
 import { integrationBadge } from '../lib/integrationBadge'
-import { isRequiredIntegration } from '../lib/integrationMeta'
+import { isRequiredIntegration, SETUP_GUIDANCE } from '../lib/integrationMeta'
 import { OFFICIAL_DISABLED_WARNING, REQUIRED_DISABLED_WARNING, SDK_REPORT_LINE } from '../lib/support'
 import { unhealthyReason, sentinelFundingAddress } from '../lib/types'
 import CopyField from './primitives/CopyField'
@@ -225,7 +225,10 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                 <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 2 }} /> {startError}
               </span>
             )}
-            {reason && st === 'err' && !startError && (
+            {/* B17 D5: also open for Setup required (not just st === 'err') —
+                once D1/D2 move a waiting-on-the-user partner like Sentinel
+                out of 'err', this gate must keep its funding block mounted. */}
+            {reason && (st === 'err' || stLbl === 'Setup required') && !startError && (
               fundingAddr ? (
                 <div
                   data-testid={`sentinel-fund-${id}`}
@@ -270,6 +273,29 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                   <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 2 }} /> {reason}
                 </span>
               )
+            )}
+            {stLbl === 'Setup required' && SETUP_GUIDANCE[id] && (
+              <span
+                role="note"
+                style={{
+                  fontFamily: 'var(--fb)',
+                  fontSize: 11,
+                  color: 'var(--amb)',
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: 4,
+                  minWidth: 0,
+                  maxWidth: 420,
+                  whiteSpace: 'normal',
+                  overflowWrap: 'anywhere',
+                  lineHeight: 1.4
+                }}
+              >
+                {SETUP_GUIDANCE[id].what}{' '}
+                <a href={SETUP_GUIDANCE[id].url} target="_blank" rel="noreferrer">
+                  {SETUP_GUIDANCE[id].urlLabel}
+                </a>
+              </span>
             )}
             {dockerNote && !startError && (
               <span
