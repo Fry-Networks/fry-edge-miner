@@ -54,28 +54,40 @@ type IntegrationEntry = (String, String, bool, Option<String>, bool, Option<Stri
 pub async fn get_integrations(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<Vec<IntegrationStatus>, String> {
-    // Snapshot registry metadata without holding the lock across any await point.
-    let (entries, available) = {
+    // Snapshot registry metadata without holding the lock across any await
+    // point — and, since B21, without holding it across the slow per-integration
+    // probes either. `installed_version()` shells out to PowerShell up to three
+    // times for SpaceAcres, each bounded at 20 s, and this runs on a 30 s poll;
+    // holding the registry mutex across that stalled the user's own click,
+    // because toggle_integration needs the same mutex.
+    //
+    // Only `is_enabled` and `available_count` actually need the lock.
+    let (handles, enabled_flags, available) = {
         let reg = state.registry.lock().map_err(|e| e.to_string())?;
         // Share the reporter's denominator so the per-integration contribution
         // the UI shows matches what actually gets submitted.
         let available = reg.available_count();
-        let entries: Vec<IntegrationEntry> = reg
-            .list()
+        let handles = reg.list();
+        let enabled_flags: std::collections::HashMap<String, bool> = handles
             .iter()
-            .map(|i| {
-                (
-                    i.id().to_string(),
-                    i.display_name().to_string(),
-                    reg.is_enabled(i.id()),
-                    i.installed_version(),
-                    i.requires_docker(),
-                    i.check_requirements().err(),
-                )
-            })
+            .map(|i| (i.id().to_string(), reg.is_enabled(i.id())))
             .collect();
-        (entries, available)
+        (handles, enabled_flags, available)
     };
+
+    let entries: Vec<IntegrationEntry> = handles
+        .iter()
+        .map(|i| {
+            (
+                i.id().to_string(),
+                i.display_name().to_string(),
+                enabled_flags.get(i.id()).copied().unwrap_or(false),
+                i.installed_version(),
+                i.requires_docker(),
+                i.check_requirements().err(),
+            )
+        })
+        .collect();
 
     // Read the most recent health check results written by the health loop in main.rs.
     let last = state.last_health.read().map_err(|e| e.to_string())?;
@@ -598,3 +610,72 @@ mod b14_enable_error_tests {
         );
     }
 }
+
+/// B21 — a 30 s poll must not stall the user's click.
+///
+/// `get_integrations` held the registry mutex across `installed_version()`,
+/// which for SpaceAcres shells out to PowerShell up to three times, each
+/// bounded at 20 s. `toggle_integration` needs the same mutex, so a poll in
+/// that state blocked the toggle the user had just flipped.
+#[cfg(test)]
+mod b21_poll_lock_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    const SLOW_PROBE: Duration = Duration::from_millis(300);
+
+    /// How long a second acquirer waits, given a worker that models one of the
+    /// two shapes. The handshake makes it deterministic: the worker signals
+    /// only once it has taken the lock, so the measurement can never start
+    /// before the contention it is measuring exists.
+    fn wait_for_lock(hold_across_slow_work: bool) -> Duration {
+        let lock = Arc::new(Mutex::new(()));
+        let (tx, rx) = mpsc::channel();
+
+        let worker = {
+            let lock = Arc::clone(&lock);
+            std::thread::spawn(move || {
+                let guard = lock.lock().unwrap();
+                tx.send(()).unwrap();
+                if hold_across_slow_work {
+                    std::thread::sleep(SLOW_PROBE);
+                    drop(guard);
+                } else {
+                    // The fix: snapshot, release, THEN do the slow work.
+                    drop(guard);
+                    std::thread::sleep(SLOW_PROBE);
+                }
+            })
+        };
+
+        rx.recv().expect("worker must take the lock first");
+        let started = Instant::now();
+        drop(lock.lock().unwrap());
+        let waited = started.elapsed();
+        worker.join().unwrap();
+        waited
+    }
+
+    #[test]
+    fn the_registry_lock_is_not_held_across_a_slow_per_integration_probe() {
+        let waited = wait_for_lock(false);
+        assert!(
+            waited < SLOW_PROBE / 2,
+            "a second acquirer waited {waited:?}; the guard is still held across the slow work"
+        );
+    }
+
+    /// The pre-fix shape, as an executable characterization rather than prose:
+    /// this is what made the user's click wait behind a 30 s poll.
+    #[test]
+    fn holding_the_lock_across_the_probe_is_what_made_the_click_wait() {
+        let waited = wait_for_lock(true);
+        assert!(
+            waited >= SLOW_PROBE / 2,
+            "expected the pre-fix shape to block; waited {waited:?}"
+        );
+    }
+}
+
