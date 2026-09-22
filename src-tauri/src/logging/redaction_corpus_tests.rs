@@ -76,8 +76,7 @@ fn a_node_mnemonic_env_assignment_is_redacted() {
 fn a_comma_separated_mixed_case_mnemonic_is_redacted() {
     // The original rule needs exactly 25 lowercase space-separated words and
     // has no case-insensitivity, so this form walked straight through it.
-    let words: Vec<&str> = std::iter::repeat("Abandon")
-        .take(23)
+    let words: Vec<&str> = std::iter::repeat_n("Abandon", 23)
         .chain(["Ability"])
         .collect();
     let line = format!("recovery: {}", words.join(", "));

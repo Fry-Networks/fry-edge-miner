@@ -67,9 +67,7 @@ fn the_process_error_mode_is_set_at_startup() {
     let call = code
         .find("suppress_process_hard_errors()")
         .expect("main's setup must set the process error mode");
-    let first_partner_start = code
-        .find("integration.start()")
-        .unwrap_or_else(|| code.len());
+    let first_partner_start = code.find("integration.start()").unwrap_or(code.len());
     assert!(
         call < first_partner_start,
         "the error mode must be set BEFORE the first partner can be started, \
