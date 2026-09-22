@@ -9,7 +9,8 @@ export const AWAITING_MARKERS = [
   'Awaiting Storj setup',
   'needs your consent',
   'node token not provisioned',
-  'node account not funded'
+  'node account not funded',
+  'Awaiting fryDVPN funding'
 ] as const
 
 export function reasonAwaitsUserSetup(reason: string | null): boolean {

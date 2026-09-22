@@ -25,8 +25,12 @@ function parseRustMarkers(src: string): string[] {
 }
 
 describe('setup-required marker parity with src-tauri (B17 D2)', () => {
-  it('the TS AWAITING_MARKERS list matches the Rust one exactly', () => {
+  it('the TS AWAITING_MARKERS set matches the Rust one exactly', () => {
+    // Compared as sets, not sequences: B17 D1 (Iagon/Sentinel) and B7 D4
+    // (fryvpn funding) are independent Rust-side edits to the same array,
+    // each free to append in whatever order lands first — the requirement
+    // is that the two SETS of markers agree, not their order.
     const rustMarkers = parseRustMarkers(RUST_SRC)
-    expect([...AWAITING_MARKERS]).toEqual(rustMarkers)
+    expect([...AWAITING_MARKERS].sort()).toEqual([...rustMarkers].sort())
   })
 })
