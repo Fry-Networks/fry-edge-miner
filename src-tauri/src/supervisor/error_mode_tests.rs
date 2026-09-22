@@ -33,21 +33,21 @@ fn code_only(src: &str) -> String {
 
 /// SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX — the two boxes a partner's
 /// loader can put on the user's desktop.
-#[test]
-fn the_requested_mode_suppresses_both_loader_dialogs() {
+///
+/// A `const` assertion, not a `#[test]`: the operands are compile-time
+/// constants, so a runtime check could never fail. This one fails the build.
+const _: () = {
     const SEM_FAILCRITICALERRORS: u32 = 0x0001;
     const SEM_NOOPENFILEERRORBOX: u32 = 0x8000;
-    assert_eq!(
-        HARD_ERROR_SUPPRESSION_MODE & SEM_FAILCRITICALERRORS,
-        SEM_FAILCRITICALERRORS,
+    assert!(
+        HARD_ERROR_SUPPRESSION_MODE & SEM_FAILCRITICALERRORS == SEM_FAILCRITICALERRORS,
         "the Bad Image / critical-error box must be suppressed"
     );
-    assert_eq!(
-        HARD_ERROR_SUPPRESSION_MODE & SEM_NOOPENFILEERRORBOX,
-        SEM_NOOPENFILEERRORBOX,
+    assert!(
+        HARD_ERROR_SUPPRESSION_MODE & SEM_NOOPENFILEERRORBOX == SEM_NOOPENFILEERRORBOX,
         "the OpenFile error box must be suppressed"
     );
-}
+};
 
 /// The defect in one line: a process-scope setter has to exist at all.
 #[test]
@@ -77,6 +77,10 @@ fn the_process_error_mode_is_set_at_startup() {
 
 /// The thread-scoped guard is still correct for the WP6 case it was written
 /// for, and `wp6_spawn_tests` depends on it. It must not be removed.
+///
+/// NON-REGRESSION GUARD — this one PASSES on pre-fix source on purpose. Its
+/// job is to fail on a FUTURE deletion, not to prove anything about this
+/// change. Every other source scan in this file fails against v0.4.33.
 #[test]
 fn the_existing_per_thread_guard_is_left_in_place() {
     let code = code_only(include_str!("process.rs"));
@@ -95,9 +99,21 @@ fn the_existing_per_thread_guard_is_left_in_place() {
 /// engine/WSL tree, so it is the one launch that opts out. Olostep and
 /// space-acres are FEM-managed partners and SHOULD inherit — that is precisely
 /// the Done-when, "spawned partners never raise system modal dialogs".
+/// Does this source actually PASS the opt-out flag at a spawn?
+///
+/// Deliberately not a bare `contains`: neither over `code_only` output, which
+/// truncates a line at the first `//` anywhere on it and so can let a negative
+/// assertion pass on text that was merely removed; nor over raw source, which
+/// would count the flag being NAMED in a doc comment explaining the mechanism.
+/// A line carrying both `creation_flags(` and the constant is the flag being
+/// used, which is the only thing that changes behaviour.
+fn opts_out_of_the_error_mode(src: &str) -> bool {
+    src.lines()
+        .any(|l| l.contains("creation_flags(") && l.contains("CREATE_DEFAULT_ERROR_MODE"))
+}
+
 #[test]
 fn only_docker_desktop_opts_out_of_the_inherited_error_mode() {
-    let exempt = "CREATE_DEFAULT_ERROR_MODE";
     for (name, src, expected) in [
         (
             "docker_manager.rs",
@@ -112,7 +128,7 @@ fn only_docker_desktop_opts_out_of_the_inherited_error_mode() {
         ),
         ("process.rs", include_str!("process.rs"), false),
     ] {
-        let found = code_only(src).contains(exempt);
+        let found = opts_out_of_the_error_mode(src);
         assert_eq!(
             found, expected,
             "{name}: expected opt-out={expected}, found {found}. Only Docker \

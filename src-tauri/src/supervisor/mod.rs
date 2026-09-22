@@ -1,4 +1,9 @@
 pub mod health;
+/// B10: the restart-pause resume — that it is bounded, what the card says
+/// about it, and that it actually re-arms. Its own file so health.rs's three
+/// existing test modules stay byte-identical.
+#[cfg(test)]
+mod health_rearm_tests;
 pub mod platform;
 pub mod process;
 pub mod resource_guard;
