@@ -157,6 +157,22 @@ mod bug12_health_persistence_tests {
 
 fn main() {
     tauri::Builder::default()
+        // B2: FIRST, before every other plugin. The guard only collapses a
+        // duplicate launch if it wins the race, and a plugin registered after
+        // the store/updater/autostart plugins would let the second process
+        // build a second ConfigStore over the same fem_config.json before it
+        // discovered it was a duplicate. The callback runs only in the process
+        // that WOULD have become the duplicate — it hands focus to the
+        // instance already running and then exits; the first instance's path
+        // is unchanged.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            use tauri::Manager;
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
@@ -1288,5 +1304,78 @@ mod b1_crt_linkage_tests {
             "CARGO_TARGET_DIR must be set after the step enters src-tauri, so the \
              path it names is the one cargo actually uses"
         );
+    }
+}
+
+/// B2: georgeparis "Rebooted one of my FEM devices and found 2 instances of FEM
+/// running on the one PC", with `fem_config.corrupt.1789183854` sitting next to
+/// the config. Two FEM processes mean two ConfigStores writing the same file,
+/// two Supervisors spawning a second frynode/titan/mysterium, two PoC reporters,
+/// and both truncating the same partner log.
+///
+/// `fn main` owns real I/O and never returns, so the wiring is asserted against
+/// source. Needles are assembled at runtime from fragments because this file is
+/// what the test scans — a verbatim literal would match the test's own body and
+/// pass forever.
+#[cfg(test)]
+mod b2_single_instance_wiring_tests {
+    fn code_only(src: &str) -> String {
+        src.lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_app_registers_a_single_instance_guard_before_any_other_plugin() {
+        let code = code_only(include_str!("main.rs"));
+        let guard = format!("tauri_plugin_single{}instance::init(", '_');
+        let store = format!("tauri_plugin{}store::Builder", '_');
+        let guard_at = code.find(&guard).expect(
+            "main() must register the single-instance plugin, or a second launch \
+             becomes a second full FEM process",
+        );
+        let store_at = code
+            .find(&store)
+            .expect("main() must still register the store plugin");
+        assert!(
+            guard_at < store_at,
+            "the single-instance guard must be the FIRST plugin registered: a \
+             duplicate process must discover it is a duplicate before it builds a \
+             second ConfigStore over the same fem_config.json"
+        );
+    }
+
+    #[test]
+    fn the_single_instance_plugin_is_an_actual_dependency() {
+        let manifest = include_str!("../Cargo.toml");
+        let crate_name = format!("tauri-plugin-single{}instance", '-');
+        assert!(
+            manifest.contains(&crate_name),
+            "src-tauri/Cargo.toml must depend on the single-instance plugin — the \
+             wiring above does not compile without it"
+        );
+    }
+
+    /// The duplicate process must hand focus to the instance already running,
+    /// not exit silently: a user who double-clicks the shortcut has to see the
+    /// window they asked for.
+    #[test]
+    fn the_duplicate_launch_surfaces_the_window_that_is_already_running() {
+        let code = code_only(include_str!("main.rs"));
+        let guard = format!("tauri_plugin_single{}instance::init(", '_');
+        let at = code.find(&guard).expect("guard must be registered");
+        let body = &code[at..];
+        let end = body
+            .find(".plugin(tauri_plugin_store")
+            .expect("the store plugin still follows the guard");
+        let callback = &body[..end];
+        for needle in ["get_webview_window", "set_focus", "unminimize"] {
+            assert!(
+                callback.contains(needle),
+                "the single-instance callback must call {needle}, or a second \
+                 launch looks to the user like nothing happened"
+            );
+        }
     }
 }

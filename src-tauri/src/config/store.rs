@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use anyhow::Result;
@@ -205,15 +206,61 @@ impl ConfigStore {
         Ok(())
     }
 
-    /// Write via tmp-file + rename so a crash mid-write can never leave a
-    /// truncated config behind.
+    /// The temp file one `write_atomic` call writes through. Pure, so the
+    /// uniqueness invariant is directly testable.
+    ///
+    /// B2: the old name was `path.with_extension("json.tmp")` — a pure function
+    /// of the TARGET, so `fem_config.json` always became
+    /// `fem_config.json.tmp`. With no single-instance guard two FEM processes
+    /// wrote that same temp file, and B's `CREATE_ALWAYS` truncation landing
+    /// between A's write and A's rename publishes a truncated config. The pid
+    /// makes the name unique across processes, and the counter makes it unique
+    /// across calls even where the clock's resolution would not.
+    fn tmp_path_for(path: &Path) -> PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "fem_config.json".to_string());
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        path.with_file_name(format!(
+            "{name}.tmp.{}.{nanos}.{seq}",
+            std::process::id()
+        ))
+    }
+
+    /// Write via tmp-file + flush + rename so a crash mid-write can never
+    /// leave a truncated config behind, and a power cut can never leave a
+    /// durable rename pointing at bytes that never reached the disk.
     fn write_atomic(path: &PathBuf, data: &str) -> Result<()> {
+        use std::io::Write;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, data)?;
-        std::fs::rename(&tmp, path)?;
+        let tmp = Self::tmp_path_for(path);
+        let mut file = std::fs::File::create(&tmp)?;
+        let mut outcome = file.write_all(data.as_bytes());
+        if outcome.is_ok() {
+            outcome = file.sync_all();
+        }
+        drop(file);
+        if let Err(e) = outcome {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
         Ok(())
     }
 }
@@ -336,5 +383,169 @@ mod isolation_tests {
         assert_eq!(saved.miner_key.as_deref(), Some("FEM-ROAMING-OPT-IN"));
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+/// B2 defect 2: `write_atomic` was neither cross-process safe nor crash
+/// durable, and the Done-when spells out what it has to be — "config writes
+/// atomic (temp + flush + rename)".
+///
+/// The old implementation derived the temp name from the target
+/// (`fem_config.json` -> `fem_config.json.tmp`), so two FEM processes wrote the
+/// same file, and it used `std::fs::write`, which opens/writes/closes with no
+/// `sync_all` — the "flush" step of the Done-when did not exist at all. This
+/// function is byte-identical at v0.4.12, v0.4.25, v0.4.29, v0.4.31 and
+/// v0.4.33, so it is a standing defect rather than a 0.4.29->0.4.33 regression.
+#[cfg(test)]
+mod atomic_write_tests {
+    use super::*;
+
+    fn unique_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fem_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The deterministic RED. `path.with_extension("json.tmp")` is a pure
+    /// function of the target, so two calls for the same target returned the
+    /// same path — which is exactly what let two processes collide.
+    #[test]
+    fn the_temp_file_name_is_unique_per_call() {
+        let target = PathBuf::from("/tmp/fem-unique-test/fem_config.json");
+        let first = ConfigStore::tmp_path_for(&target);
+        let second = ConfigStore::tmp_path_for(&target);
+        assert_ne!(
+            first, second,
+            "two writes to the same config must not share one temp file"
+        );
+        let name = first.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            name.contains(&std::process::id().to_string()),
+            "the temp name must carry the pid so a second FEM process cannot \
+             collide with this one: {name}"
+        );
+        assert!(
+            name.starts_with("fem_config.json.tmp."),
+            "the temp file must stay recognisably a temp of its target: {name}"
+        );
+        assert_eq!(
+            first.parent(),
+            target.parent(),
+            "the temp must be written next to its target so the rename stays \
+             within one filesystem and therefore stays atomic"
+        );
+    }
+
+    /// The other deterministic RED, asserted against the real source: the
+    /// bytes have to be on disk BEFORE the rename publishes them, or a power
+    /// cut leaves a durable rename pointing at a hole.
+    #[test]
+    fn the_atomic_write_flushes_before_it_renames() {
+        let src = include_str!("store.rs");
+        let code: String = src
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let at = code
+            .find("fn write_atomic")
+            .expect("write_atomic must still exist");
+        let body_end = code[at..]
+            .find("#[cfg(test)]")
+            .map(|e| at + e)
+            .unwrap_or(code.len());
+        let body = &code[at..body_end];
+        let flush = body.find("sync_all").expect(
+            "write_atomic must flush the file to disk before it renames — \
+             std::fs::write does not, and the Done-when requires temp + flush + rename",
+        );
+        let rename = body
+            .find("rename")
+            .expect("write_atomic must still publish by rename");
+        assert!(
+            flush < rename,
+            "the flush must happen BEFORE the rename, not after"
+        );
+    }
+
+    #[test]
+    fn no_temp_files_survive_a_successful_save() {
+        let dir = unique_dir("atomic_no_orphans");
+        let store = ConfigStore::new(dir.clone(), None);
+        for i in 0..25 {
+            store
+                .update(|cfg| cfg.miner_key = Some(format!("FEM-ORPHAN-TEST-{i}")))
+                .unwrap();
+        }
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a successful save must leave no temp file behind: {leftovers:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Corroborating, not the RED/GREEN gate: the two tests above are the
+    /// deterministic ones. This is the shape of the real-world failure — two
+    /// FEM processes writing one config directory — and it must never publish
+    /// a `fem_config.json` that does not parse.
+    #[test]
+    fn two_concurrent_writers_never_publish_an_unparseable_config() {
+        use std::sync::Arc;
+
+        let dir = unique_dir("atomic_two_writers");
+        let primary = dir.join("fem_config.json");
+        let a = Arc::new(ConfigStore::new(dir.clone(), None));
+        let b = Arc::new(ConfigStore::new(dir.clone(), None));
+
+        let writer = |store: Arc<ConfigStore>, tag: &'static str, pad: usize| {
+            std::thread::spawn(move || {
+                for i in 0..150 {
+                    store
+                        .update(|cfg| {
+                            cfg.miner_key = Some(format!("FEM-{tag}-{i}"));
+                            cfg.wallet_address = Some("W".repeat(pad));
+                        })
+                        .unwrap();
+                }
+            })
+        };
+        let ha = writer(Arc::clone(&a), "A", 8);
+        let hb = writer(Arc::clone(&b), "B", 512);
+
+        // Sampled rather than spun: a hot read loop would contend with the
+        // writers' renames on Windows and turn a real invariant into a flake.
+        let mut checked = 0usize;
+        while !ha.is_finished() || !hb.is_finished() {
+            if let Ok(text) = std::fs::read_to_string(&primary) {
+                serde_json::from_str::<FemConfig>(&text).unwrap_or_else(|e| {
+                    panic!("published a config that does not parse ({e}): {text}")
+                });
+                checked += 1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        ha.join().unwrap();
+        hb.join().unwrap();
+
+        let text = std::fs::read_to_string(&primary).unwrap();
+        serde_json::from_str::<FemConfig>(&text).expect("final config must parse");
+        assert!(
+            checked > 0,
+            "the reader never observed the config while both writers were running"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
