@@ -11,6 +11,18 @@ export interface StorageLocation {
   free_gb: number | null
   is_default: boolean
   pending_restart: boolean
+  /**
+   * B4 D3 + B13 D5: the storage root the app is ACTUALLY using this
+   * session, when it differs from `path` because startup fell back to the
+   * default (the configured root was unwritable). Optional — an older
+   * backend simply omits it.
+   */
+  active_path?: string
+  /** The reason a fallback happened, or null/absent when there was none. */
+  fallback_reason?: string | null
+  /** Simpler boolean twin of `fallback_reason` some backends may send
+   *  instead (or in addition to) the detailed reason. */
+  fell_back?: boolean
 }
 
 /** `1863.4` -> `"1,863 GB free"`. Never renders `NaN GB`. */
@@ -26,6 +38,33 @@ export function driveLabel(path: string | null | undefined): string | null {
   if (!path) return null
   const m = /^([A-Za-z]):/.exec(path.trim())
   return m ? `${m[1].toUpperCase()}:` : null
+}
+
+/**
+ * B4 D3 + B13 D5: after a silent startup storage-root fallback, the
+ * CONFIGURED root and the ACTIVE (in-use) root disagree — restarting cannot
+ * fix an unavailable drive, so the ordinary pending_restart banner ("Restart
+ * Fry Edge Miner to start using this location.") is actively false advice
+ * here. Prefer the detailed `fallback_reason` shape; fall back to the
+ * simpler boolean `fell_back` signal when only that is present. Returns
+ * null when there is no fallback — the caller then falls through to the
+ * genuine pending_restart case.
+ */
+export function storageFallbackMessage(
+  storage: (Partial<StorageLocation> & Pick<StorageLocation, 'path'>) | null | undefined
+): string | null {
+  if (!storage) return null
+  if (storage.fallback_reason) {
+    return (
+      `Fry Edge Miner could not write to ${storage.path} at startup (${storage.fallback_reason}) ` +
+      `and is using ${storage.active_path ?? 'the default location'} for this session. ` +
+      `Files at ${storage.path} have not been deleted.`
+    )
+  }
+  if (storage.fell_back) {
+    return `Fry Edge Miner could not write to ${storage.path} at startup and is using the default location for this session.`
+  }
+  return null
 }
 
 /** A change only takes effect on the next launch; say so while it is pending. */
