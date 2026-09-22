@@ -5,7 +5,7 @@ import Tag from '../components/primitives/Tag'
 import { formatRewardWithToken } from '../lib/formatReward'
 import { GATES } from '../lib/integrationMeta'
 import { useRewards, type HourlyGates } from '../hooks/useRewards'
-import { deriveRewardDisplay } from '../lib/rewardReadiness'
+import { deriveRewardDisplay, stakeSubtitle } from '../lib/rewardReadiness'
 
 export default function Rewards() {
   const { rewards } = useRewards()
@@ -36,7 +36,7 @@ export default function Rewards() {
           sub={`${rewardToken} at full proportion`}
           accent="var(--amb)"
         />
-        <StatCard Icon={Shield} label="Staking Tier" value={stakeMultiplierLabel} sub={stakeLabel === '—' ? '—' : `${stakeLabel} stake active`} accent="var(--red)" />
+        <StatCard Icon={Shield} label="Staking Tier" value={stakeMultiplierLabel} sub={stakeSubtitle(stakeLabel)} accent="var(--red)" />
       </div>
 
       <div
