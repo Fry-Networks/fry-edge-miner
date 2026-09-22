@@ -231,6 +231,12 @@ pub async fn toggle_integration(
             }
             return Err(reason);
         }
+        // B3 (D-02): toggling ON is the retry gesture for a suppressed or
+        // declined elevation — the ratified design ships no separate Retry
+        // button. Clear any block recorded for this integration so the card
+        // reflects what THIS attempt does rather than what the last one did.
+        crate::elevation_gate::clear_blocked(&id);
+
         // Auto-install integrations that have not been deployed yet (e.g., Diiisco).
         if integration.installed_version().is_none() {
             match tokio::time::timeout(TOGGLE_STEP_TIMEOUT, integration.install()).await {
