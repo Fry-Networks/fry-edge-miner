@@ -1,4 +1,5 @@
 pub mod aem;
+pub mod code_integrity;
 pub mod diiisco;
 pub mod docker_manager;
 pub mod download;
@@ -113,7 +114,16 @@ pub(crate) fn stderr_tail(stderr: &str, n: usize) -> String {
 /// because `HealthStatus` has no dedicated variant and adding one would ripple
 /// into the TypeScript union and the LifecycleState mapping.
 pub(crate) fn awaits_user_action(reason: &str) -> bool {
-    const AWAITING_MARKERS: [&str; 2] = ["Awaiting Storj setup", "needs your consent"];
+    // B15: the third marker is an OS code-integrity refusal (Smart App Control
+    // / WDAC). Restarting through one accomplishes nothing — the OS will refuse
+    // the same image every time — and it is the only thing that stops the
+    // ~5-minute respawn re-arm. Adding a marker cannot change the verdict for
+    // any string that lacks it, so the existing tests here stay green.
+    const AWAITING_MARKERS: [&str; 3] = [
+        "Awaiting Storj setup",
+        "needs your consent",
+        code_integrity::AWAITING_ADMIN_MARKER,
+    ];
     AWAITING_MARKERS.iter().any(|m| reason.contains(m))
 }
 

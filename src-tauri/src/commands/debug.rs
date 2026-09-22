@@ -158,13 +158,19 @@ fn collect_scrubbed_sysinfo() -> String {
     info.push_str(&format!("OS: {}\n", std::env::consts::OS));
     info.push_str(&format!("Architecture: {}\n", std::env::consts::ARCH));
 
-    // Scrub env vars that might be relevant
-    if let Ok(val) = std::env::var("COMPUTERNAME") {
-        info.push_str(&format!("Computer: {}\n", scrubber::scrub_line(&val)));
+    // B23: these used to emit `scrub_line(&value)` on the BARE env value. No
+    // rule in the scrubber matches a name with no surrounding context — the
+    // username rule needs a `<drive>:\Users\` prefix and the hostname rule
+    // needs the literal token `hostname=` — so `GEORGE-RIG-01` and `georgep`
+    // went into every bundle verbatim, on every export, with no integration
+    // even running. Support only needs to know whether the values are SET; the
+    // values themselves are exactly what the Done-when says must not be there.
+    if std::env::var("COMPUTERNAME").is_ok() {
+        info.push_str("Computer: <host>\n");
     }
 
-    if let Ok(val) = std::env::var("USERNAME") {
-        info.push_str(&format!("User: {}\n", scrubber::scrub_line(&val)));
+    if std::env::var("USERNAME").is_ok() {
+        info.push_str("User: <user>\n");
     }
 
     info.push_str("\n=== Build Information ===\n");
@@ -177,6 +183,34 @@ fn collect_scrubbed_sysinfo() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B23 defect 1. The two values went into every bundle verbatim: the
+    /// value handed to `scrub_line` was the bare env value, and no rule in the
+    /// scrubber matches a name with no surrounding context.
+    ///
+    /// Env mutation is confined to this one test, which is why it is a single
+    /// `#[test]` and not two.
+    #[test]
+    fn neither_the_windows_username_nor_the_computer_name_reaches_sysinfo() {
+        // SAFETY (2024-edition-forward): this test does not spawn threads and
+        // reads the vars back only through the code under test.
+        std::env::set_var("COMPUTERNAME", "GEORGE-RIG-01");
+        std::env::set_var("USERNAME", "georgep");
+
+        let info = collect_scrubbed_sysinfo();
+
+        assert!(
+            !info.contains("GEORGE-RIG-01"),
+            "the computer name reached the bundle: {info}"
+        );
+        assert!(
+            !info.contains("georgep"),
+            "the Windows username reached the bundle: {info}"
+        );
+        // Anti-vacuum: the presence/absence signal support uses must survive.
+        assert!(info.contains("Computer:"), "{info}");
+        assert!(info.contains("User:"), "{info}");
+    }
 
     #[test]
     fn test_collect_scrubbed_sysinfo() {

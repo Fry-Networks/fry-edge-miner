@@ -168,6 +168,60 @@ pub struct ManagedProcess {
     pub started_at: DateTime<Utc>,
     #[allow(dead_code)] // Phase 3: process metadata
     pub log_dir: PathBuf,
+    /// B23: the two threads copying the child's stdout/stderr into the log
+    /// files, scrubbing each line on the way. They end on their own when the
+    /// pipe reaches EOF, which is when the child exits or is killed.
+    log_pumps: Vec<std::thread::JoinHandle<()>>,
+}
+
+/// B23: copy one of the child's pipes into its log file, scrubbing each line.
+///
+/// The child used to write into the file descriptor directly
+/// (`Stdio::from(file)`), so FEM never saw a byte and nothing could be
+/// scrubbed at write time. The shipped frynode.exe prints
+/// `Node address: <58-char Algorand address>` and `WG public key: <key>` on
+/// startup — verified in the Go source AND in the vendored binary's string
+/// table — so a wallet address landed raw in the log folder on every start.
+///
+/// Read byte-wise rather than with `lines()`: a partner that emits one invalid
+/// UTF-8 byte must not silently truncate the rest of its log.
+fn pump_scrubbed(
+    reader: impl std::io::Read + Send + 'static,
+    mut file: std::fs::File,
+    integration_id: &str,
+    stream: &'static str,
+) -> Option<std::thread::JoinHandle<()>> {
+    let name = format!("log-{integration_id}-{stream}");
+    let spawned = std::thread::Builder::new().name(name).spawn(move || {
+        use std::io::{BufRead, Write};
+        let mut reader = std::io::BufReader::new(reader);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let text = String::from_utf8_lossy(&buf);
+                    let body = text.trim_end_matches('\n').trim_end_matches('\r');
+                    if writeln!(file, "{}", crate::logging::scrubber::scrub_line(body)).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    match spawned {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            warn!(
+                integration = integration_id,
+                stream,
+                error = %e,
+                "Could not start the log scrubber thread — this stream will not be captured"
+            );
+            None
+        }
+    }
 }
 
 /// BUG 9: the working directory a managed partner runs in.
@@ -265,19 +319,32 @@ impl ManagedProcess {
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect();
-        let child = spawn_bounded(integration_id, SPAWN_TIMEOUT, move || {
+        // B23: piped, not redirected straight into the files. The file paths
+        // and names are unchanged; what changes is that FEM now sees every
+        // line before it reaches disk and can scrub it.
+        let mut child = spawn_bounded(integration_id, SPAWN_TIMEOUT, move || {
             let mut cmd = super::platform::command(&command_owned);
             for (k, v) in &env_owned {
                 cmd.env(k, v);
             }
             cmd.args(&args_owned)
-                .stdout(Stdio::from(stdout_file))
-                .stderr(Stdio::from(stderr_file));
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
             if let Some(ref dir) = cwd_owned {
                 cmd.current_dir(dir);
             }
             cmd.spawn()
         })?;
+
+        // Only on the child `spawn_bounded` actually RETURNED. The timeout
+        // branch kills and drops its own child, whose pipe ends close with it.
+        let mut log_pumps = Vec::new();
+        if let Some(out) = child.stdout.take() {
+            log_pumps.extend(pump_scrubbed(out, stdout_file, integration_id, "stdout"));
+        }
+        if let Some(err) = child.stderr.take() {
+            log_pumps.extend(pump_scrubbed(err, stderr_file, integration_id, "stderr"));
+        }
 
         // B4: the single funnel every supervisor-managed partner comes
         // through — frynode, titan, mysterium and iagon. Joining the job here
@@ -290,6 +357,7 @@ impl ManagedProcess {
             integration_id: integration_id.to_string(),
             started_at: Utc::now(),
             log_dir: log_dir.to_path_buf(),
+            log_pumps,
         })
     }
 
@@ -316,7 +384,13 @@ impl ManagedProcess {
         let start = std::time::Instant::now();
         loop {
             match self.child.try_wait()? {
-                Some(_status) => return Ok(()),
+                Some(_status) => {
+                    // B23: the child is gone, so both pipes are at EOF — this
+                    // only waits for the scrubber threads to flush what it
+                    // already wrote.
+                    self.drain_logs();
+                    return Ok(());
+                }
                 None if start.elapsed() >= timeout => {
                     warn!(
                         integration = self.integration_id,
@@ -330,12 +404,27 @@ impl ManagedProcess {
     }
 }
 
+impl ManagedProcess {
+    /// B23: wait for the log scrubber threads to finish copying what the child
+    /// already wrote. Bounded by construction — each thread ends when its pipe
+    /// reaches EOF, which has already happened once the child has exited.
+    pub(crate) fn drain_logs(&mut self) {
+        for handle in self.log_pumps.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
 impl Drop for ManagedProcess {
     fn drop(&mut self) {
         if self.is_running() {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+        // The child is gone either way, so both pipes are at EOF and these
+        // joins return immediately. Draining here means the last lines a
+        // partner wrote are on disk before the process object goes away.
+        self.drain_logs();
     }
 }
 

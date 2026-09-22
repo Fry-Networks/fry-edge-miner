@@ -484,6 +484,18 @@ impl Integration for TitanIntegration {
             // with no reason. titan-edge is a cgo binary, so a missing VC++
             // runtime is the single most common cause and is directly
             // verifiable (no exit-code plumbing needed).
+            // B15: before blaming the usual suspects, ask whether Windows
+            // REFUSED to load the image. A Smart App Control / WDAC block kills
+            // the child instantly and leaves nothing in the logs (spawn_full
+            // truncates both on every attempt), so without this the reason is
+            // wrong AND the health loop keeps respawning through a refusal it
+            // can never satisfy. The returned message carries the
+            // awaits-user-action marker, which is what stops that loop.
+            if let Some(blocked) = super::code_integrity::recent_block(&Self::binary_path())
+                .or_else(|| super::code_integrity::recent_block(&Self::dll_path()))
+            {
+                return HealthStatus::Unhealthy(blocked);
+            }
             let stderr_path = self.log_dir.join("titan").join("titan_stderr.log");
             let stderr_content = tokio::fs::read_to_string(&stderr_path)
                 .await

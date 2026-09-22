@@ -1,6 +1,11 @@
 pub mod debug_sink;
 pub mod scrubber;
 
+/// B23: the corpus of shapes `scrub_line` has to catch, and the two guards
+/// that stop it degenerating into a redactor that eats the log.
+#[cfg(test)]
+mod redaction_corpus_tests;
+
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -30,9 +35,13 @@ pub(crate) fn build_file_writer(log_dir: &Path) -> std::io::Result<(NonBlocking,
 
 /// Initialize logging: stdout in dev, daily rotating files in release.
 ///
-/// Note that scrubbing is applied when a debug bundle is exported
-/// (`commands::debug::export_debug_bundle`), not at write time — the file on
-/// disk holds raw tracing output. The scrubber redacts:
+/// B23: scrubbing is applied AT WRITE TIME on both sinks. It used to run only
+/// when a debug bundle was exported, so the file on disk held raw tracing
+/// output — and a Windows username reached the log folder through every
+/// partner binary path FEM logs, since `partners_base_dir()` is under
+/// `%APPDATA%` = `C:\Users\<name>\AppData\Roaming`. That leak was invisible
+/// in an exported bundle, because the export scrubs on the way into the zip;
+/// the exposure was the on-disk log folder itself. The scrubber redacts:
 /// - 25-word BIP39 mnemonics → [MNEMONIC]
 /// - bearer/api_key/token/OP_* → [REDACTED]
 /// - 58-char base32 Algorand addresses → first4…last4
@@ -42,6 +51,16 @@ pub(crate) fn build_file_writer(log_dir: &Path) -> std::io::Result<(NonBlocking,
 /// - Hostnames → <host>
 /// - Serial-like long hex → [SERIAL]
 pub fn init_logging(log_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    // B23: seed the literal-identity rules BEFORE any layer exists. Nothing
+    // else in the scrubber can match a BARE `GEORGE-RIG-01` or `jdoe` in
+    // arbitrary partner output — every other rule needs surrounding structure.
+    // Until this runs the rule matches nothing, so no earlier line can be
+    // over-redacted by it.
+    scrubber::seed_identity(
+        std::env::var("COMPUTERNAME").ok().as_deref(),
+        std::env::var("USERNAME").ok().as_deref(),
+    );
+
     use tracing_subscriber::fmt::format::FmtSpan;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -94,7 +113,7 @@ pub fn init_logging(log_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         // exactly the bug this replaces.
         let _ = LOG_GUARD.set(guard);
         tracing_subscriber::fmt::layer()
-            .with_writer(non_blocking)
+            .with_writer(debug_sink::ScrubbingMakeWriter::always(non_blocking))
             // Without this the file gets terminal colour escapes — 372 of them
             // in a 22-line sample — which makes a support bundle painful to read.
             .with_ansi(false)
@@ -270,4 +289,75 @@ mod tests {
         let (_writer, _guard) = build_file_writer(&nested).expect("writer");
         assert!(nested.is_dir(), "build_file_writer must create the log dir");
     }
+    /// B23 defect 3. `fem.log` was written with no scrubber at all: the
+    /// release layer took `non_blocking` directly, and only the opt-in debug
+    /// layer wrapped it in `ScrubbingMakeWriter`. A Windows username reached
+    /// the log folder through every partner binary path FEM logs — the spawn
+    /// event's `command` field is under `%APPDATA%`, i.e.
+    /// `C:\Users\<name>\AppData\Roaming`. That leak was invisible in an
+    /// exported bundle (the export scrubs on the way into the zip); the
+    /// exposure was the on-disk log folder itself.
+    ///
+    /// Asserts on the composition rather than on `init_logging`, which
+    /// installs a global subscriber and can only run once per process. The
+    /// `Shared` harness is copied rather than factored out of the test above,
+    /// so that test stays byte-identical.
+    #[test]
+    fn the_main_log_sink_scrubs_before_the_bytes_reach_disk() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Shared(Arc<Mutex<Vec<u8>>>);
+        impl Shared {
+            fn text(&self) -> String {
+                String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+            }
+        }
+        impl std::io::Write for Shared {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        /// The same always-on wrapper the release layer now uses, over a
+        /// test sink instead of the rolling appender.
+        #[derive(Clone)]
+        struct AlwaysScrubbing(Shared);
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for AlwaysScrubbing {
+            type Writer = debug_sink::ScrubbingWriter<Shared>;
+            fn make_writer(&'a self) -> Self::Writer {
+                debug_sink::ScrubbingWriter::always(self.0.clone())
+            }
+        }
+
+        let sink = Shared::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(AlwaysScrubbing(sink.clone()))
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                command = r"C:\Users\georgep\AppData\Roaming\FryEdgeMiner\partners\fryvpn\frynode.exe",
+                "Spawning process"
+            );
+        });
+
+        let text = sink.text();
+        assert!(
+            !text.contains("georgep"),
+            "the Windows username reached the log folder: {text:?}"
+        );
+        assert!(
+            text.contains("<user>"),
+            "expected the <user> marker: {text:?}"
+        );
+        assert!(
+            text.contains("Spawning process"),
+            "anti-vacuum: the diagnostic itself must survive: {text:?}"
+        );
+    }
+
 }

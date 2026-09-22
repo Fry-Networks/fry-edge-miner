@@ -74,21 +74,40 @@ pub fn build_debug_writer(dir: &Path) -> io::Result<(NonBlocking, WorkerGuard)> 
     Ok(tracing_appender::non_blocking(appender))
 }
 
-/// A writer that discards while the toggle is off and scrubs every line while
-/// it is on.
+/// A writer that scrubs every line it passes through, and — when `gated` —
+/// discards while the debug toggle is off.
+///
+/// B23: `gated: false` is what lets the RELEASE sink reuse this exact write
+/// path. `fem.log` was written with no scrubber at all, so a Windows username
+/// reached the log folder through every partner binary path FEM logs (the
+/// spawn event's `command` field is under `%APPDATA%`, i.e.
+/// `C:\Users\<name>\AppData\Roaming`). The line handling below is not
+/// duplicated for it — a second implementation is how two writers drift apart.
 pub struct ScrubbingWriter<W> {
     inner: W,
+    gated: bool,
 }
 
 impl<W> ScrubbingWriter<W> {
+    /// Gated by the user's debug-logging toggle — the debug sink's behaviour,
+    /// unchanged.
     pub fn new(inner: W) -> Self {
-        Self { inner }
+        Self { inner, gated: true }
+    }
+
+    /// Always writes, still scrubbing. For the main sink, which is not
+    /// optional.
+    pub fn always(inner: W) -> Self {
+        Self {
+            inner,
+            gated: false,
+        }
     }
 }
 
 impl<W: Write> Write for ScrubbingWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if !is_enabled() {
+        if self.gated && !is_enabled() {
             // Report the bytes as consumed. Returning 0 would look like a stuck
             // writer to the caller and could spin it.
             return Ok(buf.len());
@@ -124,11 +143,24 @@ impl<W: Write> Write for ScrubbingWriter<W> {
 #[derive(Clone)]
 pub struct ScrubbingMakeWriter {
     inner: NonBlocking,
+    gated: bool,
 }
 
 impl ScrubbingMakeWriter {
     pub fn new(inner: NonBlocking) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            gated: true,
+        }
+    }
+
+    /// B23: the main sink's writer — scrubs, and is never gated by the
+    /// debug-logging toggle.
+    pub fn always(inner: NonBlocking) -> Self {
+        Self {
+            inner,
+            gated: false,
+        }
     }
 }
 
@@ -136,7 +168,11 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ScrubbingMakeWriter {
     type Writer = ScrubbingWriter<NonBlocking>;
 
     fn make_writer(&'a self) -> Self::Writer {
-        ScrubbingWriter::new(self.inner.clone())
+        if self.gated {
+            ScrubbingWriter::new(self.inner.clone())
+        } else {
+            ScrubbingWriter::always(self.inner.clone())
+        }
     }
 }
 
@@ -234,6 +270,49 @@ mod tests {
         let mut w = ScrubbingWriter::new(sink.clone());
         w.write_all(line.as_bytes()).expect("write");
         w.flush().expect("flush");
+    }
+
+    fn write_through_always(sink: &Sink, line: &str) {
+        let mut w = ScrubbingWriter::always(sink.clone());
+        w.write_all(line.as_bytes()).expect("write");
+        w.flush().expect("flush");
+    }
+
+    /// B23: the main sink is NOT optional. `fem.log` was written with no
+    /// scrubber at all, so a Windows username reached the log folder through
+    /// every partner binary path FEM logs. Reusing this writer with the gate
+    /// off is what fixes that without a second implementation of the line
+    /// handling.
+    #[test]
+    fn an_always_on_scrubbing_writer_writes_while_the_toggle_is_off() {
+        let _guard = ToggleGuard::acquire(false);
+        let sink = Sink::default();
+        write_through_always(
+            &sink,
+            "Spawning process command=\"C:\\Users\\georgep\\AppData\\Roaming\\x.exe\"\n",
+        );
+        let text = sink.text();
+        assert!(
+            text.contains("Spawning process"),
+            "the main sink must write regardless of the debug toggle: {text:?}"
+        );
+        assert!(
+            !text.contains("georgep"),
+            "and it must still scrub: {text:?}"
+        );
+    }
+
+    /// …while the DEBUG sink's gate is unchanged.
+    #[test]
+    fn a_gated_scrubbing_writer_still_discards_while_the_toggle_is_off() {
+        let _guard = ToggleGuard::acquire(false);
+        let sink = Sink::default();
+        write_through(&sink, "this line must not be written\n");
+        assert_eq!(
+            sink.text(),
+            "",
+            "the opt-in sink must stay opt-in"
+        );
     }
 
     /// These logs are written so a user can hand the folder to support. A raw

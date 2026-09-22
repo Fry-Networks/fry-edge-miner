@@ -34,7 +34,189 @@ pub fn scrub_line(line: &str) -> String {
     // Redact serial-like strings (long hex or alphanumeric sequences)
     result = redact_serial(&result);
 
+    // B23: the eleven rules above miss every remaining shape the Done-when
+    // names. These are appended at the END so no existing rule's output can
+    // shift, and each one refuses to touch a value that is already a redaction
+    // marker — which is what keeps `scrub_line` idempotent and keeps the
+    // existing expectations (`api_key=[REDACTED]` and friends) byte-identical.
+    result = redact_json_secret(&result);
+    result = redact_named_secret(&result);
+    result = redact_identity_fields(&result);
+    result = redact_wireguard_key(&result);
+    result = redact_loose_mnemonic(&result);
+    result = redact_literal_identity(&result);
+
     result
+}
+
+/// The markers this module itself produces. A rule that re-wrote one of these
+/// would change `scrub_line`'s output on a second pass — the debug bundle
+/// scrubs a second time on the way into the zip, and `redact_named_secret`
+/// would otherwise overwrite `api_key=[REDACTED]` with its own marker and break
+/// what the existing tests assert.
+fn is_redaction_marker(value: &str) -> bool {
+    matches!(
+        value.trim_matches('"'),
+        "<redacted>"
+            | "[REDACTED]"
+            | "[MNEMONIC]"
+            | "[SERIAL]"
+            | "[MAC]"
+            | "[WGKEY]"
+            | "<host>"
+            | "<user>"
+    )
+}
+
+/// Secret NAMES, not secret SHAPES. A value is unguessable by definition; the
+/// key next to it is not.
+const SECRET_NAMES: &str = r"(?:[a-z0-9_]*(?:mnemonic|seed[_-]?phrase|secret|passwd|password|private[_-]?key|access[_-]?key|api[_-]?key|auth[_-]?token|node[_-]?token|token))";
+
+/// B23: `{"node_token": "<key>"}` — the exact file format `iagon.rs` tells the
+/// user to create, and a shape none of the existing rules match (they need a
+/// double-quoted `=` assignment or a bare `name:` form).
+fn redact_json_secret(s: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(&format!(r#"(?i)"({SECRET_NAMES})"\s*:\s*"([^"]*)""#)).unwrap()
+    });
+    re.replace_all(s, |caps: &regex::Captures| {
+        if is_redaction_marker(&caps[2]) {
+            caps[0].to_string()
+        } else {
+            format!(r#""{}": "<redacted>""#, &caps[1])
+        }
+    })
+    .to_string()
+}
+
+/// B23: the flag and bare-assignment shapes — `-password=…` (the literal argv
+/// `pawns.rs` builds), `--api-key <value>`, and a plain `NODE_MNEMONIC=…`.
+/// `redact_api_key` and `redact_token` only ever matched a double-quoted `=`
+/// assignment or a `:`-separated form.
+fn redact_named_secret(s: &str) -> String {
+    // A FLAG may separate its value with `=` or a space (`--api-key ABC`).
+    static FLAG: OnceLock<Regex> = OnceLock::new();
+    let flag = FLAG.get_or_init(|| {
+        Regex::new(&format!(
+            r#"(?i)(^|[\s,;(\[{{])(--?)({SECRET_NAMES})\s*[= ]\s*("[^"]*"|\S+)"#
+        ))
+        .unwrap()
+    });
+    let out = flag.replace_all(s, |caps: &regex::Captures| {
+        if is_redaction_marker(&caps[4]) {
+            return caps[0].to_string();
+        }
+        format!("{}{}{}=<redacted>", &caps[1], &caps[2], &caps[3])
+    });
+
+    // A BARE assignment must have the `=`. Deliberately NOT accepting a space
+    // here: "the secret is safe" would otherwise come back as
+    // "the secret=<redacted> safe", and a redactor that eats prose is how a
+    // log stops being worth collecting.
+    static BARE: OnceLock<Regex> = OnceLock::new();
+    let bare = BARE.get_or_init(|| {
+        Regex::new(&format!(
+            r#"(?i)(^|[\s,;(\[{{])({SECRET_NAMES})\s*=\s*("[^"]*"|\S+)"#
+        ))
+        .unwrap()
+    });
+    bare.replace_all(&out, |caps: &regex::Captures| {
+        if is_redaction_marker(&caps[3]) {
+            return caps[0].to_string();
+        }
+        format!("{}{}=<redacted>", &caps[1], &caps[2])
+    })
+    .to_string()
+}
+
+/// B23: `device_name=GEORGE-RIG-01 device_id=fem-george-rig-01` — the exact
+/// shape `pawns.rs` emits. `redact_hostname` keys on the literal word
+/// `hostname`, so none of this was matched. That rule STAYS; this generalises
+/// it without replacing it.
+fn redact_identity_fields(s: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?i)(device_name|device_id|computer_?name|user_?name|host)\s*=\s*(\S+)")
+            .unwrap()
+    });
+    re.replace_all(s, |caps: &regex::Captures| {
+        if is_redaction_marker(&caps[2]) {
+            caps[0].to_string()
+        } else {
+            format!("{}=<redacted>", &caps[1])
+        }
+    })
+    .to_string()
+}
+
+/// B23: a 44-char base64 Curve25519 key. The only base64-ish rule FEM had was
+/// `redact_serial`, which is lowercase hex only, so a WireGuard key matched
+/// nothing. frynode prints its PUBLIC key on startup; the private key is
+/// written 0600 and never printed — this is defensive either way.
+fn redact_wireguard_key(s: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"\b[A-Za-z0-9+/]{43}=").unwrap());
+    re.replace_all(s, "[WGKEY]").to_string()
+}
+
+/// B23: the existing mnemonic rule needs exactly 25 lowercase space-separated
+/// words on one line and has no `(?i)`. A comma-separated, mixed-case or
+/// 24-word form escaped it. The original rule at the top of the pipeline is
+/// untouched.
+fn redact_loose_mnemonic(s: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE
+        .get_or_init(|| Regex::new(r"(?i)(?:[a-z]{3,12}[ ,]+){23,24}[a-z]{3,12}").unwrap());
+    re.replace_all(s, "[MNEMONIC]").to_string()
+}
+
+/// B23: the only rule that can catch a BARE `GEORGE-RIG-01` or `jdoe` in
+/// arbitrary partner output — nothing else in the pipeline matches a name with
+/// no surrounding structure.
+///
+/// Built from the real values once at startup, and pure so the tests never
+/// touch process-global state.
+pub(crate) fn identity_rules(
+    computer_name: Option<&str>,
+    user_name: Option<&str>,
+) -> Vec<(Regex, &'static str)> {
+    let mut rules = Vec::new();
+    for (value, marker) in [(computer_name, "<host>"), (user_name, "<user>")] {
+        let Some(value) = value.map(str::trim).filter(|v| v.len() >= 3) else {
+            continue;
+        };
+        // Word-bounded and case-insensitive: Windows reports the same name in
+        // several cases, and a substring match would eat unrelated text.
+        if let Ok(re) = Regex::new(&format!(r"(?i){}", regex::escape(value))) {
+            rules.push((re, marker));
+        }
+    }
+    rules
+}
+
+pub(crate) fn redact_literals(s: &str, rules: &[(Regex, &'static str)]) -> String {
+    let mut out = s.to_string();
+    for (re, marker) in rules {
+        out = re.replace_all(&out, *marker).to_string();
+    }
+    out
+}
+
+static IDENTITY: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
+
+/// Seed the literal-identity rules. Called once from `logging::init_logging`
+/// before any layer exists; a no-op afterwards. Until it runs, the rule matches
+/// nothing, so nothing before it can be over-redacted.
+pub fn seed_identity(computer_name: Option<&str>, user_name: Option<&str>) {
+    let _ = IDENTITY.set(identity_rules(computer_name, user_name));
+}
+
+fn redact_literal_identity(s: &str) -> String {
+    match IDENTITY.get() {
+        Some(rules) if !rules.is_empty() => redact_literals(s, rules),
+        _ => s.to_string(),
+    }
 }
 
 /// Redact 25-word BIP39 mnemonic sequences
