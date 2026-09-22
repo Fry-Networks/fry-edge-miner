@@ -12,13 +12,8 @@ import { condenseError } from '../lib/error'
 import { activeFraction } from '../lib/integrationCount'
 import { integrationBadge } from '../lib/integrationBadge'
 import { REQUIRED_INTEGRATIONS, type IntegrationTier } from '../lib/integrationMeta'
-import {
-  SECOND_REQUIRED_BOOST,
-  boostDisplayPct,
-  countActive,
-  isActive,
-  requiredComponent
-} from '../lib/rewardModel'
+import { SECOND_REQUIRED_BOOST, countActive, isActive } from '../lib/rewardModel'
+import { rewardBreakdown } from '../lib/rewardBreakdown'
 import { SDK_REPORT_LINE } from '../lib/support'
 import { sdkActiveLine, sdkCounts, splitByRewardRole, splitByTier, tierCounts } from '../lib/tierSplit'
 import { deriveRewardDisplay } from '../lib/rewardReadiness'
@@ -126,8 +121,12 @@ export default function Dashboard({ intgs }: DashboardProps) {
   // server never pays (E7: "2/2 · 100%" beside a red Fry dVPN card).
   const counts = countActive(intgs)
   const requiredActive = counts.required
-  const requiredPct = Math.round(requiredComponent(counts.required) * 100)
-  const boostPercent = boostDisplayPct(counts)
+  // B22 D2: prefer the summary's own breakdown — the numbers the "Daily
+  // Estimate" figure beside this label was actually computed from — over
+  // the live list, which polls independently and can be a snapshot newer
+  // or older than the summary. Falls back to the live-list computation when
+  // the summary has none (older backend / not ready / browser preview).
+  const { requiredPct, boostPct: boostPercent, optionalActive, secondRequired } = rewardBreakdown(summary, counts)
   const pct = String(requiredPct)
   // F2: presentation split only — `available`/`pct` above still feed the
   // reward breakdown from the full list, exactly as before. The official tier
@@ -353,12 +352,12 @@ export default function Dashboard({ intgs }: DashboardProps) {
             ['Required proportion', `${requiredPct}%`, 'var(--txt)'],
             [
               'Second required boost',
-              counts.required >= 2 ? `+${Math.round(SECOND_REQUIRED_BOOST * 100)}%` : '—',
-              counts.required >= 2 ? 'var(--teal)' : 'var(--t1)'
+              secondRequired ? `+${Math.round(SECOND_REQUIRED_BOOST * 100)}%` : '—',
+              secondRequired ? 'var(--teal)' : 'var(--t1)'
             ],
             [
               'Boost',
-              `+${boostPercent}% (${counts.partner + counts.community} optional active)`,
+              `+${boostPercent}% (${optionalActive} optional active)`,
               'var(--teal)'
             ],
             ['BYOD factor', '1.0×', 'var(--t1)']
