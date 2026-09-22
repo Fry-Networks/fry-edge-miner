@@ -101,27 +101,26 @@ pub async fn get_integrations(
     // no lock is held across the map) and only where there is no more specific
     // error already, so a real start failure is never masked by it.
     let elevation_blocks = crate::elevation_gate::blocked_reasons();
+    // B14 D5: enables that are still running, so the poll reinforces the
+    // frontend's spinner instead of overwriting it with "Not installed".
+    let pending_enables = state
+        .pending_enable
+        .read()
+        .map(|p| p.clone())
+        .unwrap_or_default();
 
     let statuses = entries
         .into_iter()
         .map(
             |(id, display_name, enabled, version, requires_docker, unavailable_reason)| {
-                let health = if enabled {
+                let observed = if enabled {
                     last.get(&id).cloned().unwrap_or(HealthStatus::Starting)
                 } else {
                     last.get(&id).cloned().unwrap_or(HealthStatus::Stopped)
                 };
 
-                let lifecycle = if !enabled {
-                    LifecycleState::Disabled
-                } else {
-                    match &health {
-                        HealthStatus::Healthy => LifecycleState::Running,
-                        HealthStatus::Unhealthy(_) => LifecycleState::Unhealthy,
-                        HealthStatus::Installing => LifecycleState::Installing,
-                        _ => LifecycleState::Starting,
-                    }
-                };
+                let (enabled, health, lifecycle) =
+                    pending_view(enabled, pending_enables.contains(&id), observed);
 
                 // Healthy-based so the UI matches what the PoC reporter actually
                 // submits (reporter proportion counts Healthy only).
@@ -180,6 +179,69 @@ pub async fn install_integration(
 fn record_enable_error(state: &tauri::State<'_, crate::AppState>, id: &str, msg: &str) {
     if let Ok(mut errs) = state.last_integration_error.write() {
         errs.insert(id.to_string(), Some(msg.to_string()));
+    }
+}
+
+/// PURE: what the card should show while an enable is still in flight.
+///
+/// B14 "auto-install not firing": nothing in production ever wrote
+/// `HealthStatus::Installing` into `last_health`, so the backend could never
+/// report Installing at all — the arm existed only as a consumer. The ungated
+/// 30 s poll therefore overwrote the frontend's optimistic spinner with
+/// "Not installed" and a toggle flipped back OFF, while the install was still
+/// running. Reporting the pending enable makes the poll REINFORCE the spinner
+/// instead of fighting it.
+///
+/// `healthy` stays false for the whole window, so `poc_contribution` remains 0
+/// and the reward model is untouched.
+pub(crate) fn pending_view(
+    enabled: bool,
+    pending: bool,
+    health: HealthStatus,
+) -> (bool, HealthStatus, LifecycleState) {
+    if pending {
+        return (true, HealthStatus::Installing, LifecycleState::Installing);
+    }
+    let lifecycle = if !enabled {
+        LifecycleState::Disabled
+    } else {
+        match &health {
+            HealthStatus::Healthy => LifecycleState::Running,
+            HealthStatus::Unhealthy(_) => LifecycleState::Unhealthy,
+            HealthStatus::Installing => LifecycleState::Installing,
+            _ => LifecycleState::Starting,
+        }
+    };
+    (enabled, health, lifecycle)
+}
+
+/// Marks an integration as mid-enable for as long as it is alive.
+///
+/// RAII rather than a manual remove: `toggle_integration` has a dozen early
+/// `return Err(...)` paths, and any one of them leaking an entry would pin
+/// that card on "Installing" forever.
+struct PendingGuard<'a> {
+    set: &'a std::sync::RwLock<std::collections::HashSet<String>>,
+    id: String,
+}
+
+impl<'a> PendingGuard<'a> {
+    fn new(set: &'a std::sync::RwLock<std::collections::HashSet<String>>, id: &str) -> Self {
+        if let Ok(mut pending) = set.write() {
+            pending.insert(id.to_string());
+        }
+        Self {
+            set,
+            id: id.to_string(),
+        }
+    }
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.set.write() {
+            pending.remove(&self.id);
+        }
     }
 }
 
@@ -277,6 +339,15 @@ pub async fn toggle_integration(
             return Err(PAWNS_CONSENT_REQUIRED.to_string());
         }
     }
+
+    // B14 D5: from here on an enable is genuinely in flight, so the card must
+    // say so. Armed AFTER the pre-checks, so a refusal never shows a spinner,
+    // and RAII so no early return can leave the card stuck on "Installing".
+    let _pending = if enabled {
+        Some(PendingGuard::new(&state.pending_enable, &id))
+    } else {
+        None
+    };
 
     // Clone the integration Arc and release the registry lock before start/stop.
     let integration = {
@@ -567,6 +638,65 @@ mod b14_enable_error_tests {
         assert_eq!(
             mutual_exclusion_conflict("storj", "SpaceAcres", true).unwrap(),
             "storj and SpaceAcres are mutually exclusive. Disable SpaceAcres first or choose a different integration."
+        );
+    }
+
+    /// B14 D5: nothing in production ever wrote HealthStatus::Installing, so
+    /// the backend could not report an install in progress at all and the
+    /// 30 s poll overwrote the frontend's spinner with "Not installed" while
+    /// the install was still running.
+    #[test]
+    fn a_pending_enable_is_reported_as_installing() {
+        assert_eq!(
+            pending_view(false, true, HealthStatus::Stopped),
+            (true, HealthStatus::Installing, LifecycleState::Installing),
+            "an enable in flight must read as Installing even before set_enabled runs"
+        );
+    }
+
+    #[test]
+    fn a_settled_integration_is_unaffected() {
+        assert_eq!(
+            pending_view(true, false, HealthStatus::Healthy),
+            (true, HealthStatus::Healthy, LifecycleState::Running)
+        );
+        assert_eq!(
+            pending_view(false, false, HealthStatus::Stopped),
+            (false, HealthStatus::Stopped, LifecycleState::Disabled)
+        );
+        assert_eq!(
+            pending_view(true, false, HealthStatus::Unhealthy("boom".to_string())),
+            (
+                true,
+                HealthStatus::Unhealthy("boom".to_string()),
+                LifecycleState::Unhealthy
+            )
+        );
+    }
+
+    /// The window must not pay out: `healthy` stays false throughout, so
+    /// poc_contribution is 0 and the reward model is untouched.
+    #[test]
+    fn a_pending_enable_is_never_counted_as_healthy() {
+        let (_, health, _) = pending_view(false, true, HealthStatus::Healthy);
+        assert!(
+            !matches!(health, HealthStatus::Healthy),
+            "an install in flight must not contribute to PoC"
+        );
+    }
+
+    /// Every early return in toggle_integration must release the marker, or
+    /// the card pins on "Installing" forever.
+    #[test]
+    fn the_pending_marker_is_released_even_on_an_early_return() {
+        let set = std::sync::RwLock::new(std::collections::HashSet::new());
+        {
+            let _guard = PendingGuard::new(&set, "titan");
+            assert!(set.read().unwrap().contains("titan"));
+        }
+        assert!(
+            set.read().unwrap().is_empty(),
+            "the guard must clear the marker on every path out"
         );
     }
 
