@@ -3,10 +3,11 @@ import { AlertTriangle, Download, Loader2, MessageCircle, RefreshCw } from 'luci
 import type { FrontendIntegration } from '../hooks/useIntegrations'
 import { consentBadge } from '../lib/consentDialog'
 import { DISABLE_CONFIRM_MS, shouldConfirmDisable } from '../lib/disableConfirm'
-import { condenseError } from '../lib/error'
+import { condenseError, extractErrorMessage } from '../lib/error'
 import { integrationBadge } from '../lib/integrationBadge'
 import { isRequiredIntegration, SETUP_GUIDANCE } from '../lib/integrationMeta'
 import { OFFICIAL_DISABLED_WARNING, REQUIRED_DISABLED_WARNING, SDK_REPORT_LINE } from '../lib/support'
+import { safeInvoke } from '../lib/tauri'
 import { unhealthyReason, sentinelFundingAddress } from '../lib/types'
 import CopyField from './primitives/CopyField'
 import Tag from './primitives/Tag'
@@ -72,6 +73,32 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
     setConfirmingDisable(false)
     onToggle(id)
   }
+
+  // B17 D6: in-app way to supply the Iagon node_token the Setup required
+  // guidance above asks for. Backend allow-list (partner_secret.rs,
+  // T2/T3-owned) is Iagon-only today; mirror that here rather than showing a
+  // dead input on partners the command will reject.
+  const [secretValue, setSecretValue] = useState('')
+  const [secretSaving, setSecretSaving] = useState(false)
+  const [secretError, setSecretError] = useState<string | null>(null)
+  const canSetSecret = id === 'iagon'
+  const handleSaveSecret = async () => {
+    if (!secretValue.trim()) return
+    setSecretSaving(true)
+    setSecretError(null)
+    try {
+      await safeInvoke('set_partner_secret', { id, value: secretValue })
+      setSecretValue('')
+      // Re-run the toggle so the backend picks up the fresh token without a
+      // full app restart (iagon.rs reads it fresh on every start() call).
+      onToggle(id)
+    } catch (e) {
+      setSecretError(extractErrorMessage(e))
+    } finally {
+      setSecretSaving(false)
+    }
+  }
+
   const dockerBlocked = !!dockerNote
   // This machine cannot meet the partner's published minimums. Distinct from
   // "unhealthy": nothing is wrong, it simply can never run here — so the card
@@ -296,6 +323,65 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                   {SETUP_GUIDANCE[id].urlLabel}
                 </a>
               </span>
+            )}
+            {stLbl === 'Setup required' && canSetSecret && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
+                <div style={{ display: 'flex', gap: 6, minWidth: 0 }}>
+                  <input
+                    type="password"
+                    data-testid={`secret-input-${id}`}
+                    placeholder="Node auth token"
+                    value={secretValue}
+                    onChange={(e) => setSecretValue(e.target.value)}
+                    disabled={secretSaving}
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      fontFamily: 'var(--fm)',
+                      fontSize: 11,
+                      padding: '4px 6px',
+                      background: 'var(--s0)',
+                      border: '1px solid var(--b0)',
+                      borderRadius: 'var(--radsm)',
+                      color: 'var(--txt)'
+                    }}
+                  />
+                  <button
+                    type="button"
+                    data-testid={`secret-save-${id}`}
+                    onClick={handleSaveSecret}
+                    disabled={secretSaving || !secretValue.trim()}
+                    style={{
+                      fontFamily: 'var(--fh)',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      padding: '4px 10px',
+                      borderRadius: 'var(--radsm)',
+                      border: '1px solid var(--b0)',
+                      background: 'var(--s1)',
+                      color: 'var(--txt)',
+                      cursor: secretSaving || !secretValue.trim() ? 'default' : 'pointer'
+                    }}
+                  >
+                    {secretSaving ? 'Saving…' : 'Save'}
+                  </button>
+                </div>
+                {secretError && (
+                  <span
+                    role="alert"
+                    data-testid={`secret-error-${id}`}
+                    style={{
+                      fontFamily: 'var(--fb)',
+                      fontSize: 11,
+                      color: 'var(--red)',
+                      whiteSpace: 'normal',
+                      overflowWrap: 'anywhere'
+                    }}
+                  >
+                    {condenseError(secretError)}
+                  </span>
+                )}
+              </div>
             )}
             {dockerNote && !startError && (
               <span
