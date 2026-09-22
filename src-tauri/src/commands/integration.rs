@@ -150,6 +150,33 @@ pub async fn install_integration(
     Ok(())
 }
 
+/// Record why an enable attempt failed, so the card has something to show.
+///
+/// Six enable-path exits returned an Err that reached the toast and nothing
+/// else: `last_integration_error` was never written, so the per-card error
+/// slot stayed empty and - once the next poll cleared the toast - the toggle
+/// simply appeared to flip itself back off with no explanation anywhere.
+fn record_enable_error(state: &tauri::State<'_, crate::AppState>, id: &str, msg: &str) {
+    if let Ok(mut errs) = state.last_integration_error.write() {
+        errs.insert(id.to_string(), Some(msg.to_string()));
+    }
+}
+
+/// PURE: the message for two integrations that cannot run at once.
+pub(crate) fn mutual_exclusion_conflict(
+    id: &str,
+    other_id: &str,
+    other_enabled: bool,
+) -> Option<String> {
+    if other_id.is_empty() || !other_enabled {
+        return None;
+    }
+    Some(format!(
+        "{} and {} are mutually exclusive. Disable {} first or choose a different integration.",
+        id, other_id, other_id
+    ))
+}
+
 #[tauri::command]
 pub async fn toggle_integration(
     id: String,
@@ -170,11 +197,9 @@ pub async fn toggle_integration(
                 reg.is_enabled(mutually_exclusive_id)
             };
 
-            if is_other_enabled {
-                return Err(format!(
-                    "{} and {} are mutually exclusive. Disable {} first or choose a different integration.",
-                    id, other_id, other_id
-                ));
+            if let Some(msg) = mutual_exclusion_conflict(&id, other_id, is_other_enabled) {
+                record_enable_error(&state, &id, &msg);
+                return Err(msg);
             }
         }
 
@@ -183,11 +208,13 @@ pub async fn toggle_integration(
             let (eligible, reason) =
                 crate::integrations::space_acres::SpaceAcresIntegration::check_eligibility().await;
             if !eligible {
-                return Err(format!(
+                let msg = format!(
                     "{}. Try Storj instead.",
                     reason
                         .unwrap_or_else(|| "SpaceAcres is not eligible on this device".to_string())
-                ));
+                );
+                record_enable_error(&state, &id, &msg);
+                return Err(msg);
             }
         }
 
@@ -200,13 +227,23 @@ pub async fn toggle_integration(
                     crate::integrations::mysterium_lan_check::scan_lan_conflict(),
                 )
                 .await
-                .map_err(|_| timeout_message("LAN conflict check", &id))?
-                .map_err(|e| e.to_string())?;
+                .map_err(|_| {
+                    let msg = timeout_message("LAN conflict check", &id);
+                    record_enable_error(&state, &id, &msg);
+                    msg
+                })?
+                .map_err(|e| {
+                    let msg = e.to_string();
+                    record_enable_error(&state, &id, &msg);
+                    msg
+                })?;
                 if let Some(conflict) = scan_result {
-                    return Err(format!(
+                    let msg = format!(
                         "{}. Enable myst_lan_override in settings to proceed.",
                         conflict
-                    ));
+                    );
+                    record_enable_error(&state, &id, &msg);
+                    return Err(msg);
                 }
             }
         }
@@ -223,8 +260,11 @@ pub async fn toggle_integration(
     // Clone the integration Arc and release the registry lock before start/stop.
     let integration = {
         let reg = state.registry.lock().map_err(|e| e.to_string())?;
-        reg.get(&id)
-            .ok_or_else(|| format!("Integration '{}' not found", id))?
+        reg.get(&id).ok_or_else(|| {
+            let msg = format!("Integration '{}' not found", id);
+            record_enable_error(&state, &id, &msg);
+            msg
+        })?
     };
 
     if enabled {
@@ -232,9 +272,7 @@ pub async fn toggle_integration(
         // minimums this machine cannot meet only produces a confusing partner
         // error later, so refuse up front with the specific reason.
         if let Err(reason) = integration.check_requirements() {
-            if let Ok(mut errs) = state.last_integration_error.write() {
-                errs.insert(id.clone(), Some(reason.clone()));
-            }
+            record_enable_error(&state, &id, &reason);
             return Err(reason);
         }
         // Auto-install integrations that have not been deployed yet (e.g., Diiisco).
@@ -459,6 +497,104 @@ mod bug2_timeout_tests {
             started.elapsed() < Duration::from_millis(500),
             "timeout took {:?} — bound not enforced",
             started.elapsed()
+        );
+    }
+}
+
+/// B14 — "silent toggle revert".
+///
+/// Six enable-path exits returned an Err that reached the toast and nothing
+/// else. `last_integration_error` was never written, so the per-card error
+/// slot stayed empty; once the next 30 s poll cleared the toast, the toggle
+/// looked like it had flipped itself back off for no reason.
+#[cfg(test)]
+mod b14_enable_error_tests {
+    use super::*;
+
+    #[test]
+    fn mutually_exclusive_integrations_are_named_in_the_message() {
+        let msg = mutual_exclusion_conflict("space_acres", "Storj", true)
+            .expect("an enabled counterpart must block the toggle");
+        assert!(msg.contains("mutually exclusive"), "{msg}");
+        assert!(msg.contains("space_acres"), "{msg}");
+        assert!(msg.contains("Storj"), "{msg}");
+    }
+
+    #[test]
+    fn there_is_no_conflict_when_the_counterpart_is_off_or_absent() {
+        assert!(mutual_exclusion_conflict("space_acres", "Storj", false).is_none());
+        assert!(mutual_exclusion_conflict("mysterium", "", true).is_none());
+        assert!(mutual_exclusion_conflict("mysterium", "", false).is_none());
+    }
+
+    /// The exact string must not drift: the frontend shows it verbatim.
+    #[test]
+    fn the_conflict_message_is_byte_identical_to_what_shipped() {
+        assert_eq!(
+            mutual_exclusion_conflict("storj", "SpaceAcres", true).unwrap(),
+            "storj and SpaceAcres are mutually exclusive. Disable SpaceAcres first or choose a different integration."
+        );
+    }
+
+    /// Needles are assembled at runtime so this guard cannot be satisfied by
+    /// its own source text.
+    fn toggle_body() -> String {
+        let src = include_str!("integration.rs");
+        let start = src
+            .find(&format!("pub async fn toggle{}", "_integration("))
+            .expect("toggle_integration must exist");
+        let end = src[start..]
+            .find(&format!("pub async fn force{}", "_reinstall_integration("))
+            .map(|i| start + i)
+            .unwrap_or(src.len());
+        src[start..end].to_string()
+    }
+
+    /// Every early exit from the enable path must leave something on the card
+    /// — except the Pawns consent sentinel, which the UI turns into a dialog
+    /// and which would read as raw noise if it were painted as an error.
+    #[test]
+    fn no_enable_path_exit_is_silent() {
+        let body = toggle_body();
+        let record = format!("record_enable{}", "_error(");
+        let legacy = format!("last_integration{}", "_error.write()");
+        let sentinel = format!("PAWNS_CONSENT{}", "_REQUIRED");
+        let needle = format!("return Err{}", "(");
+
+        let lines: Vec<&str> = body.lines().collect();
+        let mut silent = Vec::new();
+        for (i, line) in lines.iter().enumerate() {
+            if !line.contains(&needle) || line.contains(&sentinel) {
+                continue;
+            }
+            let lo = i.saturating_sub(4);
+            let window = lines[lo..i].join("\n");
+            if !window.contains(&record) && !window.contains(&legacy) {
+                silent.push(*line);
+            }
+        }
+        assert!(
+            silent.is_empty(),
+            "these enable-path exits record nothing for the card: {silent:?}"
+        );
+    }
+
+    /// Locks in the deliberate exception.
+    #[test]
+    fn the_pawns_consent_sentinel_is_deliberately_not_recorded_as_an_error() {
+        let body = toggle_body();
+        let sentinel = format!("PAWNS_CONSENT{}", "_REQUIRED");
+        let record = format!("record_enable{}", "_error(");
+
+        let line = body
+            .lines()
+            .position(|l| l.contains(&sentinel) && l.contains("return"))
+            .expect("the sentinel exit must still exist");
+        let lines: Vec<&str> = body.lines().collect();
+        let window = lines[line.saturating_sub(3)..line].join("\n");
+        assert!(
+            !window.contains(&record),
+            "recording the sentinel would paint it on the card and duplicate the consent dialog"
         );
     }
 }
