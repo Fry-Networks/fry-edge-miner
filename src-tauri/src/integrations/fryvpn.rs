@@ -150,6 +150,60 @@ fn process_not_running_reason(stderr_tail: &str) -> String {
     }
 }
 
+/// B11: where frynode's node identity lives.
+///
+/// Anchored to the DEFAULT partners base, never to `partners_base_dir()`.
+/// frynode resolved its identity directory relative to its working directory,
+/// which FEM sets from the user-configurable storage root — so moving the
+/// storage root moved the identity, and frynode silently generated a brand new
+/// Algorand account at the new location. That account is the one the node
+/// registers and is paid to, so it must not follow a preference.
+///
+/// Pure, so the anchoring is testable without touching the disk or the
+/// `STORAGE_ROOT` global.
+pub(crate) fn node_identity_dir(default_partners: &std::path::Path) -> PathBuf {
+    default_partners.join("fryvpn").join("node-identity")
+}
+
+/// The identity files frynode keeps. `account.txt` may hold user funds.
+const IDENTITY_FILES: [&str; 3] = ["account.txt", "wg.key", "wg.pub"];
+
+/// B11: bring an identity created under a CUSTOM storage root to the anchored
+/// location, once, by COPY.
+///
+/// Installs that already moved their storage root have their only copy of the
+/// node account under that root. Anchoring the directory without this would
+/// look exactly like the bug it fixes: a fresh account at a new path.
+///
+/// Copies only into gaps — an existing destination file is never overwritten —
+/// and never moves or deletes the source, because the source may be the only
+/// copy of an account holding funds.
+pub(crate) fn adopt_identity(from: &std::path::Path, to: &std::path::Path) -> Vec<String> {
+    let mut adopted = Vec::new();
+    if from == to || !from.join("account.txt").exists() {
+        return adopted;
+    }
+    if to.join("account.txt").exists() {
+        return adopted;
+    }
+    if let Err(e) = std::fs::create_dir_all(to) {
+        warn!(error = %e, path = ?to, "Could not create the anchored fryDVPN identity directory");
+        return adopted;
+    }
+    for name in IDENTITY_FILES {
+        let src = from.join(name);
+        let dst = to.join(name);
+        if !src.exists() || dst.exists() {
+            continue;
+        }
+        match std::fs::copy(&src, &dst) {
+            Ok(_) => adopted.push(name.to_string()),
+            Err(e) => warn!(error = %e, file = name, "Could not adopt a fryDVPN identity file"),
+        }
+    }
+    adopted
+}
+
 /// B9: lines frynode writes while stopping ON PURPOSE.
 ///
 /// Go's stdlib logger writes to stderr, so an orderly shutdown lands in the
@@ -560,7 +614,7 @@ impl Integration for FryVpnIntegration {
         }
 
         // Build CLI flags for frynode
-        let args = vec![
+        let mut args = vec![
             "-registry-app-id".to_string(),
             Self::registry_app_id(),
             "-fvpn-asa-id".to_string(),
@@ -580,6 +634,27 @@ impl Integration for FryVpnIntegration {
             "-capacity-mbps".to_string(),
             Self::capacity_mbps().to_string(),
         ];
+
+        // B11: pin the node identity to a location the storage-root preference
+        // cannot move. Without the flag frynode resolves "node-identity"
+        // against its working directory, so changing the storage root gave the
+        // node a brand new Algorand account.
+        let identity_dir = node_identity_dir(&super::download::default_partners_base_dir());
+        let adopted = adopt_identity(
+            &super::download::partners_base_dir()
+                .join("fryvpn")
+                .join("node-identity"),
+            &identity_dir,
+        );
+        if !adopted.is_empty() {
+            info!(
+                files = ?adopted,
+                anchored = ?identity_dir,
+                "Adopted an existing fryDVPN node identity from the configured storage root (the originals were left in place)"
+            );
+        }
+        args.push("-identity-dir".to_string());
+        args.push(identity_dir.to_string_lossy().into_owned());
 
         // BUG 6: hand frynode the device's OWN funded account. Without this it
         // generated a fresh 0-ALGO identity and RegisterNode failed with an
@@ -1407,3 +1482,99 @@ mod b7_funding_state_tests {
 #[cfg(test)]
 #[path = "fryvpn_shutdown_tests.rs"]
 mod fryvpn_shutdown_tests;
+
+/// B11 — the node identity must survive a storage-root change.
+///
+/// frynode resolved its identity directory relative to its working directory,
+/// which FEM sets from the user-configurable storage root. Pointing the
+/// storage root somewhere else therefore hid the identity, and a missing
+/// `account.txt` is silently replaced by a freshly generated Algorand account
+/// — the account the node registers with and is paid to.
+#[cfg(test)]
+mod b11_identity_dir_tests {
+    use super::*;
+
+    #[test]
+    fn the_identity_dir_is_anchored_and_does_not_follow_the_storage_root() {
+        let default_root = std::path::Path::new("/default/partners");
+        assert_eq!(
+            node_identity_dir(default_root),
+            PathBuf::from("/default/partners/fryvpn/node-identity")
+        );
+        // A different root must yield a different path ONLY because it was
+        // passed explicitly — the production call site always passes
+        // `default_partners_base_dir()`, never `partners_base_dir()`.
+        assert_ne!(
+            node_identity_dir(std::path::Path::new("/some/other/root")),
+            node_identity_dir(default_root)
+        );
+    }
+
+    #[test]
+    fn adopt_copies_the_identity_and_never_removes_the_source() {
+        let old_root = tempfile::tempdir().unwrap();
+        let new_root = tempfile::tempdir().unwrap();
+        let from = old_root.path().join("fryvpn").join("node-identity");
+        let to = node_identity_dir(new_root.path());
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::write(from.join("account.txt"), b"word ".repeat(25)).unwrap();
+        std::fs::write(from.join("wg.key"), b"privkey").unwrap();
+
+        let adopted = adopt_identity(&from, &to);
+
+        assert!(adopted.contains(&"account.txt".to_string()), "{adopted:?}");
+        assert_eq!(
+            std::fs::read(to.join("account.txt")).unwrap(),
+            std::fs::read(from.join("account.txt")).unwrap(),
+            "the adopted account must be byte-identical"
+        );
+        assert!(
+            from.join("account.txt").exists(),
+            "the source may be the only copy of an account holding funds — it must never be moved"
+        );
+        assert!(from.join("wg.key").exists());
+    }
+
+    #[test]
+    fn adopt_never_overwrites_an_existing_identity() {
+        let old_root = tempfile::tempdir().unwrap();
+        let new_root = tempfile::tempdir().unwrap();
+        let from = old_root.path().join("fryvpn").join("node-identity");
+        let to = node_identity_dir(new_root.path());
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+        std::fs::write(from.join("account.txt"), b"OLD").unwrap();
+        std::fs::write(to.join("account.txt"), b"ANCHORED").unwrap();
+
+        assert!(
+            adopt_identity(&from, &to).is_empty(),
+            "an anchored identity already exists; adopting over it would replace a live account"
+        );
+        assert_eq!(std::fs::read(to.join("account.txt")).unwrap(), b"ANCHORED");
+        assert_eq!(std::fs::read(from.join("account.txt")).unwrap(), b"OLD");
+    }
+
+    #[test]
+    fn adopt_is_a_no_op_when_there_is_nothing_to_adopt() {
+        let root = tempfile::tempdir().unwrap();
+        let from = root.path().join("absent");
+        let to = node_identity_dir(root.path());
+        assert!(adopt_identity(&from, &to).is_empty());
+        assert!(
+            !to.exists(),
+            "a fresh install must not have an empty identity directory created for it"
+        );
+    }
+
+    /// Same path in and out must never copy a file onto itself.
+    #[test]
+    fn adopt_ignores_an_identical_source_and_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = node_identity_dir(root.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("account.txt"), b"KEEP").unwrap();
+
+        assert!(adopt_identity(&dir, &dir).is_empty());
+        assert_eq!(std::fs::read(dir.join("account.txt")).unwrap(), b"KEEP");
+    }
+}
