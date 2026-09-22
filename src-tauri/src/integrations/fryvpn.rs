@@ -8,6 +8,8 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 const ALGOD_SERVER: &str = "https://mainnet-api.algonode.cloud";
+/// The port frynode is started on (`-api-port`) and the one FEM probes.
+const FRYNODE_API_PORT: u16 = 8088;
 const FRYNODE_VERSION: &str = "0.1.0";
 
 /// BUG 6: dedicated Windows Firewall rule name for frynode.exe, same pattern
@@ -82,6 +84,41 @@ impl FryVpnIntegration {
             .unwrap_or(100)
     }
 
+    /// The algod endpoint FEM reads the device wallet from, and the one it
+    /// hands frynode. Defaults to the shipped mainnet endpoint, so nothing
+    /// changes for existing users; the override exists so the registration
+    /// path can be exercised against AlgoKit LocalNet, and so a throttled or
+    /// blocked public endpoint can be redirected without a rebuild. Same shape
+    /// as `region()`/`capacity_mbps()`/`binary_path()`.
+    fn algod_server() -> String {
+        std::env::var("FRYNODE_ALGOD_SERVER")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| ALGOD_SERVER.to_string())
+    }
+
+    fn algod_port() -> String {
+        std::env::var("FRYNODE_ALGOD_PORT")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "443".to_string())
+    }
+
+    /// Empty by default — algonode is tokenless. LocalNet is not.
+    fn algod_token() -> String {
+        std::env::var("FRYNODE_ALGOD_TOKEN").unwrap_or_default()
+    }
+
+    fn registry_app_id() -> String {
+        std::env::var("FRYNODE_REGISTRY_APP_ID")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "3636586918".to_string())
+    }
+
     /// Resolve the frynode binary: `FRYNODE_BIN` → the bundled resource next to
     /// the executable → the bare name on PATH.
     ///
@@ -110,6 +147,114 @@ fn process_not_running_reason(stderr_tail: &str) -> String {
         "frynode process is not running".to_string()
     } else {
         format!("frynode process is not running: {stderr_tail}")
+    }
+}
+
+/// B11: where frynode's node identity lives.
+///
+/// Anchored to the DEFAULT partners base, never to `partners_base_dir()`.
+/// frynode resolved its identity directory relative to its working directory,
+/// which FEM sets from the user-configurable storage root — so moving the
+/// storage root moved the identity, and frynode silently generated a brand new
+/// Algorand account at the new location. That account is the one the node
+/// registers and is paid to, so it must not follow a preference.
+///
+/// Pure, so the anchoring is testable without touching the disk or the
+/// `STORAGE_ROOT` global.
+pub(crate) fn node_identity_dir(default_partners: &std::path::Path) -> PathBuf {
+    default_partners.join("fryvpn").join("node-identity")
+}
+
+/// The identity files frynode keeps. `account.txt` may hold user funds.
+const IDENTITY_FILES: [&str; 3] = ["account.txt", "wg.key", "wg.pub"];
+
+/// B11: bring an identity created under a CUSTOM storage root to the anchored
+/// location, once, by COPY.
+///
+/// Installs that already moved their storage root have their only copy of the
+/// node account under that root. Anchoring the directory without this would
+/// look exactly like the bug it fixes: a fresh account at a new path.
+///
+/// Copies only into gaps — an existing destination file is never overwritten —
+/// and never moves or deletes the source, because the source may be the only
+/// copy of an account holding funds.
+pub(crate) fn adopt_identity(from: &std::path::Path, to: &std::path::Path) -> Vec<String> {
+    let mut adopted = Vec::new();
+    if from == to || !from.join("account.txt").exists() {
+        return adopted;
+    }
+    if to.join("account.txt").exists() {
+        return adopted;
+    }
+    if let Err(e) = std::fs::create_dir_all(to) {
+        warn!(error = %e, path = ?to, "Could not create the anchored fryDVPN identity directory");
+        return adopted;
+    }
+    for name in IDENTITY_FILES {
+        let src = from.join(name);
+        let dst = to.join(name);
+        if !src.exists() || dst.exists() {
+            continue;
+        }
+        match std::fs::copy(&src, &dst) {
+            Ok(_) => adopted.push(name.to_string()),
+            Err(e) => warn!(error = %e, file = name, "Could not adopt a fryDVPN identity file"),
+        }
+    }
+    adopted
+}
+
+/// B9: lines frynode writes while stopping ON PURPOSE.
+///
+/// Go's stdlib logger writes to stderr, so an orderly shutdown lands in the
+/// same `fryvpn_stderr.log` FEM tails for a crash reason. The card therefore
+/// reported a clean stop as `frynode process is not running: shutting down...
+/// | warning: failed to deregister node: ... | shutdown complete`, and the
+/// supervisor escalated that to "automatic restarts paused" over a stop that
+/// had worked.
+///
+/// Kept fryvpn-LOCAL on purpose: adding these to the shared
+/// `integrations::awaits_user_action` markers would make every partner's
+/// graceful-shutdown text un-restartable, including a Titan crash that says
+/// "graceful shutting down".
+const SHUTDOWN_MARKERS: [&str; 7] = [
+    "shutting down...",
+    "received shutdown signal",
+    "received local shutdown request",
+    "shutdown: ",
+    "failed to deregister node",
+    "node deregistered on-chain",
+    "shutdown complete",
+];
+
+/// PURE: the reason to show when frynode is not running, built from its stderr.
+///
+/// Drops the shutdown sequence first, so only lines that could actually
+/// explain a FAILURE survive. When everything is filtered out the reason is
+/// the plain "frynode process is not running", with nothing misattributed.
+fn not_running_reason_from_stderr(stderr: &str) -> String {
+    let kept: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !SHUTDOWN_MARKERS.iter().any(|m| line.contains(m)))
+        .collect();
+    let tail = super::stderr_tail(&kept.join("\n"), 3);
+    let tail = if tail == "no error output" {
+        String::new()
+    } else {
+        tail
+    };
+    process_not_running_reason(&tail)
+}
+
+/// Ask a locally running frynode to stop in an orderly way (B9).
+///
+/// `true` when it accepted. Never an error: this is a courtesy before the hard
+/// stop, and a frynode without the endpoint simply answers 404.
+async fn request_graceful_shutdown(port: u16, budget: Duration) -> bool {
+    let url = format!("http://127.0.0.1:{port}/shutdown");
+    match tokio::time::timeout(budget, reqwest::Client::new().post(&url).send()).await {
+        Ok(Ok(resp)) => resp.status().is_success(),
+        _ => false,
     }
 }
 
@@ -159,10 +304,63 @@ async fn probe_health_once() -> HealthStatus {
     }
 }
 
-/// Minimum SPENDABLE balance (microAlgos) fryDVPN needs to register on-chain:
-/// the registry app call plus its fee. 0.1 ALGO is comfortably above the
-/// 1000 microAlgo minimum fee and any box/opt-in cost.
-pub(crate) const REGISTRATION_MIN_MICROALGOS: u64 = 100_000;
+/// The payment frynode makes to fund this node's on-chain registry box —
+/// `defaultMBR` in the node's `registry` package. It is a real transfer out of
+/// the device wallet, not a fee, and leaving it out of the requirement is what
+/// let an underfunded wallet pass the pre-check and then overspend on chain.
+pub(crate) const REGISTRY_BOX_MBR_MICROALGOS: u64 = 200_000;
+
+/// Algorand's network minimum fee.
+pub(crate) const ALGORAND_MIN_FEE_MICROALGOS: u64 = 1_000;
+
+/// The register group is exactly two transactions — the box MBR payment and
+/// the `register_node` app call — and neither overrides `FlatFee`, so both pay
+/// the network minimum.
+pub(crate) const REGISTRATION_GROUP_TXNS: u64 = 2;
+
+/// What a node must keep back to DEREGISTER later: one flat fee plus the
+/// surcharge covering the contract's inner MBR-refund transaction.
+///
+/// Load-bearing, not theoretical. Measured on LocalNet against the real
+/// NodeRegistry: a wallet funded with exactly the register group's cost
+/// registers successfully and lands on exactly its own minimum with ZERO
+/// spendable — and can then never pay to leave, stranding its record and the
+/// 200_000 µALGO box MBR behind it permanently.
+pub(crate) const DEREGISTRATION_COST_MICROALGOS: u64 = 2 * ALGORAND_MIN_FEE_MICROALGOS;
+
+/// Documented headroom over the measured cost, so a min-fee change or a
+/// slightly larger box does not strand a wallet that funded exactly what the
+/// card asked for. Sits ON TOP of the deregistration reserve.
+pub(crate) const REGISTRATION_MARGIN_MICROALGOS: u64 = 8_000;
+
+/// Minimum SPENDABLE balance (microAlgos) fryDVPN needs to register on-chain.
+///
+/// Derived from the group frynode actually submits rather than guessed: the
+/// previous value (100_000) counted the fees and forgot the box payment, so it
+/// was less than half the true cost. This is the SPENDABLE requirement — an
+/// account must additionally retain its own base minimum balance, which is why
+/// the card quotes `total_needed` (see `registration_funding_message`) and not
+/// this number.
+pub(crate) const REGISTRATION_MIN_MICROALGOS: u64 = REGISTRY_BOX_MBR_MICROALGOS
+    + REGISTRATION_GROUP_TXNS * ALGORAND_MIN_FEE_MICROALGOS
+    + DEREGISTRATION_COST_MICROALGOS
+    + REGISTRATION_MARGIN_MICROALGOS;
+
+// These are compile-time assertions on purpose. Both operands are constants,
+// so a runtime `assert!` in a test can never actually fail — clippy says so —
+// and would give false confidence. As `const _` they fail the BUILD the moment
+// someone lowers the requirement below what the chain really charges.
+const _: () = assert!(
+    REGISTRATION_MIN_MICROALGOS
+        >= REGISTRY_BOX_MBR_MICROALGOS + REGISTRATION_GROUP_TXNS * ALGORAND_MIN_FEE_MICROALGOS,
+    "the requirement must cover the box MBR and both group fees"
+);
+const _: () = assert!(
+    REGISTRATION_MIN_MICROALGOS
+        - (REGISTRY_BOX_MBR_MICROALGOS + REGISTRATION_GROUP_TXNS * ALGORAND_MIN_FEE_MICROALGOS)
+        >= DEREGISTRATION_COST_MICROALGOS,
+    "nothing would be left to deregister with — measured on LocalNet, this strands the node"
+);
 
 /// PURE: what an account can actually spend — algod reports the TOTAL `amount`
 /// and separately the locked `min-balance`. Saturating, so an account below its
@@ -192,6 +390,74 @@ pub(crate) fn registration_affordability(
         short,
         address
     ))
+}
+
+/// B7/B8: the funding instruction `start()` parks when the device wallet
+/// cannot afford registration yet.
+///
+/// Process-global rather than a field on `FryVpnIntegration`: the struct is
+/// built once in `main.rs` and in two existing tests, and a new required field
+/// would have forced an edit to all three — including test code this run is
+/// not permitted to touch. There is exactly one fryDVPN integration per
+/// process, so a module-level slot is the same state with a smaller diff.
+static PARKED_FUNDING_REASON: Mutex<Option<String>> = Mutex::new(None);
+
+/// The prefix every fryDVPN funding message starts with.
+///
+/// Load-bearing, not decoration: `integrations::awaits_user_action` matches it,
+/// which is what makes the supervisor treat "this wallet needs money" as a
+/// setup state (RecoveryAction::None) instead of a fault it restarts frynode
+/// over every 30 s, and what makes the card render amber "Setup required"
+/// instead of a red UNHEALTHY badge.
+pub(crate) const FUNDING_MARKER: &str = "Awaiting fryDVPN funding";
+
+/// PURE: the funding instruction the card shows while the device wallet cannot
+/// afford registration.
+///
+/// Reports TOTAL NEEDED against the on-chain `amount` — the number the owner
+/// sees in their wallet app. The message this replaces was built from SPENDABLE
+/// on both sides, so a user who sent exactly the 0.1 ALGO it asked for was then
+/// told he held "0.000 ALGO" (mainnet: amount 100_014, min-balance 100_000,
+/// spendable 14). Total needed is the spendable requirement plus the account's
+/// own locked minimum, because that minimum has to stay behind after the group
+/// settles.
+///
+/// The gate itself is still `registration_affordability`, so that function and
+/// its tests remain the authority on WHETHER to proceed; only the DISPLAY
+/// changed.
+pub(crate) fn registration_funding_message(
+    amount: u64,
+    min_balance: u64,
+    required_spendable: u64,
+    address: &str,
+) -> Result<(), String> {
+    if registration_affordability(
+        spendable_microalgos(amount, min_balance),
+        required_spendable,
+        address,
+    )
+    .is_ok()
+    {
+        return Ok(());
+    }
+    let total_needed = required_spendable.saturating_add(min_balance);
+    let short = total_needed.saturating_sub(amount);
+    Err(format!(
+        "{FUNDING_MARKER} — send {:.3} ALGO to {} (this device's wallet needs {:.3} ALGO total to register on-chain and holds {:.3} ALGO). fryDVPN registers automatically on the next check.",
+        short as f64 / 1_000_000.0,
+        address,
+        total_needed as f64 / 1_000_000.0,
+        amount as f64 / 1_000_000.0
+    ))
+}
+
+/// What the card says when algod could not be read at all.
+///
+/// Deliberately quotes NO figure: an unreachable endpoint or an HTML error page
+/// must never be rendered as "0.000 ALGO", which would tell a funded owner to
+/// send money they have already sent.
+pub(crate) fn balance_unreadable_message(detail: &str) -> String {
+    format!("{FUNDING_MARKER} — could not read this device's wallet balance ({detail}); retrying on the next check.")
 }
 
 /// PURE: pull `amount` and `min-balance` out of an algod account response.
@@ -228,25 +494,63 @@ pub(crate) fn identity_plan(address: Option<&str>, mnemonic: Option<&str>) -> Id
     }
 }
 
+/// What a read of the device wallet concluded (B7/B8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FundingState {
+    /// Measured, and the wallet can afford the registration group.
+    Affordable,
+    /// Measured, and it cannot yet. The string is the card's funding
+    /// instruction, already carrying `FUNDING_MARKER`.
+    Underfunded(String),
+    /// Not measurable right now — algod unreachable, or an error page where
+    /// JSON was expected. Never a reason to refuse to run a node that would
+    /// otherwise serve traffic: frynode's own preflight is what stops an
+    /// underfunded submission reaching the chain.
+    Unmeasurable(String),
+}
+
 impl FryVpnIntegration {
-    /// Fetch the device's provisioned Algorand identity and confirm it can
-    /// actually afford the on-chain registration (BUG 6).
+    /// One algod account read.
     ///
-    /// Returns the mnemonic to hand frynode. Any failure is a user-facing
-    /// sentence, never a raw chain error.
-    async fn resolve_funded_identity(&self) -> Result<Option<String>, String> {
-        let Some(miner_key) = self.config.get().miner_key else {
-            // Not registered yet: nothing to look up, and frynode starting
-            // without an identity is exactly the pre-change behaviour.
-            return Ok(None);
-        };
+    /// `Err` carries a short reason for the card and never a balance — an HTML
+    /// error page or a rate-limit body read as "0" would tell an owner who has
+    /// already funded the wallet to send more.
+    async fn read_wallet_balance(address: &str) -> Result<(u64, u64), String> {
+        let url = format!("{}/v2/accounts/{}", Self::algod_server(), address);
+        let resp = reqwest::Client::new()
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| format!("algod unreachable: {e}"))?;
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("algod response unreadable: {e}"))?;
+        parse_account_balance(&body).ok_or_else(|| format!("algod returned HTTP {status}"))
+    }
+
+    /// The device's provisioned Algorand identity together with what its wallet
+    /// can currently afford (BUG 6, B7, B8).
+    ///
+    /// `None` when we hold no usable key: frynode then starts exactly as it did
+    /// before BUG 6, because refusing to run a node over a wallet we cannot
+    /// even identify would remove a node that works.
+    ///
+    /// Split out from `resolve_funded_identity` because the health loop needs
+    /// the funding state on its own, to clear a parked funding card the moment
+    /// the wallet is funded — without that, the figure on the card froze at
+    /// whatever the one failed toggle measured.
+    async fn device_identity_and_funding(&self) -> Option<(String, FundingState)> {
+        let miner_key = self.config.get().miner_key?;
 
         let creds = match crate::api::credentials::lookup(&self.api_client, &miner_key).await {
             Ok(c) => c,
             Err(e) => {
                 // A lookup failure must not remove a node that would run.
                 warn!(error = %e, "Could not fetch device wallet - starting fryDVPN without it");
-                return Ok(None);
+                return None;
             }
         };
 
@@ -256,40 +560,154 @@ impl FryVpnIntegration {
         ) {
             IdentityPlan::StartWithoutIdentity => {
                 info!("No device wallet key available - starting fryDVPN without a node identity");
-                Ok(None)
+                None
             }
             IdentityPlan::UseIdentity { address, mnemonic } => {
                 // We hold this key, so the balance we measure IS the account
                 // frynode will spend from - only now is refusing justified.
-                let url = format!("{}/v2/accounts/{}", ALGOD_SERVER, address);
-                match reqwest::Client::new()
-                    .get(&url)
-                    .timeout(std::time::Duration::from_secs(10))
-                    .send()
-                    .await
-                {
-                    Ok(resp) => {
-                        match resp.text().await.ok().and_then(|b| parse_account_balance(&b)) {
-                            Some((amount, min_balance)) => {
-                                let spendable = spendable_microalgos(amount, min_balance);
-                                registration_affordability(
-                                    spendable,
-                                    REGISTRATION_MIN_MICROALGOS,
-                                    &address,
-                                )?;
-                            }
-                            None => warn!(
-                                "Could not read the fryDVPN wallet balance - starting without a pre-check"
-                            ),
-                        }
+                let state = match Self::read_wallet_balance(&address).await {
+                    Ok((amount, min_balance)) => match registration_funding_message(
+                        amount,
+                        min_balance,
+                        REGISTRATION_MIN_MICROALGOS,
+                        &address,
+                    ) {
+                        Ok(()) => FundingState::Affordable,
+                        Err(msg) => FundingState::Underfunded(msg),
+                    },
+                    Err(detail) => {
+                        warn!(
+                            detail = %detail,
+                            "Could not read the fryDVPN wallet balance - starting without a pre-check"
+                        );
+                        FundingState::Unmeasurable(detail)
                     }
-                    Err(e) => warn!(
-                        error = %e,
-                        "Could not reach algod for the fryDVPN balance pre-check - continuing"
-                    ),
-                }
-                Ok(Some(mnemonic))
+                };
+                Some((mnemonic, state))
             }
+        }
+    }
+
+    /// The real start. `trigger` decides whether the firewall rule may
+    /// raise a UAC prompt: only a user gesture ever may.
+    async fn start_inner(&self, trigger: crate::elevation_gate::ElevationTrigger) -> Result<()> {
+        let binary = Self::binary_path()?;
+
+        // BUG 6: pre-create firewall rules for this exact binary path so
+        // Windows never shows the firewall prompt at all (georgeparis 8/28
+        // worked around this by hand with `New-NetFirewallRule`). Non-fatal:
+        // a declined UAC just means Windows prompts as before. Only when the
+        // resolved path is absolute — a bare PATH-lookup name has nothing
+        // concrete to bind the rule to.
+        let binary_path = std::path::Path::new(&binary);
+        if binary_path.is_absolute() {
+            if let Err(e) = super::firewall::ensure_program_rules(
+                FRYNODE_RULE_NAME,
+                binary_path,
+                "fryvpn",
+                trigger,
+            ) {
+                warn!(error = %e, "Fry dVPN firewall rule setup failed — continuing");
+            }
+        }
+
+        // Build CLI flags for frynode
+        let mut args = vec![
+            "-registry-app-id".to_string(),
+            Self::registry_app_id(),
+            "-fvpn-asa-id".to_string(),
+            "2485198745".to_string(),
+            "-algod-server".to_string(),
+            Self::algod_server(),
+            "-algod-port".to_string(),
+            Self::algod_port(),
+            "-algod-token".to_string(),
+            Self::algod_token(),
+            "-api-port".to_string(),
+            "8088".to_string(),
+            "-wg-port".to_string(),
+            "51820".to_string(),
+            "-region".to_string(),
+            Self::region(),
+            "-capacity-mbps".to_string(),
+            Self::capacity_mbps().to_string(),
+        ];
+
+        // B11: pin the node identity to a location the storage-root preference
+        // cannot move. Without the flag frynode resolves "node-identity"
+        // against its working directory, so changing the storage root gave the
+        // node a brand new Algorand account.
+        let identity_dir = node_identity_dir(&super::download::default_partners_base_dir());
+        let adopted = adopt_identity(
+            &super::download::partners_base_dir()
+                .join("fryvpn")
+                .join("node-identity"),
+            &identity_dir,
+        );
+        if !adopted.is_empty() {
+            info!(
+                files = ?adopted,
+                anchored = ?identity_dir,
+                "Adopted an existing fryDVPN node identity from the configured storage root (the originals were left in place)"
+            );
+        }
+        args.push("-identity-dir".to_string());
+        args.push(identity_dir.to_string_lossy().into_owned());
+
+        // BUG 6: hand frynode the device's OWN funded account. Without this it
+        // generated a fresh 0-ALGO identity and RegisterNode failed with an
+        // overspend the user could do nothing about.
+        let mnemonic = match self.resolve_funded_identity().await {
+            Ok(m) => {
+                *PARKED_FUNDING_REASON.lock().unwrap() = None;
+                m
+            }
+            // B7/B8: an unaffordable wallet is a SETUP state, not a start
+            // failure. Bailing here returned from `toggle_integration` BEFORE
+            // `set_enabled`, so the toggle flipped itself back off, the health
+            // loop short-circuited to Stopped while disabled, and the balance
+            // was never read again — the funding figure froze at whatever that
+            // one failed toggle measured and the owner had to keep toggling.
+            // Park the instruction and succeed WITHOUT spawning frynode:
+            // nothing is submitted on chain, the integration stays enabled, and
+            // `health_check` re-reads the wallet every tick until it is funded.
+            Err(reason) => {
+                warn!(
+                    reason = %reason,
+                    "fryDVPN registration deferred until the device wallet is funded"
+                );
+                *PARKED_FUNDING_REASON.lock().unwrap() = Some(reason);
+                return Ok(());
+            }
+        };
+
+        {
+            let mut sup = self.supervisor.lock().unwrap();
+            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            // The mnemonic goes in the ENVIRONMENT, never in argv — argv is
+            // readable by any process via tasklist/WMI.
+            let env: Vec<(&str, &str)> = match mnemonic.as_deref() {
+                Some(m) => vec![("NODE_MNEMONIC", m)],
+                None => Vec::new(),
+            };
+            sup.start_integration_with_env("fryvpn", &binary, &arg_refs, &env)
+                .map_err(|e| anyhow::anyhow!("Failed to spawn frynode: {}", e))?;
+        }
+
+        info!("Fry dVPN started with CLI flags");
+        Ok(())
+    }
+
+    /// Fetch the device's provisioned Algorand identity and confirm it can
+    /// actually afford the on-chain registration (BUG 6).
+    ///
+    /// Returns the mnemonic to hand frynode. Any failure is a user-facing
+    /// sentence, never a raw chain error.
+    async fn resolve_funded_identity(&self) -> Result<Option<String>, String> {
+        match self.device_identity_and_funding().await {
+            None => Ok(None),
+            Some((_, FundingState::Underfunded(msg))) => Err(msg),
+            Some((mnemonic, _)) => Ok(Some(mnemonic)),
         }
     }
 }
@@ -317,69 +735,21 @@ impl Integration for FryVpnIntegration {
     }
 
     async fn start(&self) -> Result<()> {
-        let binary = Self::binary_path()?;
+        self.start_inner(crate::elevation_gate::ElevationTrigger::Automatic)
+            .await
+    }
 
-        // BUG 6: pre-create firewall rules for this exact binary path so
-        // Windows never shows the firewall prompt at all (georgeparis 8/28
-        // worked around this by hand with `New-NetFirewallRule`). Non-fatal:
-        // a declined UAC just means Windows prompts as before. Only when the
-        // resolved path is absolute — a bare PATH-lookup name has nothing
-        // concrete to bind the rule to.
-        let binary_path = std::path::Path::new(&binary);
-        if binary_path.is_absolute() {
-            if let Err(e) = super::firewall::ensure_program_rules(FRYNODE_RULE_NAME, binary_path) {
-                warn!(error = %e, "Fry dVPN firewall rule setup failed — continuing");
-            }
-        }
-
-        // Build CLI flags for frynode
-        let args = vec![
-            "-registry-app-id".to_string(),
-            "3636586918".to_string(),
-            "-fvpn-asa-id".to_string(),
-            "2485198745".to_string(),
-            "-algod-server".to_string(),
-            "https://mainnet-api.algonode.cloud".to_string(),
-            "-algod-port".to_string(),
-            "443".to_string(),
-            "-algod-token".to_string(),
-            "".to_string(), // algonode is tokenless
-            "-api-port".to_string(),
-            "8088".to_string(),
-            "-wg-port".to_string(),
-            "51820".to_string(),
-            "-region".to_string(),
-            Self::region(),
-            "-capacity-mbps".to_string(),
-            Self::capacity_mbps().to_string(),
-        ];
-
-        // BUG 6: hand frynode the device's OWN funded account. Without this it
-        // generated a fresh 0-ALGO identity and RegisterNode failed with an
-        // overspend the user could do nothing about.
-        let mnemonic = match self.resolve_funded_identity().await {
-            Ok(m) => m,
-            Err(reason) => anyhow::bail!("{reason}"),
-        };
-
-        {
-            let mut sup = self.supervisor.lock().unwrap();
-            let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            // The mnemonic goes in the ENVIRONMENT, never in argv — argv is
-            // readable by any process via tasklist/WMI.
-            let env: Vec<(&str, &str)> = match mnemonic.as_deref() {
-                Some(m) => vec![("NODE_MNEMONIC", m)],
-                None => Vec::new(),
-            };
-            sup.start_integration_with_env("fryvpn", &binary, &arg_refs, &env)
-                .map_err(|e| anyhow::anyhow!("Failed to spawn frynode: {}", e))?;
-        }
-
-        info!("Fry dVPN started with CLI flags");
-        Ok(())
+    /// B3: only a real click may raise UAC.
+    async fn start_for_user(&self) -> Result<()> {
+        self.start_inner(crate::elevation_gate::ElevationTrigger::UserClick)
+            .await
     }
 
     async fn stop(&self) -> Result<()> {
+        // A parked funding instruction describes a start that never happened;
+        // drop it so re-enabling measures the wallet again rather than showing
+        // a stale figure.
+        *PARKED_FUNDING_REASON.lock().unwrap() = None;
         {
             let mut sup = self.supervisor.lock().unwrap();
             sup.stop_integration("fryvpn")
@@ -389,7 +759,56 @@ impl Integration for FryVpnIntegration {
         Ok(())
     }
 
+    /// B9: a user disabling fryDVPN should DEREGISTER the node, not strand its
+    /// record and the 200_000 µALGO box MBR behind it on chain. FEM's only stop
+    /// was a hard kill, and on Windows a kill delivers no signal at all, so
+    /// frynode's shutdown path was unreachable however long FEM waited.
+    ///
+    /// Ask over loopback, give it a short budget to exit, then fall through to
+    /// the hard stop unconditionally — a node that will not exit must still be
+    /// stopped. Deliberately NOT inside `stop()`: the supervisor's restart path
+    /// keeps calling `stop()`, so a restart storm still costs zero on-chain
+    /// fees and leaves the registration in place.
+    async fn stop_for_disable(&self) -> Result<()> {
+        if request_graceful_shutdown(FRYNODE_API_PORT, Duration::from_secs(3)).await {
+            for _ in 0..20 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let alive = {
+                    let mut sup = self.supervisor.lock().unwrap();
+                    matches!(sup.get_status("fryvpn"), HealthStatus::Healthy)
+                };
+                if !alive {
+                    break;
+                }
+            }
+        }
+        self.stop().await
+    }
+
     async fn health_check(&self) -> HealthStatus {
+        // B7/B8: while a funding instruction is parked, frynode was never
+        // spawned, so re-read the wallet instead of reporting a dead process.
+        // This is what makes "registers automatically on the next check" true:
+        // the moment the wallet is funded the park clears, the not-running
+        // branch below arms the supervisor's existing restart, and `start()`
+        // re-runs against a wallet that can pay — with no user toggling.
+        let parked = PARKED_FUNDING_REASON.lock().unwrap().is_some();
+        if parked {
+            match self.device_identity_and_funding().await {
+                Some((_, FundingState::Underfunded(msg))) => {
+                    *PARKED_FUNDING_REASON.lock().unwrap() = Some(msg.clone());
+                    return HealthStatus::Unhealthy(msg);
+                }
+                // Keep the park rather than churning frynode while algod is
+                // unreadable, and never quote a balance we could not measure.
+                Some((_, FundingState::Unmeasurable(detail))) => {
+                    return HealthStatus::Unhealthy(balance_unreadable_message(&detail));
+                }
+                // Affordable now, or we no longer hold a key to measure.
+                _ => *PARKED_FUNDING_REASON.lock().unwrap() = None,
+            }
+        }
+
         // Check process alive first
         let process_alive = {
             let mut sup = self.supervisor.lock().unwrap();
@@ -397,19 +816,50 @@ impl Integration for FryVpnIntegration {
         };
 
         if !process_alive {
+            // B10: before blaming frynode, find out whether anything else is
+            // holding its API port. Restarting cannot take a port away from
+            // another program, and doing it every 30 s is how the restart
+            // budget was spent before the user ever read the card.
+            match super::port_conflict::probe(FRYNODE_API_PORT) {
+                super::port_conflict::PortState::Free => {}
+                super::port_conflict::PortState::HeldBy { pid, ref image }
+                    if image.eq_ignore_ascii_case("frynode.exe") =>
+                {
+                    // An UNTRACKED frynode: one this Supervisor holds no handle
+                    // on, left behind when FEM was killed rather than closed.
+                    // `stop_integration` can only kill what is in its own map,
+                    // which is why users reported having to toggle three or
+                    // four times before the node came up. Clear it by PID (not
+                    // by image name — a second FEM instance's node is not ours
+                    // to kill) and let the ordinary restart below take over.
+                    warn!(
+                        pid,
+                        "An untracked frynode holds the dVPN API port — clearing it"
+                    );
+                    #[cfg(target_os = "windows")]
+                    {
+                        use crate::supervisor::platform::BoundedOutput;
+                        let _ = crate::supervisor::platform::command("taskkill")
+                            .args(["/PID", &pid.to_string(), "/T", "/F"])
+                            .output_bounded(Duration::from_secs(3));
+                    }
+                }
+                ref state => {
+                    return HealthStatus::Unhealthy(super::port_conflict::conflict_reason(
+                        state,
+                        FRYNODE_API_PORT,
+                    ))
+                }
+            }
+
             // BUG 6: say why instead of a bare Stopped (see
-            // `process_not_running_reason`).
+            // `process_not_running_reason`). B9: and never quote frynode's own
+            // shutdown sequence as the failure.
             let stderr_path = self.log_dir.join("fryvpn").join("fryvpn_stderr.log");
             let stderr_content = tokio::fs::read_to_string(&stderr_path)
                 .await
                 .unwrap_or_default();
-            let tail = super::stderr_tail(&stderr_content, 3);
-            let tail = if tail == "no error output" {
-                String::new()
-            } else {
-                tail
-            };
-            return HealthStatus::Unhealthy(process_not_running_reason(&tail));
+            return HealthStatus::Unhealthy(not_running_reason_from_stderr(&stderr_content));
         }
 
         // F5: the frynode HTTP endpoint and its on-chain registration both settle
@@ -709,6 +1159,48 @@ mod tests {
             "must not collide with Olostep's rule"
         );
     }
+
+    /// B8: the registration path was pinned to mainnet in two independent
+    /// literals, so it could not be exercised against LocalNet at all and a
+    /// throttled endpoint could not be redirected without a rebuild. These
+    /// live in `mod tests` rather than a module of their own because they
+    /// mutate process-global environment and must share `ENV_LOCK` with the
+    /// other env tests.
+    #[test]
+    fn the_algod_endpoint_defaults_to_mainnet_and_honours_the_override() {
+        let g = EnvGuard::acquire("FRYNODE_ALGOD_SERVER");
+        g.unset();
+        assert_eq!(
+            FryVpnIntegration::algod_server(),
+            "https://mainnet-api.algonode.cloud"
+        );
+        g.set("http://127.0.0.1:4001");
+        assert_eq!(FryVpnIntegration::algod_server(), "http://127.0.0.1:4001");
+        g.set("   ");
+        assert_eq!(
+            FryVpnIntegration::algod_server(),
+            "https://mainnet-api.algonode.cloud",
+            "a blank override must fall back, never produce an empty URL"
+        );
+    }
+
+    #[test]
+    fn the_registry_app_id_defaults_to_mainnet_and_honours_the_override() {
+        let g = EnvGuard::acquire("FRYNODE_REGISTRY_APP_ID");
+        g.unset();
+        assert_eq!(FryVpnIntegration::registry_app_id(), "3636586918");
+        g.set("1011");
+        assert_eq!(FryVpnIntegration::registry_app_id(), "1011");
+    }
+
+    #[test]
+    fn the_algod_port_defaults_to_https_and_honours_the_override() {
+        let g = EnvGuard::acquire("FRYNODE_ALGOD_PORT");
+        g.unset();
+        assert_eq!(FryVpnIntegration::algod_port(), "443");
+        g.set("4001");
+        assert_eq!(FryVpnIntegration::algod_port(), "4001");
+    }
 }
 
 /// BUG 6 (minerman): fryDVPN on-chain registration fails — wallet Z2HCY…GTMKI
@@ -840,6 +1332,305 @@ mod bug6_identity_fallback_tests {
             ),
             "without the key we cannot know which account frynode will use, so we must not \
              block on a balance we did not measure"
+        );
+    }
+}
+
+/// B7/B8: the registration requirement must be the cost of the group frynode
+/// ACTUALLY submits, not a round number.
+///
+/// frynode's `RegisterNode` (node/registry/registry.go) composes a two-txn
+/// group — a payment of `defaultMBR` = 200_000 µALGO to the registry app
+/// address, which funds this node's on-chain box, plus the `register_node`
+/// app call — and neither txn sets `FlatFee`, so both pay the network minimum
+/// fee of 1_000. The shipped requirement of 100_000 counted the fees and
+/// forgot the box payment entirely, so a wallet that PASSED this pre-check
+/// still had its registration rejected on chain with an `overspend` the owner
+/// could do nothing about.
+#[cfg(test)]
+mod b7_registration_cost_tests {
+    use super::*;
+
+    /// The two invariants behind these numbers — that the requirement covers
+    /// the whole group, and that it leaves enough to deregister afterwards —
+    /// are enforced as `const _` assertions beside the constant itself, so
+    /// lowering it fails the BUILD rather than a test. What is worth pinning
+    /// here is the VALUE, because it is what the user is told to send.
+
+    #[test]
+    fn the_requirement_is_the_measured_cost_plus_the_documented_margin() {
+        // 200_000 box MBR + 2 x 1_000 min fee = 202_000 measured, plus a
+        // 10_000 µALGO documented margin covering a min-fee change and
+        // box-size variation.
+        assert_eq!(REGISTRATION_MIN_MICROALGOS, 212_000);
+    }
+
+    /// §6 B8 Done-when: boundary tests at 0, requirement-1, requirement and
+    /// requirement+1. These run against whatever the constant is, so they keep
+    /// pinning the gate if the derivation ever changes.
+    #[test]
+    fn the_gate_is_exact_at_its_boundaries() {
+        let req = REGISTRATION_MIN_MICROALGOS;
+        assert!(registration_affordability(0, req, "ADDR").is_err());
+        assert!(registration_affordability(req - 1, req, "ADDR").is_err());
+        assert!(registration_affordability(req, req, "ADDR").is_ok());
+        assert!(registration_affordability(req + 1, req, "ADDR").is_ok());
+    }
+}
+
+/// B8: "I sent 0.1 Algo to the address in the error message, but it still says
+/// 0.000 ALGO after a few hours."
+///
+/// The card was built from SPENDABLE on both sides — required and held — so a
+/// wallet holding exactly the 0.1 ALGO the card asked for displayed as 0.000:
+/// on mainnet that account reads amount=100_014 / min-balance=100_000, and
+/// 100_014 - 100_000 = 14 µALGO formats as "0.000". These pin the display to
+/// TOTAL NEEDED vs the on-chain `amount`, which is the number the owner sees in
+/// their wallet.
+#[cfg(test)]
+mod b8_funding_display_tests {
+    use super::*;
+
+    const MIN_BAL: u64 = 100_000;
+
+    #[test]
+    fn a_wallet_holding_0_1_algo_is_never_reported_as_holding_nothing() {
+        let msg =
+            registration_funding_message(100_014, MIN_BAL, REGISTRATION_MIN_MICROALGOS, "ADDR")
+                .expect_err("14 µALGO spendable cannot afford registration");
+        assert!(
+            !msg.contains("0.000"),
+            "a wallet holding 0.100 ALGO on chain must never be displayed as 0.000: {msg}"
+        );
+        assert!(
+            msg.contains("0.100"),
+            "the card must quote the on-chain amount the owner can see: {msg}"
+        );
+        assert!(
+            msg.contains("0.312"),
+            "the card must quote TOTAL needed, not the spendable requirement: {msg}"
+        );
+        assert!(
+            msg.contains("0.212"),
+            "the card must name exactly how much more to send: {msg}"
+        );
+        assert!(msg.contains("ADDR"), "and where to send it: {msg}");
+    }
+
+    #[test]
+    fn an_empty_wallet_is_asked_for_the_whole_total() {
+        let msg = registration_funding_message(0, MIN_BAL, REGISTRATION_MIN_MICROALGOS, "ADDR")
+            .unwrap_err();
+        assert!(
+            msg.contains("send 0.312 ALGO"),
+            "an empty wallet must be told the account minimum too: {msg}"
+        );
+    }
+
+    /// §6 B8 Done-when: boundaries at 0, requirement-1, requirement,
+    /// requirement+1 — expressed in on-chain `amount`, which is what the user
+    /// actually sends.
+    #[test]
+    fn the_displayed_total_is_exact_at_its_boundaries() {
+        let total = REGISTRATION_MIN_MICROALGOS + MIN_BAL;
+        assert_eq!(total, 312_000);
+        assert!(
+            registration_funding_message(0, MIN_BAL, REGISTRATION_MIN_MICROALGOS, "A").is_err()
+        );
+        assert!(
+            registration_funding_message(total - 1, MIN_BAL, REGISTRATION_MIN_MICROALGOS, "A")
+                .is_err()
+        );
+        assert!(
+            registration_funding_message(total, MIN_BAL, REGISTRATION_MIN_MICROALGOS, "A").is_ok()
+        );
+        assert!(
+            registration_funding_message(total + 1, MIN_BAL, REGISTRATION_MIN_MICROALGOS, "A")
+                .is_ok()
+        );
+    }
+
+    /// The message the users quoted contained two runs of ten spaces, from the
+    /// Rust source being line-wrapped inside a string literal.
+    #[test]
+    fn the_funding_message_has_no_run_on_whitespace() {
+        let msg = registration_funding_message(0, MIN_BAL, REGISTRATION_MIN_MICROALGOS, "ADDR")
+            .unwrap_err();
+        assert!(!msg.contains("  "), "double space rendered verbatim: {msg}");
+    }
+
+    /// An unreachable or rate-limited endpoint must never be rendered as a
+    /// balance — telling an owner who has already funded the wallet that it
+    /// holds 0.000 is exactly the bug this run is fixing.
+    #[test]
+    fn an_unreadable_balance_quotes_no_figure_at_all() {
+        let msg = balance_unreadable_message("algod returned HTTP 403 Forbidden");
+        assert!(!msg.contains("0.000"), "{msg}");
+        assert!(!msg.contains("ALGO)"), "{msg}");
+        assert!(msg.contains("could not read"), "{msg}");
+        assert!(crate::integrations::awaits_user_action(&msg));
+    }
+}
+
+/// B7/B8: an unfunded device wallet is a SETUP state, not a red failure and
+/// not something to restart frynode over.
+///
+/// Before this, the funding message matched neither awaiting-marker, so
+/// `recovery_action` returned `Restart` and the card rendered as a red
+/// UNHEALTHY badge instead of the amber "Setup required" the frontend already
+/// has for exactly this case.
+#[cfg(test)]
+mod b7_funding_state_tests {
+    use super::*;
+    use crate::supervisor::health::{recovery_action, RecoveryAction};
+
+    #[test]
+    fn an_unfunded_wallet_is_a_setup_state_not_a_red_failure() {
+        let msg = registration_funding_message(0, 100_000, REGISTRATION_MIN_MICROALGOS, "ADDR")
+            .unwrap_err();
+        assert!(
+            msg.starts_with(FUNDING_MARKER),
+            "the marker must be a PREFIX — the frontend matches it with startsWith: {msg}"
+        );
+        assert!(
+            crate::integrations::awaits_user_action(&msg),
+            "must be recognised as awaiting the user: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_funding_reason_is_never_restarted() {
+        let msg = registration_funding_message(0, 100_000, REGISTRATION_MIN_MICROALGOS, "ADDR")
+            .unwrap_err();
+        assert_eq!(
+            recovery_action(&HealthStatus::Unhealthy(msg), true, 0, 6),
+            RecoveryAction::None,
+            "restarting frynode cannot make a wallet richer, and doing it every 30 s is the \
+             restart storm users reported"
+        );
+    }
+
+    /// Guard on the marker set itself: widening it must not swallow a real
+    /// fault that the supervisor SHOULD recover from.
+    #[test]
+    fn the_new_marker_does_not_swallow_real_frynode_faults() {
+        assert!(!crate::integrations::awaits_user_action(
+            &process_not_running_reason("failed to load config: REGION is required")
+        ));
+        assert!(!crate::integrations::awaits_user_action(
+            "frynode process is not running"
+        ));
+    }
+}
+
+/// B9's shutdown-path behaviour has its own file so these tests can reach the
+/// module-private helpers without widening them for the whole crate — the same
+/// arrangement `pawns.rs` uses for its consent and retention tests.
+#[cfg(test)]
+#[path = "fryvpn_shutdown_tests.rs"]
+mod fryvpn_shutdown_tests;
+
+/// B11 — the node identity must survive a storage-root change.
+///
+/// frynode resolved its identity directory relative to its working directory,
+/// which FEM sets from the user-configurable storage root. Pointing the
+/// storage root somewhere else therefore hid the identity, and a missing
+/// `account.txt` is silently replaced by a freshly generated Algorand account
+/// — the account the node registers with and is paid to.
+#[cfg(test)]
+mod b11_identity_dir_tests {
+    use super::*;
+
+    #[test]
+    fn the_identity_dir_is_anchored_and_does_not_follow_the_storage_root() {
+        let default_root = std::path::Path::new("/default/partners");
+        assert_eq!(
+            node_identity_dir(default_root),
+            PathBuf::from("/default/partners/fryvpn/node-identity")
+        );
+        // A different root must yield a different path ONLY because it was
+        // passed explicitly — the production call site always passes
+        // `default_partners_base_dir()`, never `partners_base_dir()`.
+        assert_ne!(
+            node_identity_dir(std::path::Path::new("/some/other/root")),
+            node_identity_dir(default_root)
+        );
+    }
+
+    #[test]
+    fn adopt_copies_the_identity_and_never_removes_the_source() {
+        let old_root = tempfile::tempdir().unwrap();
+        let new_root = tempfile::tempdir().unwrap();
+        let from = old_root.path().join("fryvpn").join("node-identity");
+        let to = node_identity_dir(new_root.path());
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::write(from.join("account.txt"), b"word ".repeat(25)).unwrap();
+        std::fs::write(from.join("wg.key"), b"privkey").unwrap();
+
+        let adopted = adopt_identity(&from, &to);
+
+        assert!(adopted.contains(&"account.txt".to_string()), "{adopted:?}");
+        assert_eq!(
+            std::fs::read(to.join("account.txt")).unwrap(),
+            std::fs::read(from.join("account.txt")).unwrap(),
+            "the adopted account must be byte-identical"
+        );
+        assert!(
+            from.join("account.txt").exists(),
+            "the source may be the only copy of an account holding funds — it must never be moved"
+        );
+        assert!(from.join("wg.key").exists());
+    }
+
+    #[test]
+    fn adopt_never_overwrites_an_existing_identity() {
+        let old_root = tempfile::tempdir().unwrap();
+        let new_root = tempfile::tempdir().unwrap();
+        let from = old_root.path().join("fryvpn").join("node-identity");
+        let to = node_identity_dir(new_root.path());
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+        std::fs::write(from.join("account.txt"), b"OLD").unwrap();
+        std::fs::write(to.join("account.txt"), b"ANCHORED").unwrap();
+
+        assert!(
+            adopt_identity(&from, &to).is_empty(),
+            "an anchored identity already exists; adopting over it would replace a live account"
+        );
+        assert_eq!(
+            std::fs::read(to.join("account.txt")).unwrap(),
+            b"ANCHORED".to_vec()
+        );
+        assert_eq!(
+            std::fs::read(from.join("account.txt")).unwrap(),
+            b"OLD".to_vec()
+        );
+    }
+
+    #[test]
+    fn adopt_is_a_no_op_when_there_is_nothing_to_adopt() {
+        let root = tempfile::tempdir().unwrap();
+        let from = root.path().join("absent");
+        let to = node_identity_dir(root.path());
+        assert!(adopt_identity(&from, &to).is_empty());
+        assert!(
+            !to.exists(),
+            "a fresh install must not have an empty identity directory created for it"
+        );
+    }
+
+    /// Same path in and out must never copy a file onto itself.
+    #[test]
+    fn adopt_ignores_an_identical_source_and_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = node_identity_dir(root.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("account.txt"), b"KEEP").unwrap();
+
+        assert!(adopt_identity(&dir, &dir).is_empty());
+        assert_eq!(
+            std::fs::read(dir.join("account.txt")).unwrap(),
+            b"KEEP".to_vec()
         );
     }
 }

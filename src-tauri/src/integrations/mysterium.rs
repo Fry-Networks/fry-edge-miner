@@ -10,9 +10,27 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, warn};
 
+/// Only read by the superseded `fetch_latest_release`.
+#[allow(dead_code)]
 const GITHUB_API_URL: &str =
-    "https://api.github.com/repos/Fry-Foundation/fem-partner-binaries/releases/latest";
+    "https://api.github.com/repos/Fry-Networks/fem-partner-binaries/releases/latest";
 const USER_AGENT: &str = concat!("FryEdgeMiner/", env!("CARGO_PKG_VERSION"));
+
+/// The exact sdk_client asset MystNodes installs, pinned to a release TAG.
+///
+/// `releases/latest` meant the installed binary changed the moment a new
+/// release appeared, with nothing recording or verifying which one landed.
+const SDK_CLIENT_URL: &str = "https://github.com/Fry-Networks/fem-partner-binaries/releases/download/v1.0.0/sdk_client-windows-x86_64.exe";
+
+/// sha256 of the asset at `SDK_CLIENT_URL`, measured from the published file
+/// (16,293,376 bytes, PE32+ x86-64).
+///
+/// PROVENANCE, stated plainly: this is the digest of Fry's own re-host, not an
+/// upstream-published checksum — Mysterium publishes none for this artifact.
+/// It pins WHAT gets installed and detects corruption or substitution after
+/// the fact, which is what the permanent-failure reports needed; it is not an
+/// independent supply-chain attestation.
+const SDK_CLIENT_SHA256: &str = "9d022fb1b990afac59981a899ccc362aa9aed854555248a93001ef9130d57990";
 
 /// Log level passed to sdk_client.exe — confirmed from live NSSM earner's AppParameters.
 const SDK_LOG_LEVEL: &str = "info";
@@ -61,6 +79,9 @@ impl MysteriumIntegration {
             .expect("failed to build GitHub HTTP client")
     }
 
+    /// Superseded by the tag-pinned `SDK_CLIENT_URL`. Kept rather than deleted
+    /// so this change stays a pin, not a rewrite of the download path.
+    #[allow(dead_code)]
     async fn fetch_latest_release() -> Result<(String, String)> {
         let client = Self::build_client();
         let max_attempts = 3u32;
@@ -180,6 +201,54 @@ impl MysteriumIntegration {
     }
 
     /// Strip ANSI escape sequences from a log line (zerolog colored output).
+    /// sha256 of a file on disk, streamed. Same loop as `titan.rs`.
+    fn compute_sha256(path: &std::path::Path) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+
+        let mut file = std::fs::File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            let n = file.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    /// Does the file on disk match the pin? `false` on any io error — an
+    /// unreadable file is not a trusted one.
+    fn staged_binary_matches_pin(path: &std::path::Path, expected: &str) -> bool {
+        match Self::compute_sha256(path) {
+            Ok(actual) => actual.eq_ignore_ascii_case(expected),
+            Err(e) => {
+                warn!(error = %e, path = ?path, "Could not hash the sdk_client binary");
+                false
+            }
+        }
+    }
+
+    /// Move a binary that does not match the pin out of the way so `install()`
+    /// can replace it.
+    ///
+    /// Renamed, never deleted: the displaced file is the only evidence of what
+    /// was actually there, and a truncated or substituted partner binary is
+    /// exactly the thing worth keeping for diagnosis. Same rename-not-delete
+    /// shape as `space_acres::quarantine_staged_installer`.
+    fn quarantine_untrusted_binary(binary: &std::path::Path) {
+        let dest = Self::partner_dir().join("sdk_client.untrusted.exe");
+        match std::fs::rename(binary, &dest) {
+            Ok(()) => warn!(
+                moved_to = ?dest,
+                "The installed sdk_client did not match its pinned digest — quarantined for reinstall"
+            ),
+            Err(e) => warn!(error = %e, "Could not quarantine the untrusted sdk_client"),
+        }
+    }
+
     fn strip_ansi(s: &str) -> String {
         let mut result = String::with_capacity(s.len());
         let mut in_escape = false;
@@ -212,6 +281,29 @@ fn process_not_running_reason(stderr_tail: &str) -> String {
     }
 }
 
+/// PURE: the first sdk_client log line that explains a failure, if any.
+///
+/// The check used to collapse to a bool and return the fixed string "Error
+/// detected in SDK client logs" — the matched line was thrown away, so neither
+/// the card nor the debug bundle ever said WHAT went wrong, while the health
+/// loop restarted the process on it every tick.
+///
+/// The line is scrubbed before it is surfaced, because sdk_client's argv
+/// carries `--user.token`.
+fn log_error_reason(recent_lines: &[String]) -> Option<String> {
+    let line = recent_lines
+        .iter()
+        .find(|l| l.contains(" ERR ") || l.contains(" FTL "))?;
+    let scrubbed = crate::logging::scrubber::scrub_line(line);
+    let scrubbed = if scrubbed.chars().count() > super::MAX_STDERR_CHARS {
+        let head: String = scrubbed.chars().take(super::MAX_STDERR_CHARS).collect();
+        format!("{head}…")
+    } else {
+        scrubbed
+    };
+    Some(format!("Error detected in SDK client logs: {scrubbed}"))
+}
+
 #[async_trait]
 impl Integration for MysteriumIntegration {
     fn id(&self) -> &str {
@@ -225,17 +317,31 @@ impl Integration for MysteriumIntegration {
     async fn install(&self) -> Result<()> {
         let binary = Self::binary_path();
         if binary.exists() {
-            info!(path = ?binary, "sdk_client binary already present");
-            return Ok(());
+            if Self::staged_binary_matches_pin(&binary, SDK_CLIENT_SHA256) {
+                info!(path = ?binary, "sdk_client binary already present and matches its pin");
+                return Ok(());
+            }
+            // Mere existence used to be proof enough, so a truncated,
+            // corrupted or substituted sdk_client was trusted forever: install()
+            // returned early, installed_version() reported "installed" so
+            // toggle_integration never called install() again, and
+            // force_reinstall_integration is hard-gated to Olostep. There was no
+            // repair path at all, which is why the failure was permanent.
+            Self::quarantine_untrusted_binary(&binary);
         }
 
-        info!("Installing MystNodes sdk_client from GitHub latest release");
-
-        let (version, download_url) = Self::fetch_latest_release().await?;
-        info!(version = %version, download_url = %download_url, "Found latest release");
+        info!(url = %SDK_CLIENT_URL, "Installing the pinned MystNodes sdk_client");
 
         let token = Self::github_token();
-        download_file_with_options(&download_url, &binary, USER_AGENT, token.as_deref()).await?;
+        download_file_with_options(SDK_CLIENT_URL, &binary, USER_AGENT, token.as_deref()).await?;
+
+        let digest = Self::compute_sha256(&binary)?;
+        if !digest.eq_ignore_ascii_case(SDK_CLIENT_SHA256) {
+            Self::quarantine_untrusted_binary(&binary);
+            anyhow::bail!(
+                "the downloaded sdk_client does not match its pinned digest (expected {SDK_CLIENT_SHA256}, got {digest}) — it was quarantined and not installed"
+            );
+        }
 
         #[cfg(not(target_os = "windows"))]
         {
@@ -244,7 +350,7 @@ impl Integration for MysteriumIntegration {
             std::fs::set_permissions(&binary, perms)?;
         }
 
-        info!(binary = ?binary, version = %version, "MystNodes sdk_client installed successfully");
+        info!(binary = ?binary, "MystNodes sdk_client installed and verified against its pin");
         Ok(())
     }
 
@@ -252,6 +358,19 @@ impl Integration for MysteriumIntegration {
         let binary = Self::binary_path();
         if !binary.exists() {
             anyhow::bail!("sdk_client binary not found at {}", binary.display());
+        }
+        // One repair attempt: a binary that does not match the pin is replaced
+        // rather than handed to CreateProcessW, which is the only self-heal
+        // MystNodes has (force_reinstall_integration covers Olostep only).
+        if !Self::staged_binary_matches_pin(&binary, SDK_CLIENT_SHA256) {
+            warn!("The installed sdk_client does not match its pinned digest — reinstalling it");
+            self.install().await?;
+            if !Self::staged_binary_matches_pin(&binary, SDK_CLIENT_SHA256) {
+                anyhow::bail!(
+                    "sdk_client could not be restored to its pinned version — the file at {} is still untrusted",
+                    binary.display()
+                );
+            }
         }
 
         // Credential fetch (Diiisco pattern)
@@ -374,12 +493,8 @@ impl Integration for MysteriumIntegration {
             .collect();
 
         // Check for error markers — anchored, space-bounded (zerolog: INF/WRN/ERR/FTL)
-        let has_errors = recent_lines
-            .iter()
-            .any(|l| l.contains(" ERR ") || l.contains(" FTL "));
-
-        if has_errors {
-            return HealthStatus::Unhealthy("Error detected in SDK client logs".to_string());
+        if let Some(reason) = log_error_reason(&recent_lines) {
+            return HealthStatus::Unhealthy(reason);
         }
 
         // Check for QUIC connection success
@@ -480,3 +595,7 @@ mod tests {
         assert!(reason.starts_with("Mysterium SDK client process is not running: "));
     }
 }
+
+#[cfg(test)]
+#[path = "mysterium_pin_tests.rs"]
+mod mysterium_pin_tests;

@@ -111,10 +111,17 @@ pub struct DiiiscoIntegration {
 }
 
 fn deploy_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .expect("no local data dir")
-        .join("FryEdgeMiner")
-        .join("diiisco")
+    // B13: this used to resolve `dirs::data_local_dir()` directly and never
+    // consult the storage root, so a user who moved storage left this
+    // deployment stranded at the old location. An existing legacy directory is
+    // grandfathered, so nothing live moves and no migration is needed.
+    super::download::resolve_deploy_dir(
+        dirs::data_local_dir()
+            .expect("no local data dir")
+            .join("FryEdgeMiner")
+            .join("diiisco"),
+        super::download::partners_base_dir().join("diiisco"),
+    )
 }
 
 /// Fetch credentials with exponential-backoff retry on network errors.
@@ -169,7 +176,7 @@ fn compose_file() -> PathBuf {
 /// published to a registry, so `compose up` must not be allowed to fall back
 /// to pulling it.
 fn image_built() -> bool {
-    crate::supervisor::platform::command("docker")
+    crate::integrations::docker_manager::docker_command()
         .args(["images", "-q", "diiisco-node:latest"])
         .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
         .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
@@ -204,10 +211,9 @@ impl Integration for DiiiscoIntegration {
         // Ensure Docker is available, auto-installing if needed
         super::docker_manager::ensure_docker().await?;
 
-        let deploy_dir = dirs::data_local_dir()
-            .ok_or_else(|| anyhow::anyhow!("Cannot resolve local app data dir"))?
-            .join("FryEdgeMiner")
-            .join("diiisco");
+        // Was an inline duplicate of `deploy_dir()`, which meant the two could
+        // disagree about where Diiisco lives.
+        let deploy_dir = deploy_dir();
 
         // Write Docker files from embedded content
         let node_dir = deploy_dir.join("diiisco-node");
@@ -253,7 +259,7 @@ impl Integration for DiiiscoIntegration {
             anyhow::bail!("DIIISCO_BEARER_TOKEN not configured — set the environment variable before enabling Diiisco");
         }
         info!("Building Diiisco Docker image");
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["compose", "build"])
             .env("ALGO_ADDRESS", &algo_address)
             .env("ALGO_MNEMONIC", &algo_mnemonic)
@@ -333,7 +339,7 @@ impl Integration for DiiiscoIntegration {
         // from a registry — "pull access denied". Build first.
         if !image_built() {
             info!("diiisco-node image missing — building before start");
-            let output = crate::supervisor::platform::command("docker")
+            let output = crate::integrations::docker_manager::docker_command()
                 .args(["compose", "build"])
                 .env("ALGO_ADDRESS", &algo_address)
                 .env("ALGO_MNEMONIC", &algo_mnemonic)
@@ -353,7 +359,7 @@ impl Integration for DiiiscoIntegration {
         // runs ("network diiisco_default already exists"). Volumes survive.
         // Failures don't block startup, but they must be visible in logs.
         info!("Cleaning up stale Diiisco containers/networks");
-        match crate::supervisor::platform::command("docker")
+        match crate::integrations::docker_manager::docker_command()
             .args(["compose", "down", "--remove-orphans"])
             .env("ALGO_ADDRESS", &algo_address)
             .env("ALGO_MNEMONIC", &algo_mnemonic)
@@ -376,7 +382,7 @@ impl Integration for DiiiscoIntegration {
         }
 
         info!("Starting Diiisco containers");
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["compose", "up", "-d"])
             .env("ALGO_ADDRESS", &algo_address)
             .env("ALGO_MNEMONIC", &algo_mnemonic)
@@ -397,7 +403,7 @@ impl Integration for DiiiscoIntegration {
     async fn stop(&self) -> Result<()> {
         let compose = compose_file();
         if compose.exists() {
-            crate::supervisor::platform::command("docker")
+            crate::integrations::docker_manager::docker_command()
                 .args(["compose", "-f", &compose.to_string_lossy(), "stop"])
                 .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
             info!("Stopped Diiisco containers");

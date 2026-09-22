@@ -25,6 +25,52 @@ pub struct AemIntegration {
 }
 
 impl AemIntegration {
+    /// The real start. `trigger` decides whether the firewall rule may raise a
+    /// UAC prompt: only a user gesture ever may (B3).
+    async fn start_inner(&self, trigger: crate::elevation_gate::ElevationTrigger) -> Result<()> {
+        if self.is_running() {
+            info!("OlostepBrowser already running");
+            return Ok(());
+        }
+        let binary = Self::olostep_binary()
+            .ok_or_else(|| anyhow::anyhow!("OlostepBrowser not installed"))?;
+        // Re-assert the staged config before launch — an Olostep self-update
+        // may have wiped it, which would re-prompt the user for a permission
+        // they already granted via the FEM toggle.
+        if let Err(e) = Self::stage_config() {
+            warn!(error = %e, "Could not re-stage OlostepBrowser config before start");
+        }
+        // Pre-create firewall rules for this exact binary path so Windows
+        // never shows the firewall prompt (the path changes on every Olostep
+        // Squirrel self-update, which re-triggered the prompt each time).
+        // Non-fatal: a declined UAC just means Windows prompts as before.
+        if let Err(e) = super::firewall::ensure_program_rules(
+            super::firewall::OLOSTEP_RULE_NAME,
+            &binary,
+            "aem",
+            trigger,
+        ) {
+            warn!(error = %e, "Olostep firewall rule setup failed — continuing");
+        }
+        info!(binary = ?binary, "Starting OlostepBrowser");
+        let child = crate::supervisor::platform::command(&binary).spawn()?;
+        // B4 (D-03): every partner FEM spawns joins the kill-on-close job,
+        // Olostep included, so an abnormal FEM exit cannot leave a browser
+        // running with no owner. FEM's normal quit stops partners gracefully
+        // first (main.rs's ExitRequested handler), so the job's abrupt kill
+        // only happens when FEM itself died abnormally — the orphan case.
+        // B20: the same job carries BELOW_NORMAL, which reaches Olostep's
+        // Chromium renderer/GPU/utility children as well as the parent.
+        crate::supervisor::platform::adopt_into_partner_job(&child);
+        // BUG 10: track the child so is_running()/stop() can target it
+        // directly instead of only an untargeted image-name scan.
+        if let Ok(mut guard) = self.child.lock() {
+            *guard = Some(child);
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        Ok(())
+    }
+
     /// Find OlostepBrowser.exe under %LOCALAPPDATA%\Olostep-Browser\app-*\
     fn olostep_binary() -> Option<PathBuf> {
         let local_app = dirs::data_local_dir()?;
@@ -130,17 +176,27 @@ impl AemIntegration {
     }
 
     /// Summed WorkingSet + CPU-seconds of all OlostepBrowser processes.
+    ///
+    /// B20: the same tick also drops every OlostepBrowser process to
+    /// BELOW_NORMAL. The job object covers what FEM SPAWNS, but FEM's own
+    /// staged config (`"auto-start-enabled": true`) makes Windows start Olostep
+    /// at logon, so FEM usually ADOPTS an instance it never spawned — and the
+    /// 40% CPU the user reported lives in the Chromium renderer/GPU/utility
+    /// children, which FEM holds no handle to either. Folded into the EXISTING
+    /// per-tick PowerShell so the tick starts no extra process, and unelevated,
+    /// which is why B20's "no popups, no elevation" soak still holds:
+    /// lowering priority on same-user processes needs no admin.
     fn resource_sample() -> Option<crate::supervisor::resource_guard::Sample> {
         #[cfg(target_os = "windows")]
         {
+            let script = format!(
+                "{}; $p = Get-Process OlostepBrowser -ErrorAction SilentlyContinue; \
+                 if ($p) {{ $ws = ($p | Measure-Object WorkingSet64 -Sum).Sum; \
+                 $cpu = ($p | Measure-Object CPU -Sum).Sum; Write-Output \"$ws|$cpu\" }}",
+                crate::supervisor::platform::below_normal_script("OlostepBrowser")
+            );
             let out = crate::supervisor::platform::command("powershell")
-                .args([
-                    "-NoProfile",
-                    "-Command",
-                    "$p = Get-Process OlostepBrowser -ErrorAction SilentlyContinue; \
-                     if ($p) { $ws = ($p | Measure-Object WorkingSet64 -Sum).Sum; \
-                     $cpu = ($p | Measure-Object CPU -Sum).Sum; Write-Output \"$ws|$cpu\" }",
-                ])
+                .args(["-NoProfile", "-Command", &script])
                 .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
                 .ok()?;
             let text = String::from_utf8_lossy(&out.stdout);
@@ -230,7 +286,12 @@ impl AemIntegration {
         }
         // Rules are keyed to the install path being wiped below; deleting
         // them here (not on every disable) avoids a UAC prompt per toggle.
-        super::firewall::delete_rules(super::firewall::OLOSTEP_RULE_NAME);
+        // Force-clean is reached only from the user's own reinstall click.
+        super::firewall::delete_rules(
+            super::firewall::OLOSTEP_RULE_NAME,
+            "aem",
+            crate::elevation_gate::ElevationTrigger::UserClick,
+        );
         let dirs_to_remove = [
             dirs::data_local_dir().map(|d| d.join("Olostep-Browser")),
             dirs::data_local_dir().map(|d| d.join("SquirrelTemp")),
@@ -359,36 +420,14 @@ impl Integration for AemIntegration {
     }
 
     async fn start(&self) -> Result<()> {
-        if self.is_running() {
-            info!("OlostepBrowser already running");
-            return Ok(());
-        }
-        let binary = Self::olostep_binary()
-            .ok_or_else(|| anyhow::anyhow!("OlostepBrowser not installed"))?;
-        // Re-assert the staged config before launch — an Olostep self-update
-        // may have wiped it, which would re-prompt the user for a permission
-        // they already granted via the FEM toggle.
-        if let Err(e) = Self::stage_config() {
-            warn!(error = %e, "Could not re-stage OlostepBrowser config before start");
-        }
-        // Pre-create firewall rules for this exact binary path so Windows
-        // never shows the firewall prompt (the path changes on every Olostep
-        // Squirrel self-update, which re-triggered the prompt each time).
-        // Non-fatal: a declined UAC just means Windows prompts as before.
-        if let Err(e) =
-            super::firewall::ensure_program_rules(super::firewall::OLOSTEP_RULE_NAME, &binary)
-        {
-            warn!(error = %e, "Olostep firewall rule setup failed — continuing");
-        }
-        info!(binary = ?binary, "Starting OlostepBrowser");
-        let child = crate::supervisor::platform::command(&binary).spawn()?;
-        // BUG 10: track the child so is_running()/stop() can target it
-        // directly instead of only an untargeted image-name scan.
-        if let Ok(mut guard) = self.child.lock() {
-            *guard = Some(child);
-        }
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-        Ok(())
+        self.start_inner(crate::elevation_gate::ElevationTrigger::Automatic)
+            .await
+    }
+
+    /// B3: only a real click may raise UAC.
+    async fn start_for_user(&self) -> Result<()> {
+        self.start_inner(crate::elevation_gate::ElevationTrigger::UserClick)
+            .await
     }
 
     async fn stop(&self) -> Result<()> {

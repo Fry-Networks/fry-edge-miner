@@ -148,6 +148,15 @@ fn install_needed(running: bool, binary_found: bool) -> bool {
     !running && !binary_found
 }
 
+/// PURE: does `install_impl` return early instead of running the installer?
+///
+/// The update path stops the farmer first, so `running` is false while
+/// `binary_found` is still true — which is exactly the shape that made
+/// `apply_update` a no-op that reported success.
+fn install_short_circuits(force: bool, running: bool, binary_found: bool) -> bool {
+    !force && !install_needed(running, binary_found)
+}
+
 /// The PE section name WiX Burn stamps into every bootstrapper it builds.
 const BURN_SECTION_MARKER: &[u8] = b".wixburn";
 
@@ -635,41 +644,37 @@ impl SpaceAcresIntegration {
     }
 }
 
-#[async_trait]
-impl Integration for SpaceAcresIntegration {
-    fn id(&self) -> &str {
-        "space_acres"
-    }
-
-    /// SpaceAcres needs an SSD and headroom to plot. Without this the farmer
-    /// counted toward `available_count()` on machines that can never run it,
-    /// which shrinks every other integration's share of the multiplier this
-    /// device submits — i.e. under-provisioned devices were paid less than
-    /// they earned. Reads only memoised probes, per the trait's cheapness rule.
-    fn check_requirements(&self) -> Result<(), String> {
-        evaluate_requirements(
-            ssd_state_for_requirements(),
-            crate::system_info::available_disk_gb(&partners_base_dir()),
-        )
-    }
-
-    fn display_name(&self) -> &str {
-        "SpaceAcres"
-    }
-
-    async fn install(&self) -> Result<()> {
+impl SpaceAcresIntegration {
+    /// The real install.
+    ///
+    /// `force` skips the "already installed" short-circuit. `apply_update`
+    /// needs that: it stops the farmer first, which makes `running` false,
+    /// while `binary_found` is true for any working install — so the guard
+    /// below fired, install() returned Ok having done nothing, the farmer was
+    /// never restarted, and the caller logged the update as applied. The
+    /// user's SpaceAcres simply vanished after an update.
+    async fn install_impl(&self, force: bool) -> Result<()> {
         #[cfg(target_os = "windows")]
         {
-            Self::quarantine_staged_installer();
-            Self::quarantine_stale_staged_copy();
-            let binary_found = match Self::installed_binary() {
-                Some(existing) => {
-                    info!(path = ?existing, "SpaceAcres already installed");
-                    true
+            // These three shell out to PowerShell up to five times, each
+            // bounded at 20 s, and they run BEFORE the first await — so the
+            // tokio::time::timeout wrapped around install() could never fire
+            // on them, and the whole async worker was blocked meanwhile. Same
+            // offload titan.rs already uses for its redist install.
+            let binary_found = tokio::task::spawn_blocking(|| {
+                Self::quarantine_staged_installer();
+                Self::quarantine_stale_staged_copy();
+                match Self::installed_binary() {
+                    Some(existing) => {
+                        info!(path = ?existing, "SpaceAcres already installed");
+                        true
+                    }
+                    None => false,
                 }
-                None => false,
-            };
-            if !install_needed(self.is_running(), binary_found) {
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("SpaceAcres install pre-flight task panicked: {e}"))?;
+            if install_short_circuits(force, self.is_running(), binary_found) {
                 if !binary_found {
                     info!("SpaceAcres process already running — treating as installed");
                 }
@@ -698,17 +703,24 @@ impl Integration for SpaceAcresIntegration {
             // The Windows artifact is an installer, so RUN it silently rather
             // than treating it as the farmer binary.
             let is_msi = release.asset_name.to_lowercase().ends_with(".msi");
-            let output = if is_msi {
-                crate::supervisor::platform::command("msiexec")
-                    .arg("/i")
-                    .arg(&installer)
-                    .args(["/quiet", "/norestart"])
-                    .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?
-            } else {
-                // WiX Burn bootstrapper flags.
-                crate::supervisor::platform::command(&installer)
-                    .args(["/quiet", "/norestart"])
-                    .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?
+            let output = {
+                let installer = installer.clone();
+                tokio::task::spawn_blocking(move || {
+                    if is_msi {
+                        crate::supervisor::platform::command("msiexec")
+                            .arg("/i")
+                            .arg(&installer)
+                            .args(["/quiet", "/norestart"])
+                            .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)
+                    } else {
+                        // WiX Burn bootstrapper flags.
+                        crate::supervisor::platform::command(&installer)
+                            .args(["/quiet", "/norestart"])
+                            .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)
+                    }
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("SpaceAcres installer task panicked: {e}"))??
             };
             if !output.status.success() {
                 warn!(
@@ -741,13 +753,16 @@ impl Integration for SpaceAcresIntegration {
                 warn!(error = %e, "Could not remove SpaceAcres installer");
             }
             info!(binary = ?binary, version = %release.version, "SpaceAcres installed successfully");
-            return Ok(());
+            // Tail expression, not `return`: on Windows this block IS the end
+            // of the function (the block below is cfg'd out), and clippy's
+            // needless_return is a hard error under -D warnings.
+            Ok(())
         }
 
         #[cfg(not(target_os = "windows"))]
         {
             let binary = Self::binary_path();
-            if binary.exists() {
+            if binary.exists() && !force {
                 info!(path = ?binary, "SpaceAcres binary already installed");
                 return Ok(());
             }
@@ -773,10 +788,39 @@ impl Integration for SpaceAcresIntegration {
             Ok(())
         }
     }
+}
+
+#[async_trait]
+impl Integration for SpaceAcresIntegration {
+    fn id(&self) -> &str {
+        "space_acres"
+    }
+
+    /// SpaceAcres needs an SSD and headroom to plot. Without this the farmer
+    /// counted toward `available_count()` on machines that can never run it,
+    /// which shrinks every other integration's share of the multiplier this
+    /// device submits — i.e. under-provisioned devices were paid less than
+    /// they earned. Reads only memoised probes, per the trait's cheapness rule.
+    fn check_requirements(&self) -> Result<(), String> {
+        evaluate_requirements(
+            ssd_state_for_requirements(),
+            crate::system_info::available_disk_gb(&partners_base_dir()),
+        )
+    }
+
+    fn display_name(&self) -> &str {
+        "SpaceAcres"
+    }
+
+    async fn install(&self) -> Result<()> {
+        self.install_impl(false).await
+    }
 
     async fn start(&self) -> Result<()> {
         #[cfg(target_os = "windows")]
-        let binary = Self::installed_binary()
+        let binary = tokio::task::spawn_blocking(Self::installed_binary)
+            .await
+            .map_err(|e| anyhow::anyhow!("SpaceAcres path discovery task panicked: {e}"))?
             .ok_or_else(|| anyhow::anyhow!("SpaceAcres is not installed — enable it to install"))?;
         #[cfg(not(target_os = "windows"))]
         let binary = Self::binary_path();
@@ -809,6 +853,13 @@ impl Integration for SpaceAcresIntegration {
         let child = cmd
             .spawn()
             .map_err(|e| anyhow::anyhow!("Failed to start SpaceAcres: {}", e))?;
+        // B4 (D-03): SpaceAcres joins the kill-on-close job like every other
+        // partner. The trade-off is deliberate and documented: an abrupt kill
+        // can interrupt a plot. FEM's normal quit stops it gracefully first
+        // (main.rs's ExitRequested handler), so the kernel kill only happens
+        // when FEM itself died abnormally — which is precisely the case that
+        // was leaving orphans behind before.
+        crate::supervisor::platform::adopt_into_partner_job(&child);
 
         // BUG 3: track the child so is_running()/stop() can target it
         // directly instead of only an untargeted image-name scan.
@@ -908,14 +959,24 @@ impl Integration for SpaceAcresIntegration {
         info!(version = %version, "Applying SpaceAcres update");
         // Stop the current instance
         self.stop().await?;
-        // Backup old binary
+        // Backup the binary actually in use. This read the STAGED partner-dir
+        // path, which a normal WiX install never populates — so there was no
+        // backup at all on the installs that matter.
+        #[cfg(target_os = "windows")]
+        let binary = Self::installed_binary().unwrap_or_else(Self::binary_path);
+        #[cfg(not(target_os = "windows"))]
         let binary = Self::binary_path();
         if binary.exists() {
             let backup = binary.with_extension("exe.bak");
             std::fs::copy(&binary, &backup)?;
         }
-        // Re-run install which will download the latest
-        self.install().await?;
+        // Forced: stop() has just made `running` false while the old binary is
+        // still on disk, which is precisely the state the ordinary guard reads
+        // as "already installed".
+        self.install_impl(true).await?;
+        // And bring the farmer back — without this the update left the machine
+        // with no SpaceAcres running and the caller still logged success.
+        self.start().await?;
         Ok(())
     }
 
@@ -1661,5 +1722,93 @@ mod bug7_ssd_classifier_tests {
             eligibility_from(evaluate_requirements(None, None)),
             (true, None)
         );
+    }
+}
+
+/// B21 — "SpaceAcres vanished after an update".
+#[cfg(test)]
+mod b21_update_reinstall_tests {
+    use super::*;
+
+    /// `apply_update` stops the farmer and then calls install(). That makes
+    /// `running` false while the old binary is still on disk — the exact state
+    /// the "already installed" guard reads as "nothing to do". install()
+    /// returned Ok having done nothing, nothing restarted the farmer, and the
+    /// caller logged the update as applied.
+    #[test]
+    fn an_update_must_not_be_skipped_because_the_old_binary_is_still_there() {
+        assert!(
+            install_short_circuits(false, false, true),
+            "characterization: this is what the update path hit"
+        );
+        assert!(
+            !install_short_circuits(true, false, true),
+            "a forced install must run even with the old binary present"
+        );
+    }
+
+    /// The ordinary enable path must keep its short-circuit: re-running the
+    /// WiX installer over a working install is what showed the Modify/Repair
+    /// maintenance dialog on every launch.
+    #[test]
+    fn an_ordinary_enable_still_short_circuits_on_a_working_install() {
+        assert!(install_short_circuits(false, true, true));
+        assert!(install_short_circuits(false, true, false));
+        assert!(!install_short_circuits(false, false, false));
+    }
+
+    /// install_needed itself is unchanged, so its existing coverage holds.
+    #[test]
+    fn the_underlying_predicate_is_untouched() {
+        assert!(install_needed(false, false));
+        assert!(!install_needed(true, false));
+        assert!(!install_needed(false, true));
+        assert!(!install_needed(true, true));
+    }
+}
+
+/// B21 — the bounds around install()/start() could not fire.
+///
+/// `output_bounded` sleeps on the calling thread, and SpaceAcres ran five of
+/// them before its first await, so `tokio::time::timeout` had no await point
+/// to cancel at and the whole async worker was blocked meanwhile. Same shape
+/// as the in-repo guard in `mysterium_lan_check.rs`: green before and after,
+/// because it pins the PATTERN — the binding proof is the VM run, since the
+/// install path is Windows-only.
+#[cfg(test)]
+mod b21_blocking_offload_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_bounded_step_offloaded_via_spawn_blocking_still_trips_its_timeout() {
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_millis(50),
+            tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(600))),
+        )
+        .await;
+
+        assert!(result.is_err(), "the bound must fire on blocking work");
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "the timeout took {:?}; blocking work run inline cannot be cancelled",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn offloaded_blocking_work_does_not_starve_the_async_worker() {
+        let blocking =
+            tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(400)));
+        let started = std::time::Instant::now();
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let async_took = started.elapsed();
+
+        assert!(
+            async_took < Duration::from_millis(300),
+            "a concurrent async task waited {async_took:?} behind blocking work"
+        );
+        let _ = blocking.await;
     }
 }

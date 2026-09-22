@@ -1,4 +1,5 @@
 pub mod aem;
+pub mod code_integrity;
 pub mod diiisco;
 pub mod docker_manager;
 pub mod download;
@@ -13,6 +14,7 @@ pub mod iagon;
 pub mod mysterium;
 pub mod mysterium_lan_check;
 pub mod pawns;
+pub mod port_conflict;
 pub mod reward_model;
 pub mod sentinel;
 pub mod space_acres;
@@ -113,8 +115,48 @@ pub(crate) fn stderr_tail(stderr: &str, n: usize) -> String {
 /// because `HealthStatus` has no dedicated variant and adding one would ripple
 /// into the TypeScript union and the LifecycleState mapping.
 pub(crate) fn awaits_user_action(reason: &str) -> bool {
-    const AWAITING_MARKERS: [&str; 2] = ["Awaiting Storj setup", "needs your consent"];
     AWAITING_MARKERS.iter().any(|m| reason.contains(m))
+}
+
+/// D-19: the UNION of every "waiting on a step only the user can take" marker
+/// — B7/B8 (fryDVPN funding), B10 (a held TCP port), B15 (an OS code-integrity
+/// refusal) and B17 (Iagon / Sentinel setup). None of these is a state the
+/// supervisor can restart its way out of, so restarting through one only burns
+/// the restart budget every 30 s and never changes the outcome.
+///
+/// Written as plain literals ON PURPOSE, even though three of them also exist
+/// as constants next to the code that emits them: `src/lib/setupRequired.ts`
+/// mirrors this list and `setupRequiredParity.test.ts` parses the array
+/// literal out of this file, so a `module::CONST` here would be invisible to
+/// it. `marker_parity_tests` below pins each literal against its source
+/// constant, so the two cannot drift apart either way.
+///
+/// Adding a marker cannot change the verdict for any string that lacks it, so
+/// every existing test stays green.
+pub(crate) const AWAITING_MARKERS: [&str; 7] = [
+    "Awaiting Storj setup",
+    "needs your consent",
+    "node token not provisioned",
+    "node account not funded",
+    "Awaiting fryDVPN funding",
+    "Awaiting administrator action",
+    "waiting for that program to release it",
+];
+
+/// B16: does this reason describe an UPSTREAM condition rather than a fault on
+/// this device?
+///
+/// Distinct from `awaits_user_action` on purpose: nothing is being waited on
+/// from the user, and the card still says something is wrong. What must NOT
+/// happen is FEM killing a perfectly live partner process over a network
+/// condition it cannot influence — titan-edge was being TerminateProcess'd
+/// while running, purely because it had logged that it could not reach its
+/// scheduler.
+///
+/// Keyed off the existing user-facing message so the two cannot drift.
+pub(crate) fn upstream_unreachable(reason: &str) -> bool {
+    const UPSTREAM_MARKERS: [&str; 1] = ["cannot reach the Titan scheduler"];
+    UPSTREAM_MARKERS.iter().any(|m| reason.contains(m))
 }
 
 pub(crate) fn tracked_child_probe(slot: &mut Option<std::process::Child>) -> Option<bool> {
@@ -198,7 +240,38 @@ pub trait Integration: Send + Sync {
     fn display_name(&self) -> &str;
     async fn install(&self) -> Result<()>;
     async fn start(&self) -> Result<()>;
+    /// Start because the USER just asked for it, as distinct from a boot
+    /// auto-start, a supervisor restart or the Docker watcher.
+    ///
+    /// B3: this is the ONLY thing that may raise a UAC prompt. Everything else
+    /// goes through `start()` and gets `ElevationTrigger::Automatic`, which the
+    /// gate refuses before any prompt is shown — so FEM cannot elevate without
+    /// a human gesture. Defaults to `start()`, so an integration that never
+    /// elevates is unaffected.
+    async fn start_for_user(&self) -> Result<()> {
+        self.start().await
+    }
     async fn stop(&self) -> Result<()>;
+    /// Stop this integration because the SUPERVISOR is recycling it, as
+    /// distinct from the user turning it off.
+    ///
+    /// The owner's decision has not changed — only the process is being
+    /// restarted — so an integration that keeps a durable record of the
+    /// owner's consent must NOT record a withdrawal here. Defaults to `stop()`,
+    /// so nothing changes for any integration that does not track consent.
+    async fn stop_for_restart(&self) -> Result<()> {
+        self.stop().await
+    }
+    /// Stop this integration because the USER disabled it, as distinct from
+    /// the supervisor restarting it.
+    ///
+    /// Defaults to `stop()`, so no integration's behaviour changes. fryDVPN
+    /// overrides it to ask frynode to deregister itself on the way out — an
+    /// on-chain call that belongs to a deliberate disable and must NOT happen
+    /// on every supervisor restart.
+    async fn stop_for_disable(&self) -> Result<()> {
+        self.stop().await
+    }
     async fn health_check(&self) -> HealthStatus;
     async fn check_update(&self) -> Result<Option<String>>;
     async fn apply_update(&self, _version: &str) -> Result<()> {
@@ -602,5 +675,69 @@ mod restore_enabled_states_tests {
         reg.restore_enabled_states(&configured);
 
         assert!(!reg.is_enabled("removed_integration"));
+    }
+}
+
+/// D-19 / B17 D1: the marker list is duplicated in three places by necessity —
+/// here, in `src/lib/setupRequired.ts`, and as constants beside the code that
+/// actually emits each reason. The TS side is guarded by
+/// `setupRequiredParity.test.ts`; this guards the Rust side.
+#[cfg(test)]
+mod marker_parity_tests {
+    use super::*;
+
+    /// Each literal must equal the constant used by the code that emits it, so
+    /// renaming a message cannot silently stop the supervisor recognising it.
+    #[test]
+    fn every_marker_matches_the_constant_its_emitter_uses() {
+        assert!(AWAITING_MARKERS.contains(&fryvpn::FUNDING_MARKER));
+        assert!(AWAITING_MARKERS.contains(&code_integrity::AWAITING_ADMIN_MARKER));
+        assert!(AWAITING_MARKERS.contains(&port_conflict::PORT_HELD_MARKER));
+    }
+
+    /// The two B17 markers have no constant of their own, so pin them against
+    /// the reasons Iagon and Sentinel really build.
+    #[test]
+    fn the_iagon_and_sentinel_markers_match_the_reasons_those_partners_emit() {
+        let iagon = include_str!("iagon.rs");
+        let sentinel = include_str!("sentinel.rs");
+
+        assert!(
+            iagon.contains("node token not provisioned"),
+            "iagon.rs no longer emits the reason this marker matches"
+        );
+        assert!(
+            sentinel.contains("node account not funded"),
+            "sentinel.rs no longer emits the reason this marker matches"
+        );
+    }
+
+    /// Every marker must actually be recognised, and nothing ordinary may be.
+    #[test]
+    fn each_marker_is_recognised_and_ordinary_failures_are_not() {
+        for marker in AWAITING_MARKERS {
+            assert!(
+                awaits_user_action(&format!("Some partner: {marker} — do a thing")),
+                "{marker} is in the list but not recognised"
+            );
+        }
+        assert!(!awaits_user_action("Error detected in daemon logs"));
+        assert!(!awaits_user_action("process is not running"));
+        assert!(!awaits_user_action("Container exited"));
+    }
+
+    /// The list is a SET: a duplicate would make the TS parity comparison
+    /// pass or fail for the wrong reason.
+    #[test]
+    fn the_markers_are_distinct() {
+        let mut seen = AWAITING_MARKERS.to_vec();
+        seen.sort_unstable();
+        let before = seen.len();
+        seen.dedup();
+        assert_eq!(
+            before,
+            seen.len(),
+            "duplicate marker in {AWAITING_MARKERS:?}"
+        );
     }
 }

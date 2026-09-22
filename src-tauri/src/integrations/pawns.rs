@@ -18,7 +18,19 @@
 //! is `consent-log.jsonl`, and it is also where consent is read back from: the last entry
 //! this device wrote decides whether sharing may start, so a consent given once in the UI
 //! survives a restart. `PAWNS_USER_CONSENT=accepted` still forces it on for headless runs.
-//! `start()` refuses to run without consent; `stop()` records the withdrawal.
+//! `start()` refuses to run without consent; a USER-initiated stop records the
+//! withdrawal. A supervisor-driven restart does NOT: recycling the container
+//! after a crash, a Docker outage or a startup timeout is not the owner
+//! changing their mind, and recording a withdrawal there permanently revoked a
+//! consent nobody withdrew — which then wedged the integration in
+//! "needs your consent" with no way back except re-consenting by hand. The
+//! §5.8 record still captures every real consent and every real withdrawal;
+//! a restart is logged, but not as a withdrawal.
+//!
+//! The consent log is also anchored to the DEFAULT partner root rather than the
+//! configurable storage root: the record is an OWNER DECISION, not partner
+//! data, and it must not become unreadable because a storage preference
+//! changed or a configured root turned out to be unwritable.
 
 use super::download::partners_base_dir;
 use super::{HealthStatus, Integration, PocGateData};
@@ -100,6 +112,33 @@ impl PawnsIntegration {
 
     fn consent_log() -> PathBuf {
         Self::partner_dir().join("consent-log.jsonl")
+    }
+
+    /// Where consent is RECORDED, anchored to the default partner root.
+    ///
+    /// `partner_dir()` hangs off the configurable storage root, so pointing
+    /// storage elsewhere — or having a configured root silently fall back
+    /// because it was unwritable — made FEM read a DIFFERENT log and report
+    /// "needs your consent" from a device that had consented, with no restart
+    /// involved.
+    fn stable_consent_log() -> PathBuf {
+        super::download::default_partners_base_dir()
+            .join("pawns")
+            .join("consent-log.jsonl")
+    }
+
+    /// Every log a recorded consent could legitimately be sitting in: the
+    /// anchored one first, then whatever the current storage root points at,
+    /// so an install that consented under a custom root keeps its consent
+    /// without anything being moved or copied.
+    fn consent_log_candidates() -> Vec<PathBuf> {
+        let stable = Self::stable_consent_log();
+        let current = Self::consent_log();
+        if stable == current {
+            vec![stable]
+        } else {
+            vec![stable, current]
+        }
     }
 
     /// Entries rotated out of the active log. They are kept, not deleted: the
@@ -224,12 +263,14 @@ impl PawnsIntegration {
 
     /// The consent/withdrawal this device last recorded, or None if it never has.
     pub(crate) fn consent_record() -> Option<ConsentRecord> {
-        last_consent_entry_in(&Self::consent_log(), &Self::device_id())
+        last_consent_entry_across(&Self::consent_log_candidates(), &Self::device_id())
     }
 
     /// Whether this device currently holds a recorded consent.
     pub(crate) fn consent_active() -> bool {
-        consent_is_active(&Self::consent_log(), &Self::device_id())
+        Self::consent_record()
+            .map(|e| e.action == "consent")
+            .unwrap_or(false)
     }
 
     /// Record the device owner consenting (CLI Addendum §5.8).
@@ -306,9 +347,32 @@ impl PawnsIntegration {
             .unwrap_or_else(|| format!("fem-{}", sanitize_id(&Self::host_label())))
     }
 
+    /// The shared body of `stop()` and `stop_for_restart()`.
+    ///
+    /// Observably identical to the old `stop()` for a user disable, so the
+    /// §5.8 withdrawal record is unchanged for the case that actually is one.
+    async fn stop_inner(&self, reason: StopReason) -> Result<()> {
+        let output = crate::integrations::docker_manager::docker_command()
+            .args(["rm", "-f", PAWNS_CONTAINER])
+            .output_bounded(PROBE_TIMEOUT);
+        match output {
+            Ok(o) if o.status.success() => info!("Pawns.app agent stopped — sharing ended"),
+            Ok(_) => info!("Pawns.app agent was not running"),
+            Err(e) => warn!(error = %e, "Could not stop the Pawns.app agent"),
+        }
+        if stop_records_withdrawal(reason) {
+            Self::record_consent_event("withdrawal");
+        } else {
+            // Still auditable — sharing did stop — but not as a decision the
+            // owner never made.
+            info!("Pawns.app sharing paused for a supervisor restart; the recorded consent stands");
+        }
+        Ok(())
+    }
+
     /// Append a consent or withdrawal record (CLI Addendum §5.8).
     fn record_consent_event(action: &str) {
-        Self::record_consent_event_at(&Self::consent_log(), action);
+        Self::record_consent_event_at(&Self::stable_consent_log(), action);
     }
 
     /// The write itself, against an explicit path so tests can exercise the
@@ -355,7 +419,7 @@ impl PawnsIntegration {
 
     /// `running` / `exited` / … for the managed container, or None when absent.
     fn container_state() -> Option<String> {
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["inspect", "-f", "{{.State.Status}}", PAWNS_CONTAINER])
             .output_bounded(PROBE_TIMEOUT)
             .ok()?;
@@ -371,7 +435,7 @@ impl PawnsIntegration {
     }
 
     fn container_logs(tail: &str) -> Option<String> {
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["logs", "--tail", tail, PAWNS_CONTAINER])
             .output_bounded(PROBE_TIMEOUT)
             .ok()?;
@@ -384,6 +448,21 @@ impl PawnsIntegration {
 }
 
 /// The consent or withdrawal a device last recorded.
+/// Why Pawns is being stopped. The distinction is the whole point: only one of
+/// these is the owner withdrawing their consent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopReason {
+    /// The owner turned the integration off.
+    UserDisable,
+    /// The supervisor is recycling the container.
+    SupervisorRestart,
+}
+
+/// PURE: does this stop record a §5.8 withdrawal?
+pub(crate) fn stop_records_withdrawal(reason: StopReason) -> bool {
+    matches!(reason, StopReason::UserDisable)
+}
+
 pub(crate) struct ConsentRecord {
     /// `consent` or `withdrawal` — the audit vocabulary written to the log.
     pub action: String,
@@ -460,6 +539,18 @@ fn last_consent_entry_in(path: &Path, device_id: &str) -> Option<ConsentRecord> 
 
 /// Whether `device_id`'s last recorded decision was a consent. No log, no
 /// readable entry, or a withdrawal all mean no — the gate fails closed.
+/// The newest consent entry across several logs.
+///
+/// Newest-by-`happened_at` and NOT first-match, so an old consent under a
+/// stale root can never outrank a newer withdrawal: the resolution fails
+/// closed, the same way a single log does.
+fn last_consent_entry_across(paths: &[PathBuf], device_id: &str) -> Option<ConsentRecord> {
+    paths
+        .iter()
+        .filter_map(|p| last_consent_entry_in(p, device_id))
+        .max_by(|a, b| a.happened_at.cmp(&b.happened_at))
+}
+
 fn consent_is_active(path: &Path, device_id: &str) -> bool {
     last_consent_entry_in(path, device_id)
         .map(|e| e.action == "consent")
@@ -654,7 +745,7 @@ impl Integration for PawnsIntegration {
         tokio::fs::create_dir_all(Self::partner_dir()).await?;
 
         info!(image = PAWNS_IMAGE, "Pulling Pawns.app CLI agent image");
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["pull", PAWNS_IMAGE])
             .output_bounded(LONG_TIMEOUT)?;
         if !output.status.success() {
@@ -697,7 +788,7 @@ impl Integration for PawnsIntegration {
 
         // Drop any container left from a previous run so the fixed name is free
         // and the agent restarts with current credentials.
-        let _ = crate::supervisor::platform::command("docker")
+        let _ = crate::integrations::docker_manager::docker_command()
             .args(["rm", "-f", PAWNS_CONTAINER])
             .output_bounded(PROBE_TIMEOUT);
 
@@ -711,7 +802,7 @@ impl Integration for PawnsIntegration {
 
         // Credentials are passed as arguments because the agent takes no other
         // input; they are never logged and never written to disk.
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args([
                 "run",
                 "-d",
@@ -741,16 +832,19 @@ impl Integration for PawnsIntegration {
     }
 
     async fn stop(&self) -> Result<()> {
-        let output = crate::supervisor::platform::command("docker")
-            .args(["rm", "-f", PAWNS_CONTAINER])
-            .output_bounded(PROBE_TIMEOUT);
-        match output {
-            Ok(o) if o.status.success() => info!("Pawns.app agent stopped — sharing ended"),
-            Ok(_) => info!("Pawns.app agent was not running"),
-            Err(e) => warn!(error = %e, "Could not stop the Pawns.app agent"),
-        }
-        Self::record_consent_event("withdrawal");
-        Ok(())
+        self.stop_inner(StopReason::UserDisable).await
+    }
+
+    /// The supervisor recycling the container is not the owner withdrawing
+    /// consent. Restarting after a crash, a Docker outage or a startup timeout
+    /// used to append a `withdrawal` to the durable log — permanently revoking
+    /// a consent nobody withdrew, and wedging the integration in
+    /// "needs your consent" with `enabled` still true and no automatic way back.
+    /// The Docker-outage case was the worst of it: the same outage both caused
+    /// the restart and guaranteed the consent loss, because the withdrawal was
+    /// written even on the error arm below.
+    async fn stop_for_restart(&self) -> Result<()> {
+        self.stop_inner(StopReason::SupervisorRestart).await
     }
 
     async fn health_check(&self) -> HealthStatus {
@@ -842,6 +936,12 @@ mod pawns_consent_tests;
 #[cfg(test)]
 #[path = "pawns_retention_tests.rs"]
 mod pawns_retention_tests;
+
+/// B18: a supervisor restart must not read as the owner withdrawing consent,
+/// and the record must not move when the storage root does.
+#[cfg(test)]
+#[path = "pawns_restart_consent_tests.rs"]
+mod pawns_restart_consent_tests;
 
 #[cfg(test)]
 mod tests {

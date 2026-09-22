@@ -6,10 +6,17 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 fn deploy_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .expect("no local data dir")
-        .join("FryEdgeMiner")
-        .join("sentinel")
+    // B13: this used to resolve `dirs::data_local_dir()` directly and never
+    // consult the storage root, so a user who moved storage left this
+    // deployment stranded at the old location. An existing legacy directory is
+    // grandfathered, so nothing live moves and no migration is needed.
+    super::download::resolve_deploy_dir(
+        dirs::data_local_dir()
+            .expect("no local data dir")
+            .join("FryEdgeMiner")
+            .join("sentinel"),
+        super::download::partners_base_dir().join("sentinel"),
+    )
 }
 
 fn compose_file() -> PathBuf {
@@ -100,7 +107,7 @@ impl SentinelIntegration {
         args.push("sentinel-dvpnx");
         args.extend_from_slice(extra);
 
-        let mut child = crate::supervisor::platform::command("docker")
+        let mut child = crate::integrations::docker_manager::docker_command()
             .args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -258,7 +265,7 @@ impl Integration for SentinelIntegration {
         .await?;
 
         info!("Pulling Sentinel dVPN image");
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["compose", "-f", &compose_file().to_string_lossy(), "pull"])
             .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
 
@@ -299,7 +306,7 @@ impl Integration for SentinelIntegration {
         }
 
         info!("Starting Sentinel dVPN containers");
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["compose", "-f", &compose.to_string_lossy(), "up", "-d"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -321,7 +328,7 @@ impl Integration for SentinelIntegration {
     async fn stop(&self) -> Result<()> {
         let compose = compose_file();
         if compose.exists() {
-            crate::supervisor::platform::command("docker")
+            crate::integrations::docker_manager::docker_command()
                 .args(["compose", "-f", &compose.to_string_lossy(), "stop"])
                 .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
             info!("Stopped Sentinel dVPN containers");
@@ -344,7 +351,7 @@ impl Integration for SentinelIntegration {
         }
 
         // Check container state via docker compose ps
-        match crate::supervisor::platform::command("docker")
+        match crate::integrations::docker_manager::docker_command()
             .args([
                 "compose",
                 "-f",
@@ -413,15 +420,16 @@ impl Integration for SentinelIntegration {
 
                     {
                         // Try to get logs for more detail
-                        if let Ok(log_output) = crate::supervisor::platform::command("docker")
-                            .args([
-                                "compose",
-                                "-f",
-                                &compose.to_string_lossy(),
-                                "logs",
-                                "sentinel-dvpnx",
-                            ])
-                            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+                        if let Ok(log_output) =
+                            crate::integrations::docker_manager::docker_command()
+                                .args([
+                                    "compose",
+                                    "-f",
+                                    &compose.to_string_lossy(),
+                                    "logs",
+                                    "sentinel-dvpnx",
+                                ])
+                                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
                         {
                             let logs = format!(
                                 "{}{}",

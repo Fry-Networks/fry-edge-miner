@@ -14,6 +14,7 @@ use std::path::Path;
 
 use tracing::{info, warn};
 
+use crate::elevation_gate::{self, ElevationSkipped, ElevationTrigger};
 use crate::integrations::firewall;
 use crate::supervisor::platform::BoundedOutput;
 
@@ -126,37 +127,58 @@ pub(crate) fn hardening_outcome(exit_code: Option<i32>, rule_present: bool) -> R
 /// the update — the caller logs + surfaces the manual command and moves on.
 /// Only returns `Ok` when the firewall rule is VERIFIED present afterward
 /// (v0.4.29 canary fix) — a bare successful exit code is not trusted alone.
+///
+/// B3: routed through `elevation_gate::run_elevated`, so the boot pass and the
+/// pre-update re-assert (both `Automatic`) no longer raise UAC on their own.
+/// `version` is the attempt key: a NEW version to harden is a new request and
+/// gets its own single attempt, which is what the pre-update re-assert needs.
 pub(crate) fn run_hardening_elevated(
     install_dir: &Path,
     exe_names: &[&str],
     frynode_path: &Path,
-) -> anyhow::Result<()> {
-    let inner = build_hardening_script(install_dir, exe_names, frynode_path);
-    let outer = build_outer_elevation_script(&inner);
+    version: &str,
+    trigger: ElevationTrigger,
+) -> Result<(), ElevationSkipped> {
+    elevation_gate::run_elevated("hardening", version, trigger, || {
+        let inner = build_hardening_script(install_dir, exe_names, frynode_path);
+        let outer = build_outer_elevation_script(&inner);
 
-    let out = crate::supervisor::platform::command("powershell")
-        .args(["-NoProfile", "-Command", &outer])
-        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
+        let out = crate::supervisor::platform::command("powershell")
+            .args(["-NoProfile", "-Command", &outer])
+            .output_bounded(crate::supervisor::platform::UAC_ANSWER_TIMEOUT)?;
 
-    // v0.4.29 canary fix: verify the rule ACTUALLY landed before trusting
-    // the exit code — see `hardening_outcome`'s docs.
-    let rule_present = firewall::current_rule_program("FEM-FryNode").is_some();
+        // v0.4.29 canary fix: verify the rule ACTUALLY landed before trusting
+        // the exit code — see `hardening_outcome`'s docs.
+        let rule_present = firewall::current_rule_program("FEM-FryNode").is_some();
 
-    match hardening_outcome(out.status.code(), rule_present) {
-        Ok(()) => {
-            info!("Defender exclusions + frynode firewall rule applied (elevated, one-time)");
-            Ok(())
+        match hardening_outcome(out.status.code(), rule_present) {
+            Ok(()) => {
+                info!("Defender exclusions + frynode firewall rule applied (elevated, one-time)");
+                Ok(())
+            }
+            Err(reason) => {
+                // Exit 2/3 mean the prompt was declined or cancelled, not that
+                // the hardening itself went wrong. Signalled to the gate as a
+                // `PermissionDenied` io error so it publishes the
+                // needs-approval state rather than a raw script message.
+                let declined = elevation_gate::is_declined(out.status.code(), None);
+                warn!(
+                    code = out.status.code(),
+                    rule_present,
+                    declined,
+                    reason = %reason,
+                    "Hardening setup declined or failed — continuing unhardened, will retry next launch/update"
+                );
+                if declined {
+                    return Err(anyhow::Error::new(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        format!("hardening setup failed: {reason}"),
+                    )));
+                }
+                anyhow::bail!("hardening setup failed: {reason}")
+            }
         }
-        Err(reason) => {
-            warn!(
-                code = out.status.code(),
-                rule_present,
-                reason = %reason,
-                "Hardening setup declined or failed — continuing unhardened, will retry next launch/update"
-            );
-            anyhow::bail!("hardening setup failed: {reason}")
-        }
-    }
+    })
 }
 
 /// The manual command surfaced when the elevated attempt is declined/fails,

@@ -65,6 +65,17 @@ jobs:
           # runs this again via beforeBuildCommand; it takes ~2s and is idempotent.
           npm run build
           cd src-tauri
+          # B1 ROOT CAUSE. v0.4.30 is the first tag where this test pass runs
+          # in the SAME target directory as the release link below, and its
+          # binary is the first to contain __CxxFrameHandler (C++ FH4
+          # unwinding) — which is what pulls in VCRUNTIME140_1.dll. Every
+          # machine without the VC++ redistributable then hit "VCRUNTIME140_1.dll
+          # was not found" and could not start the app. Give the gates their own
+          # target directory so what the release links is decided by the release
+          # build alone. It lives under target/ so the existing cache still
+          # covers it; target/release/ — what `cargo tauri build` bundles — is
+          # never written by this step.
+          export CARGO_TARGET_DIR="$PWD/target/test-pass"
           # Formatting gate. rustfmt.toml pins the target (stock 2021-edition
           # rustfmt), so this catches drift rather than imposing a new style.
           cargo fmt --check
@@ -103,6 +114,21 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           FEM_API_TOKEN: ${{ secrets.FEM_API_TOKEN }}
           DIIISCO_BEARER_TOKEN: ${{ secrets.DIIISCO_BEARER_TOKEN }}
+
+      # B1 GATE. Nothing FEM builds or bundles may import a redistributable
+      # CRT DLL: a user without the VC++ redistributable cannot start such a
+      # binary, and the app is what has to run on their machine. Proven RED
+      # against the v0.4.33 exe and GREEN against v0.4.29. Runs before any
+      # upload step, so a binary that would reproduce the bug is never
+      # published.
+      - name: CRT-import gate over the shipped PE files
+        shell: bash
+        run: |
+          python3 -m pip install --disable-pip-version-check pefile
+          python3 qa/ci/check_crt_imports.py \
+            src-tauri/target/release/fry-edge-miner.exe \
+            src-tauri/target/release/bundle \
+            src-tauri/resources
 
       # Every glob is pinned to APP_VERSION so a stale installer can never be
       # published again even if the bundle directory survives somehow — the

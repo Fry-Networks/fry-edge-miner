@@ -5,6 +5,7 @@ mod api;
 mod commands;
 mod config;
 mod docker_watcher;
+mod elevation_gate;
 mod events;
 mod integrations;
 mod logging;
@@ -42,6 +43,13 @@ pub struct AppState {
     pub cached_verified_status: Arc<RwLock<Option<crate::api::types::VerifiedStatus>>>,
     pub reporting_status: Arc<RwLock<crate::api::types::ReportingStatus>>,
     pub last_token_recovery: Arc<RwLock<Option<std::time::Instant>>>,
+    /// B14: integrations whose enable is in flight — the toggle has been
+    /// accepted but install/start has not finished or failed yet.
+    ///
+    /// Without it, a card that is mid-install is indistinguishable from one
+    /// that was never enabled, which is what makes a failed enable look like a
+    /// silent revert: the switch snaps back with no error anywhere.
+    pub pending_enable: Arc<RwLock<std::collections::HashSet<String>>>,
 }
 
 /// BUG 12: apply one forwarded health-loop event to the shared `last_health`
@@ -156,6 +164,22 @@ mod bug12_health_persistence_tests {
 
 fn main() {
     tauri::Builder::default()
+        // B2: FIRST, before every other plugin. The guard only collapses a
+        // duplicate launch if it wins the race, and a plugin registered after
+        // the store/updater/autostart plugins would let the second process
+        // build a second ConfigStore over the same fem_config.json before it
+        // discovered it was a duplicate. The callback runs only in the process
+        // that WOULD have become the duplicate — it hands focus to the
+        // instance already running and then exits; the first instance's path
+        // is unchanged.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            use tauri::Manager;
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
@@ -212,6 +236,17 @@ fn main() {
             // installed; this is what decides whether it writes. Must happen
             // after init_logging, which is what creates the sink.
             logging::debug_sink::set_enabled(config_store.get().debug_logging_enabled);
+
+            // B15: children INHERIT the process error mode, so this is what
+            // turns a partner's loader failure ("titan-edge.exe - Bad Image …
+            // goworkerd.dll … Error status 0xc0e90002") into an exit code FEM
+            // can put on the card, instead of a system-modal dialog sitting on
+            // the user's desktop with nothing to dismiss it. The per-thread
+            // guard in `spawn_bounded` only ever covered FEM's own
+            // CreateProcess call. After init_logging so the call is logged,
+            // and before anything can start a partner.
+            supervisor::process::suppress_process_hard_errors();
+            tracing::info!("Loader hard-error dialogs suppressed for FEM and its children");
 
             // BUG 10/RC4: finish a half-done registration FIRST. The two hooks
             // below both match on (miner_key, install_id) and return early
@@ -328,7 +363,19 @@ fn main() {
                         let Some(install_dir) = exe_path.parent() else { return };
                         let frynode_path = install_dir.join("resources").join("frynode.exe");
                         let exe_names = ["fry-edge-miner.exe", "frynode.exe"];
-                        match security_setup::run_hardening_elevated(install_dir, &exe_names, &frynode_path) {
+                        // B3: boot is not a user action, so this is
+                        // `Automatic` — the gate suppresses it and FEM raises
+                        // no UAC prompt at startup. The path was already
+                        // best-effort with a non-fatal decline branch, so
+                        // nothing new can break here; FEM simply ships
+                        // unhardened until the user asks for it.
+                        match security_setup::run_hardening_elevated(
+                            install_dir,
+                            &exe_names,
+                            &frynode_path,
+                            current,
+                            crate::elevation_gate::ElevationTrigger::Automatic,
+                        ) {
                             Ok(()) => {
                                 if let Err(e) = hardening_config.update(|c| {
                                     c.hardening_applied_version = Some(current.to_string());
@@ -342,6 +389,17 @@ fn main() {
                                     error = %e,
                                     manual_command = %manual,
                                     "Elevated hardening setup declined or failed — run the manual command as Administrator to apply it yourself"
+                                );
+                                // B3 defect 4: the log line was the ONLY record
+                                // of this. Surface it so the user can see that
+                                // hardening is waiting on them.
+                                crate::events::emit(
+                                    "elevation-required",
+                                    serde_json::json!({
+                                        "purpose": "hardening",
+                                        "reason": e.to_string(),
+                                        "manualCommand": manual,
+                                    }),
                                 );
                             }
                         }
@@ -1052,6 +1110,7 @@ fn main() {
                 cached_stake_tiers,
                 cached_verified_status,
                 last_token_recovery,
+                pending_enable: Arc::new(RwLock::new(std::collections::HashSet::new())),
             });
 
             tracing::info!("FEM initialized — {integration_count} integrations registered");
@@ -1086,8 +1145,28 @@ fn main() {
             commands::updates::check_updates,
             commands::updates::install_update,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running FEM")
+        .run(|app, event| {
+            // B4/D-03: the job object is the GUARANTEE — it kills every partner
+            // whenever FEM's last handle to it goes away, including under
+            // TerminateProcess. This is the courtesy path that makes an abrupt
+            // kill happen only when FEM itself dies abnormally: on a normal
+            // quit the partners get their own graceful stop first, so a
+            // Subspace farmer is not hard-killed mid-plot and a browser window
+            // is not yanked out from under the user.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                use tauri::Manager;
+                if let Some(state) = app.try_state::<AppState>() {
+                    match state.supervisor.lock() {
+                        Ok(mut sup) => sup.shutdown(),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Supervisor lock poisoned at exit — partners will be stopped by the job object instead");
+                        }
+                    }
+                }
+            }
+        })
 }
 
 /// Commit 3: proof that the registration reconciler is actually WIRED to the
@@ -1163,5 +1242,179 @@ mod c3_reconciler_wiring_tests {
             gate_at < call_at,
             "the cooldown gate must be evaluated before the reconciler is invoked"
         );
+    }
+}
+
+/// B1: the CRT linkage of the shipped Windows binary, and the gate that proves
+/// it, are both load-bearing and both invisible from the Rust source — so they
+/// are asserted here rather than left to a reviewer to notice.
+///
+/// v0.4.28 and v0.4.29 imported no CRT DLL. From v0.4.30 the release binary
+/// imported VCRUNTIME140.dll and VCRUNTIME140_1.dll, and every user without the
+/// VC++ redistributable got "VCRUNTIME140_1.dll was not found" and could not
+/// start the app. The linkage was never stated anywhere, so it drifted in
+/// silence across a release boundary with the same rustc, the same Cargo.lock
+/// and the same [profile.release]. Deleting either the pin or the gate would
+/// re-open exactly that door.
+#[cfg(test)]
+mod b1_crt_linkage_tests {
+    const CARGO_CONFIG: &str = include_str!("../.cargo/config.toml");
+    const BUILD_WORKFLOW: &str = include_str!("../../.github/workflows/build.yml");
+
+    /// Strip line comments so the prose explaining the pin can never be what
+    /// satisfies the assertion — the same guard the other source-scan tests use.
+    fn code_only(src: &str) -> String {
+        src.lines()
+            .map(|l| l.split('#').next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_windows_target_pins_a_static_crt() {
+        let code = code_only(CARGO_CONFIG);
+        let target = code
+            .find("[target.x86_64-pc-windows-msvc]")
+            .expect("src-tauri/.cargo/config.toml must carry a table for the shipped target");
+        let pin = code
+            .find("target-feature=+crt-static")
+            .expect("the shipped Windows target must link the CRT statically");
+        assert!(
+            target < pin,
+            "the +crt-static flag must sit under the x86_64-pc-windows-msvc table, \
+             not under some other target"
+        );
+    }
+
+    #[test]
+    fn the_release_workflow_runs_the_crt_import_gate_before_it_uploads_anything() {
+        let gate = BUILD_WORKFLOW
+            .find("check_crt_imports.py")
+            .expect("build.yml must run the CRT-import gate");
+        let first_upload = BUILD_WORKFLOW
+            .find("upload-artifact")
+            .expect("build.yml must still upload the installer");
+        assert!(
+            gate < first_upload,
+            "the CRT-import gate must run BEFORE the first upload, or a binary that \
+             reproduces the bug is published anyway"
+        );
+    }
+
+    /// The gate is only worth anything if it covers the binary that actually
+    /// failed on users' machines, not just the installer wrapper around it.
+    #[test]
+    fn the_gate_covers_the_app_binary_the_bundle_and_the_bundled_resources() {
+        let step = {
+            let at = BUILD_WORKFLOW
+                .find("check_crt_imports.py")
+                .expect("build.yml must run the CRT-import gate");
+            &BUILD_WORKFLOW[at..]
+        };
+        for target in [
+            "target/release/fry-edge-miner.exe",
+            "target/release/bundle",
+            "src-tauri/resources",
+        ] {
+            assert!(
+                step.contains(target),
+                "the CRT-import gate must scan {target}"
+            );
+        }
+    }
+
+    /// The root cause itself: from v0.4.30 the test pass shared the release
+    /// target directory, and the release link stopped being decided by the
+    /// release build alone.
+    #[test]
+    fn the_test_pass_does_not_share_the_release_target_directory() {
+        let at = BUILD_WORKFLOW
+            .find("cargo test --release")
+            .expect("build.yml must still run the Rust tests");
+        let before = &BUILD_WORKFLOW[..at];
+        let export = before
+            .rfind("CARGO_TARGET_DIR")
+            .expect("the gates must run in their own target directory");
+        let cd = before
+            .rfind("cd src-tauri")
+            .expect("the gates still run from src-tauri");
+        assert!(
+            cd < export,
+            "CARGO_TARGET_DIR must be set after the step enters src-tauri, so the \
+             path it names is the one cargo actually uses"
+        );
+    }
+}
+
+/// B2: georgeparis "Rebooted one of my FEM devices and found 2 instances of FEM
+/// running on the one PC", with `fem_config.corrupt.1789183854` sitting next to
+/// the config. Two FEM processes mean two ConfigStores writing the same file,
+/// two Supervisors spawning a second frynode/titan/mysterium, two PoC reporters,
+/// and both truncating the same partner log.
+///
+/// `fn main` owns real I/O and never returns, so the wiring is asserted against
+/// source. Needles are assembled at runtime from fragments because this file is
+/// what the test scans — a verbatim literal would match the test's own body and
+/// pass forever.
+#[cfg(test)]
+mod b2_single_instance_wiring_tests {
+    fn code_only(src: &str) -> String {
+        src.lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_app_registers_a_single_instance_guard_before_any_other_plugin() {
+        let code = code_only(include_str!("main.rs"));
+        let guard = format!("tauri_plugin_single{}instance::init(", '_');
+        let store = format!("tauri_plugin{}store::Builder", '_');
+        let guard_at = code.find(&guard).expect(
+            "main() must register the single-instance plugin, or a second launch \
+             becomes a second full FEM process",
+        );
+        let store_at = code
+            .find(&store)
+            .expect("main() must still register the store plugin");
+        assert!(
+            guard_at < store_at,
+            "the single-instance guard must be the FIRST plugin registered: a \
+             duplicate process must discover it is a duplicate before it builds a \
+             second ConfigStore over the same fem_config.json"
+        );
+    }
+
+    #[test]
+    fn the_single_instance_plugin_is_an_actual_dependency() {
+        let manifest = include_str!("../Cargo.toml");
+        let crate_name = format!("tauri-plugin-single{}instance", '-');
+        assert!(
+            manifest.contains(&crate_name),
+            "src-tauri/Cargo.toml must depend on the single-instance plugin — the \
+             wiring above does not compile without it"
+        );
+    }
+
+    /// The duplicate process must hand focus to the instance already running,
+    /// not exit silently: a user who double-clicks the shortcut has to see the
+    /// window they asked for.
+    #[test]
+    fn the_duplicate_launch_surfaces_the_window_that_is_already_running() {
+        let code = code_only(include_str!("main.rs"));
+        let guard = format!("tauri_plugin_single{}instance::init(", '_');
+        let at = code.find(&guard).expect("guard must be registered");
+        let body = &code[at..];
+        let end = body
+            .find(".plugin(tauri_plugin_store")
+            .expect("the store plugin still follows the guard");
+        let callback = &body[..end];
+        for needle in ["get_webview_window", "set_focus", "unminimize"] {
+            assert!(
+                callback.contains(needle),
+                "the single-instance callback must call {needle}, or a second \
+                 launch looks to the user like nothing happened"
+            );
+        }
     }
 }
