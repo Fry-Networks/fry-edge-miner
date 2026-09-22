@@ -13,6 +13,7 @@ pub mod iagon;
 pub mod mysterium;
 pub mod mysterium_lan_check;
 pub mod pawns;
+pub mod port_conflict;
 pub mod reward_model;
 pub mod sentinel;
 pub mod space_acres;
@@ -113,14 +114,17 @@ pub(crate) fn stderr_tail(stderr: &str, n: usize) -> String {
 /// because `HealthStatus` has no dedicated variant and adding one would ripple
 /// into the TypeScript union and the LifecycleState mapping.
 pub(crate) fn awaits_user_action(reason: &str) -> bool {
-    const AWAITING_MARKERS: [&str; 3] = [
+    const AWAITING_MARKERS: [&str; 4] = [
         "Awaiting Storj setup",
         "needs your consent",
         // B7/B8: an underfunded device wallet is the owner's to fix, and
         // frynode is not even running while it is parked — restarting it every
         // 30 s achieves nothing and is what produced the reported restart
-        // storm. Kept in sync with `fryvpn::FUNDING_MARKER`.
-        "Awaiting fryDVPN funding",
+        // storm.
+        fryvpn::FUNDING_MARKER,
+        // B10: nothing FEM restarts can take a TCP port away from another
+        // program.
+        port_conflict::PORT_HELD_MARKER,
     ];
     AWAITING_MARKERS.iter().any(|m| reason.contains(m))
 }

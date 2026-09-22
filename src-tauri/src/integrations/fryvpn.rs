@@ -8,6 +8,8 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 const ALGOD_SERVER: &str = "https://mainnet-api.algonode.cloud";
+/// The port frynode is started on (`-api-port`) and the one FEM probes.
+const FRYNODE_API_PORT: u16 = 8088;
 const FRYNODE_VERSION: &str = "0.1.0";
 
 /// BUG 6: dedicated Windows Firewall rule name for frynode.exe, same pattern
@@ -648,7 +650,7 @@ impl Integration for FryVpnIntegration {
     /// keeps calling `stop()`, so a restart storm still costs zero on-chain
     /// fees and leaves the registration in place.
     async fn stop_for_disable(&self) -> Result<()> {
-        if request_graceful_shutdown(8088, Duration::from_secs(3)).await {
+        if request_graceful_shutdown(FRYNODE_API_PORT, Duration::from_secs(3)).await {
             for _ in 0..20 {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 let alive = {
@@ -694,6 +696,39 @@ impl Integration for FryVpnIntegration {
         };
 
         if !process_alive {
+            // B10: before blaming frynode, find out whether anything else is
+            // holding its API port. Restarting cannot take a port away from
+            // another program, and doing it every 30 s is how the restart
+            // budget was spent before the user ever read the card.
+            match super::port_conflict::probe(FRYNODE_API_PORT) {
+                super::port_conflict::PortState::Free => {}
+                super::port_conflict::PortState::HeldBy { pid, ref image }
+                    if image.eq_ignore_ascii_case("frynode.exe") =>
+                {
+                    // An UNTRACKED frynode: one this Supervisor holds no handle
+                    // on, left behind when FEM was killed rather than closed.
+                    // `stop_integration` can only kill what is in its own map,
+                    // which is why users reported having to toggle three or
+                    // four times before the node came up. Clear it by PID (not
+                    // by image name — a second FEM instance's node is not ours
+                    // to kill) and let the ordinary restart below take over.
+                    warn!(pid, "An untracked frynode holds the dVPN API port — clearing it");
+                    #[cfg(target_os = "windows")]
+                    {
+                        use crate::supervisor::platform::BoundedOutput;
+                        let _ = crate::supervisor::platform::command("taskkill")
+                            .args(["/PID", &pid.to_string(), "/T", "/F"])
+                            .output_bounded(Duration::from_secs(3));
+                    }
+                }
+                ref state => {
+                    return HealthStatus::Unhealthy(super::port_conflict::conflict_reason(
+                        state,
+                        FRYNODE_API_PORT,
+                    ))
+                }
+            }
+
             // BUG 6: say why instead of a bare Stopped (see
             // `process_not_running_reason`). B9: and never quote frynode's own
             // shutdown sequence as the failure.
