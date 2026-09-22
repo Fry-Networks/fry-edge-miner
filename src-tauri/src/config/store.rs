@@ -136,12 +136,25 @@ impl ConfigStore {
             return None;
         }
         match std::fs::read_to_string(path) {
-            Ok(data) => match serde_json::from_str::<FemConfig>(&data) {
+            Ok(data) => match crate::config::migrate::parse(&data) {
                 Ok(cfg) => Some(cfg),
                 Err(e) => {
                     tracing::error!(file = %path.display(), error = %e, "ConfigStore: corrupt config ({label})");
+                    // B5: derive the stem from the file being quarantined. The
+                    // name used to be a constant, so the primary and the backup
+                    // — which live in the SAME directory and are tried
+                    // microseconds apart — produced one identical path, and
+                    // `rename` replaces an existing destination on both Windows
+                    // and Unix: the backup's quarantine DESTROYED the primary's,
+                    // the only surviving copy of the identity. The primary's
+                    // artifact name is byte-identical to before, so no support
+                    // doc changes; the backup now lands beside it.
+                    let stem = path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "fem_config".to_string());
                     let quarantine = path.with_file_name(format!(
-                        "fem_config.corrupt.{}.json",
+                        "{stem}.corrupt.{}.json",
                         chrono::Utc::now().timestamp()
                     ));
                     if let Err(qe) = std::fs::rename(path, &quarantine) {
@@ -190,7 +203,7 @@ impl ConfigStore {
     }
 
     fn save_to_disk(&self, config: &FemConfig) -> Result<()> {
-        let data = serde_json::to_string_pretty(config)?;
+        let data = crate::config::migrate::to_disk_string(config)?;
         Self::write_atomic(&self.path, &data)?;
         // Redundant copies only once a real registration exists.
         if config.miner_key.is_some() {
