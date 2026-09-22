@@ -148,6 +148,60 @@ fn process_not_running_reason(stderr_tail: &str) -> String {
     }
 }
 
+/// B9: lines frynode writes while stopping ON PURPOSE.
+///
+/// Go's stdlib logger writes to stderr, so an orderly shutdown lands in the
+/// same `fryvpn_stderr.log` FEM tails for a crash reason. The card therefore
+/// reported a clean stop as `frynode process is not running: shutting down...
+/// | warning: failed to deregister node: ... | shutdown complete`, and the
+/// supervisor escalated that to "automatic restarts paused" over a stop that
+/// had worked.
+///
+/// Kept fryvpn-LOCAL on purpose: adding these to the shared
+/// `integrations::awaits_user_action` markers would make every partner's
+/// graceful-shutdown text un-restartable, including a Titan crash that says
+/// "graceful shutting down".
+const SHUTDOWN_MARKERS: [&str; 7] = [
+    "shutting down...",
+    "received shutdown signal",
+    "received local shutdown request",
+    "shutdown: ",
+    "failed to deregister node",
+    "node deregistered on-chain",
+    "shutdown complete",
+];
+
+/// PURE: the reason to show when frynode is not running, built from its stderr.
+///
+/// Drops the shutdown sequence first, so only lines that could actually
+/// explain a FAILURE survive. When everything is filtered out the reason is
+/// the plain "frynode process is not running", with nothing misattributed.
+fn not_running_reason_from_stderr(stderr: &str) -> String {
+    let kept: Vec<&str> = stderr
+        .lines()
+        .filter(|line| !SHUTDOWN_MARKERS.iter().any(|m| line.contains(m)))
+        .collect();
+    let tail = super::stderr_tail(&kept.join("\n"), 3);
+    let tail = if tail == "no error output" {
+        String::new()
+    } else {
+        tail
+    };
+    process_not_running_reason(&tail)
+}
+
+/// Ask a locally running frynode to stop in an orderly way (B9).
+///
+/// `true` when it accepted. Never an error: this is a courtesy before the hard
+/// stop, and a frynode without the endpoint simply answers 404.
+async fn request_graceful_shutdown(port: u16, budget: Duration) -> bool {
+    let url = format!("http://127.0.0.1:{port}/shutdown");
+    match tokio::time::timeout(budget, reqwest::Client::new().post(&url).send()).await {
+        Ok(Ok(resp)) => resp.status().is_success(),
+        _ => false,
+    }
+}
+
 /// One HTTP probe of the local frynode `/health` endpoint. Extracted so the
 /// health check can retry across the warm-up window (F5).
 async fn probe_health_once() -> HealthStatus {
@@ -583,6 +637,32 @@ impl Integration for FryVpnIntegration {
         Ok(())
     }
 
+    /// B9: a user disabling fryDVPN should DEREGISTER the node, not strand its
+    /// record and the 200_000 µALGO box MBR behind it on chain. FEM's only stop
+    /// was a hard kill, and on Windows a kill delivers no signal at all, so
+    /// frynode's shutdown path was unreachable however long FEM waited.
+    ///
+    /// Ask over loopback, give it a short budget to exit, then fall through to
+    /// the hard stop unconditionally — a node that will not exit must still be
+    /// stopped. Deliberately NOT inside `stop()`: the supervisor's restart path
+    /// keeps calling `stop()`, so a restart storm still costs zero on-chain
+    /// fees and leaves the registration in place.
+    async fn stop_for_disable(&self) -> Result<()> {
+        if request_graceful_shutdown(8088, Duration::from_secs(3)).await {
+            for _ in 0..20 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let alive = {
+                    let mut sup = self.supervisor.lock().unwrap();
+                    matches!(sup.get_status("fryvpn"), HealthStatus::Healthy)
+                };
+                if !alive {
+                    break;
+                }
+            }
+        }
+        self.stop().await
+    }
+
     async fn health_check(&self) -> HealthStatus {
         // B7/B8: while a funding instruction is parked, frynode was never
         // spawned, so re-read the wallet instead of reporting a dead process.
@@ -615,18 +695,13 @@ impl Integration for FryVpnIntegration {
 
         if !process_alive {
             // BUG 6: say why instead of a bare Stopped (see
-            // `process_not_running_reason`).
+            // `process_not_running_reason`). B9: and never quote frynode's own
+            // shutdown sequence as the failure.
             let stderr_path = self.log_dir.join("fryvpn").join("fryvpn_stderr.log");
             let stderr_content = tokio::fs::read_to_string(&stderr_path)
                 .await
                 .unwrap_or_default();
-            let tail = super::stderr_tail(&stderr_content, 3);
-            let tail = if tail == "no error output" {
-                String::new()
-            } else {
-                tail
-            };
-            return HealthStatus::Unhealthy(process_not_running_reason(&tail));
+            return HealthStatus::Unhealthy(not_running_reason_from_stderr(&stderr_content));
         }
 
         // F5: the frynode HTTP endpoint and its on-chain registration both settle
@@ -1290,3 +1365,10 @@ mod b7_funding_state_tests {
         ));
     }
 }
+
+/// B9's shutdown-path behaviour has its own file so these tests can reach the
+/// module-private helpers without widening them for the whole crate — the same
+/// arrangement `pawns.rs` uses for its consent and retention tests.
+#[cfg(test)]
+#[path = "fryvpn_shutdown_tests.rs"]
+mod fryvpn_shutdown_tests;

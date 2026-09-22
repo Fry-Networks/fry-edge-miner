@@ -207,6 +207,16 @@ pub trait Integration: Send + Sync {
     async fn install(&self) -> Result<()>;
     async fn start(&self) -> Result<()>;
     async fn stop(&self) -> Result<()>;
+    /// Stop this integration because the USER disabled it, as distinct from
+    /// the supervisor restarting it.
+    ///
+    /// Defaults to `stop()`, so no integration's behaviour changes. fryDVPN
+    /// overrides it to ask frynode to deregister itself on the way out — an
+    /// on-chain call that belongs to a deliberate disable and must NOT happen
+    /// on every supervisor restart.
+    async fn stop_for_disable(&self) -> Result<()> {
+        self.stop().await
+    }
     async fn health_check(&self) -> HealthStatus;
     async fn check_update(&self) -> Result<Option<String>>;
     async fn apply_update(&self, _version: &str) -> Result<()> {

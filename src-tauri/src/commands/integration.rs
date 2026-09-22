@@ -264,7 +264,9 @@ pub async fn toggle_integration(
             errs.insert(id.clone(), None);
         }
     } else {
-        if let Err(e) = integration.stop().await {
+        // B9: the USER turning fryDVPN off must deregister the node, not just
+        // kill it. Every other integration's default is still `stop()`.
+        if let Err(e) = integration.stop_for_disable().await {
             let err_msg = e.to_string();
             if let Ok(mut errs) = state.last_integration_error.write() {
                 errs.insert(id.clone(), Some(err_msg.clone()));
