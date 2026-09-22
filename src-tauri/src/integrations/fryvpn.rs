@@ -843,3 +843,48 @@ mod bug6_identity_fallback_tests {
         );
     }
 }
+
+/// B7/B8: the registration requirement must be the cost of the group frynode
+/// ACTUALLY submits, not a round number.
+///
+/// frynode's `RegisterNode` (node/registry/registry.go) composes a two-txn
+/// group — a payment of `defaultMBR` = 200_000 µALGO to the registry app
+/// address, which funds this node's on-chain box, plus the `register_node`
+/// app call — and neither txn sets `FlatFee`, so both pay the network minimum
+/// fee of 1_000. The shipped requirement of 100_000 counted the fees and
+/// forgot the box payment entirely, so a wallet that PASSED this pre-check
+/// still had its registration rejected on chain with an `overspend` the owner
+/// could do nothing about.
+#[cfg(test)]
+mod b7_registration_cost_tests {
+    use super::*;
+
+    #[test]
+    fn the_requirement_covers_the_whole_registration_group() {
+        assert!(
+            REGISTRATION_MIN_MICROALGOS >= 202_000,
+            "the pre-check must cover the box MBR AND both fees, not just the fees: \
+             {REGISTRATION_MIN_MICROALGOS}"
+        );
+    }
+
+    #[test]
+    fn the_requirement_is_the_measured_cost_plus_the_documented_margin() {
+        // 200_000 box MBR + 2 x 1_000 min fee = 202_000 measured, plus a
+        // 10_000 µALGO documented margin covering a min-fee change and
+        // box-size variation.
+        assert_eq!(REGISTRATION_MIN_MICROALGOS, 212_000);
+    }
+
+    /// §6 B8 Done-when: boundary tests at 0, requirement-1, requirement and
+    /// requirement+1. These run against whatever the constant is, so they keep
+    /// pinning the gate if the derivation ever changes.
+    #[test]
+    fn the_gate_is_exact_at_its_boundaries() {
+        let req = REGISTRATION_MIN_MICROALGOS;
+        assert!(registration_affordability(0, req, "ADDR").is_err());
+        assert!(registration_affordability(req - 1, req, "ADDR").is_err());
+        assert!(registration_affordability(req, req, "ADDR").is_ok());
+        assert!(registration_affordability(req + 1, req, "ADDR").is_ok());
+    }
+}
