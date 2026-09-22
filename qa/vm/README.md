@@ -3,9 +3,9 @@
 Playwright specs that drive the release candidate **inside a real Windows guest**, over CDP,
 proving the wiring end to end in a way browser-preview mode (`tests/e2e/**`) structurally cannot.
 
-- `m4-card-tile-parity.spec.ts` — B14: every integration reads the same status on the
+- `card-tile-parity.spec.ts` — B14: every integration reads the same status on the
   Integrations card and the Dashboard tile.
-- `m5-rewards-dashboard-consistency.spec.ts` — B22: staking multiplier / daily estimate / boost
+- `rewards-consistency.spec.ts` — B22: staking multiplier / daily estimate / boost
   label agree between Rewards and Dashboard, anchored to the production server payload
   (`base_reward` 59.52, `reward_amount` 14.88, `stake_tiers` unregistered 0 / none 1 / 24h 1.5 /
   6mo 3, `estimated_daily = base_reward * integration_multiplier * stake_multiplier`), and the
@@ -65,10 +65,10 @@ From the `fry-edge-miner` worktree root (this file's `../../`):
 ```bash
 # Target w11 (default) or w10:
 FEMQA_VM=w11 PLAYWRIGHT_BROWSERS_PATH=/home/fry/.cache/ms-playwright \
-  npx playwright test --config=qa/vm/playwright.vm.config.ts qa/vm/m4-card-tile-parity.spec.ts
+  npx playwright test --config=qa/vm/playwright.vm.config.ts qa/vm/card-tile-parity.spec.ts
 
 FEMQA_VM=w11 PLAYWRIGHT_BROWSERS_PATH=/home/fry/.cache/ms-playwright \
-  npx playwright test --config=qa/vm/playwright.vm.config.ts qa/vm/m5-rewards-dashboard-consistency.spec.ts
+  npx playwright test --config=qa/vm/playwright.vm.config.ts qa/vm/rewards-consistency.spec.ts
 
 # Or both:
 FEMQA_VM=w11 PLAYWRIGHT_BROWSERS_PATH=/home/fry/.cache/ms-playwright \

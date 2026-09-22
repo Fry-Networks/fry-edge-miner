@@ -1,8 +1,15 @@
-import { test, expect, nav, assertInAppShell, writeEvidence, vmName } from './harness'
+import { test, expect, nav, assertInAppShell, writeEvidence, vmName, cdpUrl } from './harness'
 
 /**
  * M4 (this item's slice of the VM matrix) — card == tile parity for every
  * integration, against the REAL backend inside the Windows guest.
+ *
+ * CONNECTION: the `page` fixture below comes from harness.ts, which calls
+ * Playwright's `chromium.connectOverCDP()` against the guest's forwarded
+ * CDP port — 127.0.0.1:9223 for W11, 127.0.0.1:9224 for W10 (the ports
+ * ~/femqa/vm/HARNESS.md publishes; the guest side is always :9222, wired
+ * by vm-launch-fem's netsh portproxy). See harness.ts's cdpUrl() for the
+ * exact FEMQA_VM / FEMQA_CDP_URL selection logic.
  *
  * tests/e2e/card-tile-parity.spec.ts (browser-preview mode) already proves
  * the pure function (integrationBadge()) is correct for every state it can
@@ -76,6 +83,7 @@ test.describe('M4 — card/tile parity (real backend)', () => {
 
     const evidencePath = writeEvidence('B14-card-tile-parity', 'm4-result.json', {
       vm: vmName(),
+      cdpUrl: cdpUrl(),
       ids,
       cardLabels,
       tileLabels,

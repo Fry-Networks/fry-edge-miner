@@ -1,8 +1,15 @@
-import { test, expect, nav, assertInAppShell, readStatCard, readBreakdownRow, writeEvidence, vmName } from './harness'
+import { test, expect, nav, assertInAppShell, readStatCard, readBreakdownRow, writeEvidence, vmName, cdpUrl } from './harness'
 
 /**
  * M5 — Rewards vs Dashboard numeric consistency (B22), against the REAL
  * backend inside the Windows guest.
+ *
+ * CONNECTION: the `page` fixture below comes from harness.ts, which calls
+ * Playwright's `chromium.connectOverCDP()` against the guest's forwarded
+ * CDP port — 127.0.0.1:9223 for W11, 127.0.0.1:9224 for W10 (the ports
+ * ~/femqa/vm/HARNESS.md publishes; the guest side is always :9222, wired
+ * by vm-launch-fem's netsh portproxy). See harness.ts's cdpUrl() for the
+ * exact FEMQA_VM / FEMQA_CDP_URL selection logic.
  *
  * Anchored to the production server payload captured for this run
  * (GET /versions/FEM?platform=windows): base_reward 59.52, reward_amount
@@ -49,6 +56,7 @@ test.describe('M5 — Rewards vs Dashboard numeric consistency (real backend)', 
 
     const evidence = {
       vm: vmName(),
+      cdpUrl: cdpUrl(),
       dashboard: { dailyEstimate, baseRewardRow, stakingMultRow, requiredPctRow, boostRow },
       rewards: { fullDayEst, stakingTier },
     }
