@@ -10,6 +10,11 @@ use super::*;
 
 /// Strip line comments so a source-scanning assertion can never be satisfied
 /// by prose. Same shape as `security_setup.rs`'s elevation-hygiene tests.
+///
+/// NOTE: this also truncates any line containing `//` inside a string — a URL,
+/// for instance. Assertions about URLs therefore run against the RAW source
+/// below, which is the stricter check anyway: the retired org must not appear
+/// in a comment either.
 fn code_only(src: &str) -> String {
     src.lines()
         .map(|l| l.split("//").next().unwrap_or(""))
@@ -64,14 +69,30 @@ fn the_pin_is_a_full_sha256() {
 /// installed binary changed the moment a new release appeared.
 #[test]
 fn the_install_target_is_pinned_and_does_not_reference_the_retired_org() {
-    let code = code_only(MYSTERIUM_SRC);
+    // RAW, not code_only: `code_only` truncates at `//` and would silently
+    // delete every URL, which would make both of these pass on the very
+    // version they are meant to catch.
     assert!(
-        !code.contains("Fry-Foundation"),
+        !MYSTERIUM_SRC.contains("Fry-Foundation"),
         "still references the retired defensive org"
     );
+    // A tag-pinned asset URL must exist...
     assert!(
-        !code.contains("releases/latest/download"),
-        "install target is still unpinned"
+        MYSTERIUM_SRC.contains("/releases/download/v"),
+        "there is no tag-pinned asset URL"
+    );
+    // ...and install() must be the thing that uses it, rather than resolving
+    // `latest` at install time. (The superseded lookup is left on disk
+    // deliberately; what matters is that nothing calls it.)
+    let code = code_only(MYSTERIUM_SRC);
+    assert!(
+        code.contains("download_file_with_options(SDK_CLIENT_URL"),
+        "install() does not download the pinned asset"
+    );
+    let unpinned_call = format!("Self::fetch_latest{}().await?", "_release");
+    assert!(
+        !code.contains(&unpinned_call),
+        "install() still resolves `latest` at install time"
     );
     assert!(
         code.contains("SDK_CLIENT_SHA256"),
@@ -87,10 +108,12 @@ fn install_no_longer_trusts_a_binary_for_merely_existing() {
         code.contains("staged_binary_matches_pin(&binary, SDK_CLIENT_SHA256)"),
         "install() must gate on the digest, not on existence"
     );
-    let bare_early_return = format!("already present\"{});", ')');
+    // The early return is still there, but it is now reached only AFTER the
+    // digest matches — the log line says which, so this cannot pass on a
+    // version that returns on existence alone.
     assert!(
-        !code.contains(&bare_early_return),
-        "install() still returns early on existence alone"
+        code.contains("already present and matches its pin"),
+        "install()'s early return is not digest-gated"
     );
 }
 
