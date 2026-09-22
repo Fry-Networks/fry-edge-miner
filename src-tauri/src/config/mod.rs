@@ -1,9 +1,12 @@
+pub mod migrate;
 pub mod miner_key;
 pub mod store;
 pub mod wallet;
 
 #[cfg(test)]
 mod preservation_tests;
+#[cfg(test)]
+mod schema_migration_tests;
 #[cfg(test)]
 mod version_upgrade_tests;
 
@@ -18,9 +21,24 @@ pub struct FemConfig {
     pub install_id: Option<String>,
     #[serde(default)]
     pub initial_setup_done: bool,
+    /// B5: `#[serde(default)]` because a config that is merely MISSING this key
+    /// must not fail the whole parse — a parse failure is quarantined and the
+    /// device resets to `FemConfig::default()`, losing the miner key. That
+    /// contradicts `ConfigStore`'s own stated design, which `storage_location.rs`
+    /// spells out: "a load must never fail".
+    ///
+    /// `serialize_with` because this is a std `HashMap`, whose iteration order
+    /// is seeded per instance — without it, two saves of the same logical
+    /// config write different byte sequences, so "migrate twice -> identical"
+    /// cannot hold and every write churns the file.
+    #[serde(default, serialize_with = "ordered_map")]
     pub integrations_enabled: HashMap<String, bool>,
-    #[serde(default)]
+    #[serde(default, serialize_with = "ordered_map")]
     pub integration_versions: HashMap<String, String>,
+    /// B5: same reason as `integrations_enabled` — an absent key must fill the
+    /// default rather than reject the config. The literal lives in
+    /// `default_api_base_url` so `Default` and serde cannot drift apart.
+    #[serde(default = "default_api_base_url")]
     pub api_base_url: String,
     #[serde(skip_serializing, default = "default_api_token")]
     pub api_token: String,
@@ -107,6 +125,30 @@ fn default_true() -> bool {
     true
 }
 
+fn default_api_base_url() -> String {
+    "https://hardwareapi.frynetworks.com".to_string()
+}
+
+/// B5: serialise a `HashMap` in key order.
+///
+/// std's `RandomState` seeds every `HashMap` instance differently, so two
+/// independently-deserialised copies of the same config serialise their entries
+/// in different orders. `save_to_disk` re-serialises the WHOLE struct on every
+/// `update()`, so that nondeterminism reaches the file: gratuitous churn, noisy
+/// device-to-device diffs, and an idempotency requirement that cannot hold.
+/// Collecting into a `BTreeMap` for serialisation only — the field type, the
+/// in-memory value and every call site are unchanged, so the IPC surface in
+/// `commands::settings` does not move.
+fn ordered_map<S, V>(map: &HashMap<String, V>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+    V: Serialize,
+{
+    map.iter()
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .serialize(serializer)
+}
+
 fn default_api_token() -> String {
     // Prefer runtime environment variable so the token is not baked into the binary.
     std::env::var("FEM_API_TOKEN")
@@ -124,7 +166,7 @@ impl Default for FemConfig {
             initial_setup_done: false,
             integrations_enabled: HashMap::new(),
             integration_versions: HashMap::new(),
-            api_base_url: "https://hardwareapi.frynetworks.com".to_string(),
+            api_base_url: default_api_base_url(),
             api_token: default_api_token(),
             device_token: None,
             device_name: None,

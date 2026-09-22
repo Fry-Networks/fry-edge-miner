@@ -95,6 +95,12 @@ pub async fn get_integrations(
         .last_integration_error
         .read()
         .map_err(|e| e.to_string())?;
+    // B3 defect 4: an elevation FEM suppressed, or one the user declined, has
+    // no other way to reach the card — every elevation site is `warn!`-only and
+    // none of them writes `last_integration_error`. Merged here (a snapshot, so
+    // no lock is held across the map) and only where there is no more specific
+    // error already, so a real start failure is never masked by it.
+    let elevation_blocks = crate::elevation_gate::blocked_reasons();
 
     let statuses = entries
         .into_iter()
@@ -135,7 +141,10 @@ pub async fn get_integrations(
                     },
                     tier: crate::integrations::tier_for(&id),
                     requires_docker,
-                    error: last_errors.get(&id).and_then(|e| e.clone()),
+                    error: last_errors
+                        .get(&id)
+                        .and_then(|e| e.clone())
+                        .or_else(|| elevation_blocks.get(&id).cloned()),
                     unavailable_reason,
                 }
             },
@@ -287,6 +296,12 @@ pub async fn toggle_integration(
             record_enable_error(&state, &id, &reason);
             return Err(reason);
         }
+        // B3 (D-02): toggling ON is the retry gesture for a suppressed or
+        // declined elevation — the ratified design ships no separate Retry
+        // button. Clear any block recorded for this integration so the card
+        // reflects what THIS attempt does rather than what the last one did.
+        crate::elevation_gate::clear_blocked(&id);
+
         // Auto-install integrations that have not been deployed yet (e.g., Diiisco).
         if integration.installed_version().is_none() {
             match tokio::time::timeout(INSTALL_STEP_TIMEOUT, integration.install()).await {
@@ -307,7 +322,12 @@ pub async fn toggle_integration(
                 }
             }
         }
-        match tokio::time::timeout(TOGGLE_STEP_TIMEOUT, integration.start()).await {
+        // B3: this is the one path a human actually clicked, so it is the one
+        // path allowed to raise a UAC prompt. Every other caller of start()
+        // (boot auto-start, supervisor restart, the Docker watcher) keeps
+        // getting ElevationTrigger::Automatic, which the gate refuses before
+        // any prompt appears.
+        match tokio::time::timeout(TOGGLE_STEP_TIMEOUT, integration.start_for_user()).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 let err_msg = e.to_string();
@@ -397,7 +417,9 @@ pub async fn force_reinstall_integration(
         }
         return Err(err_msg);
     }
-    if let Err(e) = integration.start().await {
+    // Force-reinstall is a button the user pressed, so it carries the same
+    // elevation authority as the toggle.
+    if let Err(e) = integration.start_for_user().await {
         let err_msg = e.to_string();
         if let Ok(mut errs) = state.last_integration_error.write() {
             errs.insert(id.clone(), Some(err_msg.clone()));
@@ -678,4 +700,3 @@ mod b21_poll_lock_tests {
         );
     }
 }
-

@@ -16,6 +16,21 @@ fn stamped(at: chrono::DateTime<chrono::Utc>) -> String {
     format!("{} {REPORTED_LINE}", at.format("%Y-%m-%dT%H:%M:%S%.3f%z"))
 }
 
+/// `now`, truncated to a whole second.
+///
+/// The log format carries milliseconds, so a raw `Utc::now()` loses its
+/// sub-millisecond digits when written into a fixture — which makes a stamp
+/// built as `now - window` land a fraction of a millisecond EARLIER than
+/// intended and turns the boundary case into a coin flip. Truncating first
+/// makes the round-trip exact, so the edge test measures the boundary rather
+/// than formatting precision.
+fn now_truncated() -> chrono::DateTime<chrono::Utc> {
+    use chrono::Timelike;
+    chrono::Utc::now()
+        .with_nanosecond(0)
+        .expect("second is valid")
+}
+
 fn window() -> chrono::Duration {
     chrono::Duration::minutes(ERROR_RECENCY_WINDOW_MINUTES)
 }
@@ -49,7 +64,7 @@ fn a_recent_error_still_counts() {
 /// steadily-failing daemon cannot slip through by landing on the edge.
 #[test]
 fn an_error_exactly_at_the_window_edge_still_counts() {
-    let now = chrono::Utc::now();
+    let now = now_truncated();
     let log = stamped(now - window());
 
     assert!(first_recent_error_line(&log, now, window()).is_some());
@@ -65,7 +80,11 @@ fn an_untimestamped_error_line_fails_open() {
     assert!(first_recent_error_line(log, now, window()).is_some());
     assert!(error_line_is_recent(log, now, window()));
     assert!(error_line_is_recent("", now, window()));
-    assert!(error_line_is_recent("not-a-timestamp ERROR boom", now, window()));
+    assert!(error_line_is_recent(
+        "not-a-timestamp ERROR boom",
+        now,
+        window()
+    ));
 }
 
 /// A benign line must not become a failure just because it is recent.
@@ -91,12 +110,7 @@ fn the_upstream_reason_is_exempt_from_restarting_a_live_daemon() {
         "must be recognised as upstream: {reason}"
     );
     assert_eq!(
-        crate::supervisor::health::recovery_action(
-            &HealthStatus::Unhealthy(reason),
-            true,
-            0,
-            6
-        ),
+        crate::supervisor::health::recovery_action(&HealthStatus::Unhealthy(reason), true, 0, 6),
         crate::supervisor::health::RecoveryAction::None,
         "FEM must not TerminateProcess a live titan-edge over a network condition"
     );

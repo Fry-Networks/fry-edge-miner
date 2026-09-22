@@ -93,7 +93,12 @@ pub(crate) fn current_rule_program(rule_name: &str) -> Option<String> {
 /// elevation → ONE `RunAs` PowerShell shot (single UAC prompt), transcript to
 /// the FEM log dir, parent blocks on the exit code. Failure is non-fatal —
 /// the caller keeps starting the integration (Windows will simply prompt).
-pub fn ensure_program_rules(rule_name: &str, program: &Path) -> Result<()> {
+pub fn ensure_program_rules(
+    rule_name: &str,
+    program: &Path,
+    purpose: &'static str,
+    trigger: crate::elevation_gate::ElevationTrigger,
+) -> Result<()> {
     let program_str = program.to_string_lossy().to_string();
     if let Some(existing) = current_rule_program(rule_name) {
         if existing == program_str.to_lowercase() {
@@ -152,45 +157,79 @@ pub fn ensure_program_rules(rule_name: &str, program: &Path) -> Result<()> {
         inner.replace('"', "`\"")
     );
 
-    let out = crate::supervisor::platform::command("powershell")
-        .args(["-NoProfile", "-Command", &outer])
-        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
-    if out.status.success() {
-        info!(rule = rule_name, transcript = %transcript.display(), "Firewall rules reconciled");
-        Ok(())
-    } else {
-        // 1223 = UAC declined.
-        warn!(
-            rule = rule_name,
-            code = out.status.code(),
-            "Firewall rule creation failed (UAC declined or netsh error) — continuing without rules"
-        );
+    // B3: the prompt goes through the elevation gate, so FEM never raises UAC
+    // on its own — an Automatic trigger is refused before the shot is fired,
+    // and a UserClick gets exactly one attempt per target per process run. The
+    // attempt key carries the target so a genuinely NEW binary path re-arms
+    // that one attempt instead of being silently suppressed.
+    let attempt_key = format!("{rule_name}|{}", program_str.to_lowercase());
+    let outcome = crate::elevation_gate::run_elevated(purpose, &attempt_key, trigger, || {
+        // UAC_ANSWER_TIMEOUT, not PROBE_TIMEOUT: this blocks on a HUMAN
+        // answering a consent dialog, which the 20 s probe budget cannot cover.
+        let out = crate::supervisor::platform::command("powershell")
+            .args(["-NoProfile", "-Command", &outer])
+            .output_bounded(crate::supervisor::platform::UAC_ANSWER_TIMEOUT)?;
+        if out.status.success() {
+            info!(rule = rule_name, transcript = %transcript.display(), "Firewall rules reconciled");
+            return Ok(());
+        }
+        // 1223 = UAC declined. Reported as PermissionDenied so the gate
+        // recognises a decline and shows the approval message rather than a
+        // raw exit code.
+        if crate::elevation_gate::is_declined(out.status.code(), None) {
+            return Err(anyhow::Error::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "firewall rule creation declined (exit {:?})",
+                    out.status.code()
+                ),
+            )));
+        }
         anyhow::bail!(
             "firewall rule creation failed (exit {:?})",
             out.status.code()
         )
+    });
+
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(skipped) => {
+            warn!(
+                rule = rule_name,
+                reason = %skipped,
+                "Firewall rules not reconciled — continuing without them"
+            );
+            anyhow::bail!("{skipped}")
+        }
     }
 }
 
 /// Delete the rules (elevated, warn-only). Used by force-clean/uninstall.
-pub fn delete_rules(rule_name: &str) {
+pub fn delete_rules(
+    rule_name: &str,
+    purpose: &'static str,
+    trigger: crate::elevation_gate::ElevationTrigger,
+) {
     if current_rule_program(rule_name).is_none() {
         return;
     }
     let outer = format!(
         "$ErrorActionPreference = 'Stop'; try {{ $p = Start-Process -FilePath netsh -ArgumentList 'advfirewall','firewall','delete','rule','name={rule_name}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; if ($null -eq $p) {{ exit 3 }}; exit $p.ExitCode }} catch {{ exit 2 }}"
     );
-    match crate::supervisor::platform::command("powershell")
-        .args(["-NoProfile", "-Command", &outer])
-        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
-    {
-        Ok(o) if o.status.success() => info!(rule = rule_name, "Firewall rules deleted"),
-        Ok(o) => warn!(
-            rule = rule_name,
-            code = o.status.code(),
-            "Firewall rule delete failed"
-        ),
-        Err(e) => warn!(rule = rule_name, error = %e, "Firewall rule delete could not run"),
+    let attempt_key = format!("delete|{rule_name}");
+    let outcome = crate::elevation_gate::run_elevated(purpose, &attempt_key, trigger, || {
+        // Same human-answer budget as the create path.
+        let o = crate::supervisor::platform::command("powershell")
+            .args(["-NoProfile", "-Command", &outer])
+            .output_bounded(crate::supervisor::platform::UAC_ANSWER_TIMEOUT)?;
+        if o.status.success() {
+            return Ok(());
+        }
+        anyhow::bail!("firewall rule delete failed (exit {:?})", o.status.code())
+    });
+    match outcome {
+        Ok(()) => info!(rule = rule_name, "Firewall rules deleted"),
+        Err(skipped) => warn!(rule = rule_name, reason = %skipped, "Firewall rule delete skipped"),
     }
 }
 

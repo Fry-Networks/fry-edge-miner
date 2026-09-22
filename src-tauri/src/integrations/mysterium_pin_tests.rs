@@ -119,8 +119,9 @@ fn install_no_longer_trusts_a_binary_for_merely_existing() {
 
 #[test]
 fn a_log_error_is_surfaced_with_the_line_that_caused_it() {
-    let reason = log_error_reason(&["2026-09-20T10:00:00Z ERR identity not registered".to_string()])
-        .expect("an ERR line must be reported");
+    let reason =
+        log_error_reason(&["2026-09-20T10:00:00Z ERR identity not registered".to_string()])
+            .expect("an ERR line must be reported");
 
     assert!(
         reason.contains("identity not registered"),

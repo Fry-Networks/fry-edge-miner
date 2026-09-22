@@ -346,6 +346,22 @@ pub(crate) const REGISTRATION_MIN_MICROALGOS: u64 = REGISTRY_BOX_MBR_MICROALGOS
     + DEREGISTRATION_COST_MICROALGOS
     + REGISTRATION_MARGIN_MICROALGOS;
 
+// These are compile-time assertions on purpose. Both operands are constants,
+// so a runtime `assert!` in a test can never actually fail — clippy says so —
+// and would give false confidence. As `const _` they fail the BUILD the moment
+// someone lowers the requirement below what the chain really charges.
+const _: () = assert!(
+    REGISTRATION_MIN_MICROALGOS
+        >= REGISTRY_BOX_MBR_MICROALGOS + REGISTRATION_GROUP_TXNS * ALGORAND_MIN_FEE_MICROALGOS,
+    "the requirement must cover the box MBR and both group fees"
+);
+const _: () = assert!(
+    REGISTRATION_MIN_MICROALGOS
+        - (REGISTRY_BOX_MBR_MICROALGOS + REGISTRATION_GROUP_TXNS * ALGORAND_MIN_FEE_MICROALGOS)
+        >= DEREGISTRATION_COST_MICROALGOS,
+    "nothing would be left to deregister with — measured on LocalNet, this strands the node"
+);
+
 /// PURE: what an account can actually spend — algod reports the TOTAL `amount`
 /// and separately the locked `min-balance`. Saturating, so an account below its
 /// own minimum reports 0 rather than underflowing.
@@ -572,43 +588,9 @@ impl FryVpnIntegration {
         }
     }
 
-    /// Fetch the device's provisioned Algorand identity and confirm it can
-    /// actually afford the on-chain registration (BUG 6).
-    ///
-    /// Returns the mnemonic to hand frynode. Any failure is a user-facing
-    /// sentence, never a raw chain error.
-    async fn resolve_funded_identity(&self) -> Result<Option<String>, String> {
-        match self.device_identity_and_funding().await {
-            None => Ok(None),
-            Some((_, FundingState::Underfunded(msg))) => Err(msg),
-            Some((mnemonic, _)) => Ok(Some(mnemonic)),
-        }
-    }
-}
-
-#[async_trait]
-impl Integration for FryVpnIntegration {
-    fn id(&self) -> &str {
-        "fryvpn"
-    }
-
-    fn display_name(&self) -> &str {
-        "Fry dVPN"
-    }
-
-    async fn install(&self) -> Result<()> {
-        // Nothing to download — frynode ships with the app. Verify it is really
-        // there rather than reporting success and failing later at start().
-        let binary = Self::binary_path()?;
-        let path = std::path::Path::new(&binary);
-        if path.is_absolute() && !path.exists() {
-            anyhow::bail!("frynode not found at {}", path.display());
-        }
-        info!(binary = %binary, "Fry dVPN binary found");
-        Ok(())
-    }
-
-    async fn start(&self) -> Result<()> {
+    /// The real start. `trigger` decides whether the firewall rule may
+    /// raise a UAC prompt: only a user gesture ever may.
+    async fn start_inner(&self, trigger: crate::elevation_gate::ElevationTrigger) -> Result<()> {
         let binary = Self::binary_path()?;
 
         // BUG 6: pre-create firewall rules for this exact binary path so
@@ -619,7 +601,12 @@ impl Integration for FryVpnIntegration {
         // concrete to bind the rule to.
         let binary_path = std::path::Path::new(&binary);
         if binary_path.is_absolute() {
-            if let Err(e) = super::firewall::ensure_program_rules(FRYNODE_RULE_NAME, binary_path) {
+            if let Err(e) = super::firewall::ensure_program_rules(
+                FRYNODE_RULE_NAME,
+                binary_path,
+                "fryvpn",
+                trigger,
+            ) {
                 warn!(error = %e, "Fry dVPN firewall rule setup failed — continuing");
             }
         }
@@ -711,6 +698,53 @@ impl Integration for FryVpnIntegration {
         Ok(())
     }
 
+    /// Fetch the device's provisioned Algorand identity and confirm it can
+    /// actually afford the on-chain registration (BUG 6).
+    ///
+    /// Returns the mnemonic to hand frynode. Any failure is a user-facing
+    /// sentence, never a raw chain error.
+    async fn resolve_funded_identity(&self) -> Result<Option<String>, String> {
+        match self.device_identity_and_funding().await {
+            None => Ok(None),
+            Some((_, FundingState::Underfunded(msg))) => Err(msg),
+            Some((mnemonic, _)) => Ok(Some(mnemonic)),
+        }
+    }
+}
+
+#[async_trait]
+impl Integration for FryVpnIntegration {
+    fn id(&self) -> &str {
+        "fryvpn"
+    }
+
+    fn display_name(&self) -> &str {
+        "Fry dVPN"
+    }
+
+    async fn install(&self) -> Result<()> {
+        // Nothing to download — frynode ships with the app. Verify it is really
+        // there rather than reporting success and failing later at start().
+        let binary = Self::binary_path()?;
+        let path = std::path::Path::new(&binary);
+        if path.is_absolute() && !path.exists() {
+            anyhow::bail!("frynode not found at {}", path.display());
+        }
+        info!(binary = %binary, "Fry dVPN binary found");
+        Ok(())
+    }
+
+    async fn start(&self) -> Result<()> {
+        self.start_inner(crate::elevation_gate::ElevationTrigger::Automatic)
+            .await
+    }
+
+    /// B3: only a real click may raise UAC.
+    async fn start_for_user(&self) -> Result<()> {
+        self.start_inner(crate::elevation_gate::ElevationTrigger::UserClick)
+            .await
+    }
+
     async fn stop(&self) -> Result<()> {
         // A parked funding instruction describes a start that never happened;
         // drop it so re-enabling measures the wallet again rather than showing
@@ -798,7 +832,10 @@ impl Integration for FryVpnIntegration {
                     // four times before the node came up. Clear it by PID (not
                     // by image name — a second FEM instance's node is not ours
                     // to kill) and let the ordinary restart below take over.
-                    warn!(pid, "An untracked frynode holds the dVPN API port — clearing it");
+                    warn!(
+                        pid,
+                        "An untracked frynode holds the dVPN API port — clearing it"
+                    );
                     #[cfg(target_os = "windows")]
                     {
                         use crate::supervisor::platform::BoundedOutput;
@@ -1314,29 +1351,11 @@ mod bug6_identity_fallback_tests {
 mod b7_registration_cost_tests {
     use super::*;
 
-    #[test]
-    fn the_requirement_covers_the_whole_registration_group() {
-        assert!(
-            REGISTRATION_MIN_MICROALGOS >= 202_000,
-            "the pre-check must cover the box MBR AND both fees, not just the fees: \
-             {REGISTRATION_MIN_MICROALGOS}"
-        );
-    }
-
-    /// Measured on LocalNet: a wallet funded with exactly the register group's
-    /// cost registers and is then stranded, because the deregister it will
-    /// eventually need costs 2_000 it no longer has. The requirement has to
-    /// let a node leave as well as arrive.
-    #[test]
-    fn the_requirement_also_covers_getting_back_out() {
-        let register_only =
-            REGISTRY_BOX_MBR_MICROALGOS + REGISTRATION_GROUP_TXNS * ALGORAND_MIN_FEE_MICROALGOS;
-        assert!(
-            REGISTRATION_MIN_MICROALGOS - register_only >= DEREGISTRATION_COST_MICROALGOS,
-            "nothing is left to deregister with: {REGISTRATION_MIN_MICROALGOS} - \
-             {register_only} < {DEREGISTRATION_COST_MICROALGOS}"
-        );
-    }
+    /// The two invariants behind these numbers — that the requirement covers
+    /// the whole group, and that it leaves enough to deregister afterwards —
+    /// are enforced as `const _` assertions beside the constant itself, so
+    /// lowering it fails the BUILD rather than a test. What is worth pinning
+    /// here is the VALUE, because it is what the user is told to send.
 
     #[test]
     fn the_requirement_is_the_measured_cost_plus_the_documented_margin() {
@@ -1415,7 +1434,9 @@ mod b8_funding_display_tests {
     fn the_displayed_total_is_exact_at_its_boundaries() {
         let total = REGISTRATION_MIN_MICROALGOS + MIN_BAL;
         assert_eq!(total, 312_000);
-        assert!(registration_funding_message(0, MIN_BAL, REGISTRATION_MIN_MICROALGOS, "A").is_err());
+        assert!(
+            registration_funding_message(0, MIN_BAL, REGISTRATION_MIN_MICROALGOS, "A").is_err()
+        );
         assert!(
             registration_funding_message(total - 1, MIN_BAL, REGISTRATION_MIN_MICROALGOS, "A")
                 .is_err()

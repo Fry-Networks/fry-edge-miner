@@ -11,6 +11,41 @@ use tracing::{info, warn};
 /// therefore takes effect on the next launch.
 static STORAGE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+/// B4: why the configured storage root was NOT used, when it was not used.
+///
+/// The fallback was a `warn!` and nothing else, so Settings went on reporting
+/// the CONFIGURED path as "where partner data is stored" while the files were
+/// actually going to %APPDATA%, under a banner promising that a restart would
+/// start using the configured location — which it will not while the drive is
+/// unavailable. Nothing was ever deleted; the user is looking in the wrong
+/// place. That is the "fry edge miner folder empty" report, manufactured.
+static STORAGE_ROOT_FALLBACK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// PURE: what the user is told when the configured root could not be used.
+/// Names the configured path, the reason, where the files ARE, and — the part
+/// that matters most to someone staring at an empty folder — that nothing was
+/// deleted.
+pub fn storage_fallback_message(configured: &Path, reason: &str, active: &Path) -> String {
+    format!(
+        "Could not use {} ({}). Partner files are being written to {} instead, \
+         and your existing files there have not been deleted. Reconnect the \
+         drive and restart Fry Edge Miner to use the configured location.",
+        configured.display(),
+        reason,
+        active.display()
+    )
+}
+
+/// The fallback message for this run, if the configured root was rejected.
+pub fn storage_fallback_reason() -> Option<String> {
+    STORAGE_ROOT_FALLBACK.get().cloned()
+}
+
+/// B4: the fallback's reporting, kept out of download.rs's own tests.
+#[cfg(test)]
+#[path = "storage_fallback_tests.rs"]
+mod storage_fallback_tests;
+
 /// The historic location — verbatim the pre-fix body of `partners_base_dir`.
 pub fn default_partners_base_dir() -> PathBuf {
     dirs::data_dir()
@@ -56,6 +91,13 @@ pub fn init_storage_root(configured: Option<&str>) -> PathBuf {
                     error = %e.message(),
                     "Configured storage location is unusable — falling back to the default"
                 );
+                // B4: record it for the UI. A log line alone let Settings keep
+                // reporting the configured path as the live one.
+                let _ = STORAGE_ROOT_FALLBACK.set(storage_fallback_message(
+                    &chosen,
+                    &e.message(),
+                    &default,
+                ));
                 default
             }
         }

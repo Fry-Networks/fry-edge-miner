@@ -566,7 +566,22 @@ pub(crate) fn try_start_docker_desktop() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Docker Desktop not found in standard paths"))?;
 
     info!(path = ?docker_exe, "Starting Docker Desktop");
-    crate::supervisor::platform::command(&docker_exe).spawn()?;
+    // B15 (D-13): Docker Desktop is a full third-party desktop app that owns
+    // its own UI and spawns an engine/WSL tree. FEM now sets a PROCESS error
+    // mode that children inherit, which is right for FEM-managed partners but
+    // must not silence Docker's own dialogs — CREATE_DEFAULT_ERROR_MODE opts
+    // this one launch out. It is the ONLY exemption: OlostepBrowser and
+    // space-acres are FEM-managed partners and SHOULD inherit, which is the
+    // Done-when's "spawned partners never raise system modal dialogs".
+    let mut cmd = crate::supervisor::platform::command(&docker_exe);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_DEFAULT_ERROR_MODE: u32 = 0x0400_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_DEFAULT_ERROR_MODE);
+    }
+    cmd.spawn()?;
     Ok(())
 }
 
@@ -870,7 +885,10 @@ mod b19_docker_cli_resolution_tests {
         let cli = tmp.path().join("docker.exe");
         std::fs::write(&cli, b"stub").unwrap();
 
-        assert_eq!(pick_docker_cli(false, &[cli.clone()]), Some(cli));
+        assert_eq!(
+            pick_docker_cli(false, std::slice::from_ref(&cli)),
+            Some(cli)
+        );
     }
 
     #[test]
@@ -916,10 +934,7 @@ mod b19_docker_cli_resolution_tests {
         ))
         .expect("a rooted path has a parent");
 
-        assert!(
-            derived.ends_with("resources/bin/docker.exe"),
-            "{derived:?}"
-        );
+        assert!(derived.ends_with("resources/bin/docker.exe"), "{derived:?}");
         assert!(cli_beside_desktop_exe(std::path::Path::new("")).is_none());
     }
 }

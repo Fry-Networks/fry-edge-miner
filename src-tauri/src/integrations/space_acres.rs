@@ -753,7 +753,10 @@ impl SpaceAcresIntegration {
                 warn!(error = %e, "Could not remove SpaceAcres installer");
             }
             info!(binary = ?binary, version = %release.version, "SpaceAcres installed successfully");
-            return Ok(());
+            // Tail expression, not `return`: on Windows this block IS the end
+            // of the function (the block below is cfg'd out), and clippy's
+            // needless_return is a hard error under -D warnings.
+            Ok(())
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -850,6 +853,13 @@ impl Integration for SpaceAcresIntegration {
         let child = cmd
             .spawn()
             .map_err(|e| anyhow::anyhow!("Failed to start SpaceAcres: {}", e))?;
+        // B4 (D-03): SpaceAcres joins the kill-on-close job like every other
+        // partner. The trade-off is deliberate and documented: an abrupt kill
+        // can interrupt a plot. FEM's normal quit stops it gracefully first
+        // (main.rs's ExitRequested handler), so the kernel kill only happens
+        // when FEM itself died abnormally — which is precisely the case that
+        // was leaving orphans behind before.
+        crate::supervisor::platform::adopt_into_partner_job(&child);
 
         // BUG 3: track the child so is_running()/stop() can target it
         // directly instead of only an untargeted image-name scan.
@@ -1788,7 +1798,8 @@ mod b21_blocking_offload_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn offloaded_blocking_work_does_not_starve_the_async_worker() {
-        let blocking = tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(400)));
+        let blocking =
+            tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(400)));
         let started = std::time::Instant::now();
 
         tokio::time::sleep(Duration::from_millis(20)).await;

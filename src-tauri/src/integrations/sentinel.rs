@@ -420,15 +420,16 @@ impl Integration for SentinelIntegration {
 
                     {
                         // Try to get logs for more detail
-                        if let Ok(log_output) = crate::integrations::docker_manager::docker_command()
-                            .args([
-                                "compose",
-                                "-f",
-                                &compose.to_string_lossy(),
-                                "logs",
-                                "sentinel-dvpnx",
-                            ])
-                            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+                        if let Ok(log_output) =
+                            crate::integrations::docker_manager::docker_command()
+                                .args([
+                                    "compose",
+                                    "-f",
+                                    &compose.to_string_lossy(),
+                                    "logs",
+                                    "sentinel-dvpnx",
+                                ])
+                                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
                         {
                             let logs = format!(
                                 "{}{}",
