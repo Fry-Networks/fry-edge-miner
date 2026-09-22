@@ -771,62 +771,86 @@ mod b14_enable_error_tests {
 /// that state blocked the toggle the user had just flipped.
 #[cfg(test)]
 mod b21_poll_lock_tests {
-    use super::*;
-    use std::sync::mpsc;
-    use std::sync::{Arc, Mutex};
-    use std::time::Instant;
-
-    const SLOW_PROBE: Duration = Duration::from_millis(300);
-
-    /// How long a second acquirer waits, given a worker that models one of the
-    /// two shapes. The handshake makes it deterministic: the worker signals
-    /// only once it has taken the lock, so the measurement can never start
-    /// before the contention it is measuring exists.
-    fn wait_for_lock(hold_across_slow_work: bool) -> Duration {
-        let lock = Arc::new(Mutex::new(()));
-        let (tx, rx) = mpsc::channel();
-
-        let worker = {
-            let lock = Arc::clone(&lock);
-            std::thread::spawn(move || {
-                let guard = lock.lock().unwrap();
-                tx.send(()).unwrap();
-                if hold_across_slow_work {
-                    std::thread::sleep(SLOW_PROBE);
-                    drop(guard);
-                } else {
-                    // The fix: snapshot, release, THEN do the slow work.
-                    drop(guard);
-                    std::thread::sleep(SLOW_PROBE);
-                }
-            })
-        };
-
-        rx.recv().expect("worker must take the lock first");
-        let started = Instant::now();
-        drop(lock.lock().unwrap());
-        let waited = started.elapsed();
-        worker.join().unwrap();
-        waited
-    }
-
+    /// B21 D5: `get_integrations` held the registry mutex across
+    /// `installed_version()`, which for SpaceAcres shells out to PowerShell up
+    /// to three times at 20 s each — on a 30 s poll. `toggle_integration` needs
+    /// the same mutex, so a poll in that state blocked the click the user had
+    /// just made.
+    ///
+    /// This reads the REAL function out of this file. An earlier version of
+    /// this test built its own `Mutex` and worker thread and measured those,
+    /// which proved only that `std::sync::Mutex` releases a dropped guard —
+    /// true on every commit this repo has ever had, and therefore unable to
+    /// tell the fixed function from the broken one. Needles are assembled at
+    /// runtime so the guard cannot be satisfied by its own source text.
     #[test]
-    fn the_registry_lock_is_not_held_across_a_slow_per_integration_probe() {
-        let waited = wait_for_lock(false);
+    fn the_registry_guard_is_released_before_the_slow_per_integration_probes() {
+        let src = include_str!("integration.rs");
+
+        let fn_at = src
+            .find(&format!("pub async fn get{}", "_integrations("))
+            .expect("get_integrations must exist");
+        let fn_end = src[fn_at..]
+            .find("// Read the most recent health check")
+            .map(|e| fn_at + e)
+            .expect("the health-check read marks the end of the snapshot phase");
+        let phase = &src[fn_at..fn_end];
+
+        let lock_at = phase
+            .find(&format!("state.registry.{}()", "lock"))
+            .expect("the registry lock must be taken in get_integrations");
+        let snapshot_end = phase[lock_at..]
+            .find("\n    };")
+            .map(|e| lock_at + e)
+            .expect("the snapshot block must close before the rest of the function");
+        let snapshot = &phase[lock_at..snapshot_end];
+
+        // Self-check: if the slice ever widens to the whole function this guard
+        // would silently stop discriminating.
         assert!(
-            waited < SLOW_PROBE / 2,
-            "a second acquirer waited {waited:?}; the guard is still held across the slow work"
+            snapshot.len() < phase.len() / 2,
+            "the snapshot slice widened to {} of {} bytes — rescope this guard",
+            snapshot.len(),
+            phase.len()
+        );
+
+        let probe = format!("installed{}()", "_version");
+        assert!(
+            !snapshot.contains(&probe),
+            "the registry guard is still alive while a 20 s PowerShell probe runs:\n{snapshot}"
+        );
+        // ...and the probe must still happen, just outside the lock.
+        assert!(
+            phase.contains(&probe) || src[fn_end..].contains(&probe),
+            "installed_version() vanished from get_integrations entirely"
         );
     }
 
-    /// The pre-fix shape, as an executable characterization rather than prose:
-    /// this is what made the user's click wait behind a 30 s poll.
+    /// B13 D2 / D-11: the outer bound on an install must be the install bound.
+    /// The constant comparison alone said nothing about the call site actually
+    /// using it, so this pins the call site.
     #[test]
-    fn holding_the_lock_across_the_probe_is_what_made_the_click_wait() {
-        let waited = wait_for_lock(true);
+    fn the_install_arm_is_bounded_by_the_install_timeout_not_the_toggle_timeout() {
+        let src = include_str!("integration.rs");
+        let fn_at = src
+            .find(&format!("pub async fn toggle{}", "_integration("))
+            .expect("toggle_integration must exist");
+        let fn_end = src[fn_at..]
+            .find(&format!("pub async fn force{}", "_reinstall_integration("))
+            .map(|e| fn_at + e)
+            .unwrap_or(src.len());
+        let body = &src[fn_at..fn_end];
+
+        let install_call = format!("integration.{}()", "install");
+        let at = body
+            .find(&install_call)
+            .expect("toggle_integration must still auto-install");
+        // The timeout wrapping that call sits on the same line, before it.
+        let line_start = body[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line = &body[line_start..at];
         assert!(
-            waited >= SLOW_PROBE / 2,
-            "expected the pre-fix shape to block; waited {waited:?}"
+            line.contains("INSTALL_STEP_TIMEOUT"),
+            "the install arm is not bounded by the install timeout: {line}"
         );
     }
 }

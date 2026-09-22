@@ -168,3 +168,35 @@ async fn the_default_stop_for_disable_delegates_to_stop() {
          exactly as before"
     );
 }
+
+/// The refused-connection test above returns immediately on every platform, so
+/// it never exercises the BUDGET the call carries. This does: a listener that
+/// accepts and then says nothing at all is the case the timeout exists for.
+#[tokio::test]
+async fn graceful_shutdown_request_gives_up_on_a_port_that_never_answers() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let _accepted = listener.accept().await;
+        // Hold the connection open and answer nothing.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+
+    let started = std::time::Instant::now();
+    let accepted = request_graceful_shutdown(port, Duration::from_millis(300)).await;
+    let elapsed = started.elapsed();
+    server.abort();
+
+    assert!(
+        !accepted,
+        "a node that never answers must not be treated as having accepted the stop"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(250),
+        "the budget was not actually waited out: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "the budget did not bound the wait: {elapsed:?}"
+    );
+}

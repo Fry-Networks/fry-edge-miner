@@ -1777,38 +1777,80 @@ mod b21_update_reinstall_tests {
 /// install path is Windows-only.
 #[cfg(test)]
 mod b21_blocking_offload_tests {
-    use super::*;
+    /// B21 D2: `output_bounded` sleeps on the CALLING thread, and SpaceAcres
+    /// ran five of them before its first await — so the
+    /// `tokio::time::timeout` wrapped around `install()` had no await point to
+    /// cancel at (the bound could not fire) and the async worker was blocked
+    /// meanwhile.
+    ///
+    /// This reads the REAL `install_impl` out of this file. Earlier versions of
+    /// these tests asserted that `tokio::time::timeout` fires around
+    /// `spawn_blocking` and that `spawn_blocking` uses the blocking pool —
+    /// properties of tokio, true on every commit, and therefore unable to tell
+    /// the fixed function from the broken one. Needles are assembled at
+    /// runtime so the guard cannot match its own source.
+    #[test]
+    fn every_blocking_probe_in_the_install_path_is_offloaded() {
+        let src = include_str!("space_acres.rs");
+        let fn_at = src
+            .find(&format!("async fn install{}(", "_impl"))
+            .expect("install_impl must exist");
+        let fn_end = src[fn_at..]
+            .find("\n    /// The real start")
+            .map(|e| fn_at + e)
+            .unwrap_or_else(|| {
+                src[fn_at..]
+                    .find("\n#[async_trait]")
+                    .map(|e| fn_at + e)
+                    .unwrap_or(src.len())
+            });
+        let body = &src[fn_at..fn_end];
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_bounded_step_offloaded_via_spawn_blocking_still_trips_its_timeout() {
-        let started = std::time::Instant::now();
-        let result = tokio::time::timeout(
-            Duration::from_millis(50),
-            tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(600))),
-        )
-        .await;
-
-        assert!(result.is_err(), "the bound must fire on blocking work");
+        let bounded = format!("output{}(", "_bounded");
+        let offload = format!("spawn{}(", "_blocking");
+        let calls: Vec<usize> = body.match_indices(&bounded).map(|(i, _)| i).collect();
         assert!(
-            started.elapsed() < Duration::from_millis(400),
-            "the timeout took {:?}; blocking work run inline cannot be cancelled",
-            started.elapsed()
+            !calls.is_empty(),
+            "install_impl no longer runs any bounded command — rescope this guard"
         );
+
+        for at in calls {
+            let window_start = body[..at].rfind(&offload).unwrap_or(0);
+            let preceded = body[..at].rfind(&offload).is_some()
+                && body[window_start..at].matches("    }\n").count() < 3;
+            assert!(
+                preceded,
+                "a blocking probe in install_impl is NOT inside spawn_blocking, so the \
+                 timeout around install() cannot fire on it:\n{}",
+                &body[at.saturating_sub(200)..at]
+            );
+        }
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn offloaded_blocking_work_does_not_starve_the_async_worker() {
-        let blocking =
-            tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(400)));
-        let started = std::time::Instant::now();
+    /// The same property for the start path, which discovered the install
+    /// location with the identical blocking probe.
+    #[test]
+    fn the_start_paths_path_discovery_is_offloaded() {
+        let src = include_str!("space_acres.rs");
+        let fn_at = src
+            .find(&format!("    async fn start(&{}) -> Result<()> {{", "self"))
+            .expect("start must exist");
+        let fn_end = src[fn_at..]
+            .find("\n    async fn ")
+            .map(|e| fn_at + e)
+            .unwrap_or(src.len());
+        let body = &src[fn_at..fn_end];
 
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let async_took = started.elapsed();
-
+        let discovery = format!("Self::installed{}", "_binary");
+        let offload = format!("spawn{}(", "_blocking");
+        let at = body
+            .find(&discovery)
+            .expect("start must still discover the WiX install path");
         assert!(
-            async_took < Duration::from_millis(300),
-            "a concurrent async task waited {async_took:?} behind blocking work"
+            body[..at].contains(&offload),
+            "start() discovers the install path with a blocking probe that is not offloaded, \
+             so the timeout around start() cannot fire on it:\n{}",
+            &body[..at]
         );
-        let _ = blocking.await;
     }
 }
