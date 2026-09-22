@@ -8,15 +8,35 @@
 
 use super::*;
 
-/// The extraction deadline must be an installer deadline. Same shape as the
-/// existing VC-redist timeout guard in titan.rs.
+/// The constants' relationship is a build-time invariant next to
+/// EXTRACT_TIMEOUT itself, because a runtime assert over two compile-time
+/// constants can never fail. What is worth testing here is that the tar CALL
+/// SITE actually uses it — the original version of this test compared three
+/// constants and said nothing about that.
 #[test]
-fn the_archive_extraction_deadline_is_the_installer_deadline_not_the_probe_deadline() {
+fn the_tar_call_is_bounded_by_the_extraction_deadline() {
+    let src = include_str!("titan.rs");
+    let at = src
+        .find(&format!("command(\"{}\")", "tar"))
+        .expect("install must still extract with tar");
+    let after = &src[at..];
+    let bounded = after
+        .find(&format!("output{}(", "_bounded"))
+        .expect("the tar call must be bounded");
+    let arg_end = after[bounded..]
+        .find(')')
+        .map(|e| bounded + e)
+        .expect("the bound must have an argument");
+    let arg = &after[bounded..arg_end];
+
     assert!(
-        EXTRACT_TIMEOUT > crate::supervisor::platform::PROBE_TIMEOUT,
-        "unpacking a partner release is not a short-lived CLI probe"
+        arg.contains("EXTRACT_TIMEOUT"),
+        "the tar call is bounded by something other than the extraction deadline: {arg}"
     );
-    assert_eq!(EXTRACT_TIMEOUT, crate::supervisor::platform::LONG_TIMEOUT);
+    assert!(
+        !arg.contains("PROBE_TIMEOUT"),
+        "the tar call is still bounded by the short-lived-CLI-probe deadline: {arg}"
+    );
 }
 
 fn touch(path: &std::path::Path) {
@@ -42,10 +62,8 @@ fn a_partner_dir_with_only_the_exe_is_not_a_complete_install() {
     let dir = tempfile::tempdir().unwrap();
     touch(&dir.path().join(exe_name()));
 
-    assert!(
-        dir.path().join(exe_name()).exists(),
-        "the pre-fix guard's own predicate is TRUE here — which is why it short-circuited"
-    );
+    // The pre-fix guard checked only the exe, so this state read as "already
+    // present" and install() short-circuited forever.
     assert!(!TitanIntegration::install_is_complete(dir.path()));
 }
 
@@ -78,18 +96,38 @@ fn an_empty_partner_dir_is_not_a_complete_install() {
 }
 
 /// The cleanup at the end of install() was non-recursive, so any third file in
-/// the archive left the extracted directory behind permanently — which is the
-/// leftover directory users photographed.
-#[test]
-fn cleanup_clears_an_extracted_dir_that_still_holds_extra_files() {
+/// the archive left the extracted directory behind permanently.
+///
+/// This drives the REAL helper install() calls. An earlier version called
+/// `std::fs::remove_dir` and then `remove_dir_all` itself and asserted on the
+/// state it had just produced — which tested `std::fs`, not this crate, and
+/// passed on every commit.
+#[tokio::test]
+async fn the_cleanup_clears_a_directory_that_still_holds_extra_files() {
     let dir = tempfile::tempdir().unwrap();
     let sub = dir.path().join("titan-edge_v0.1.20_246b9dd_widnows_amd64");
+    touch(&sub.join(exe_name()));
+    touch(&sub.join("goworkerd.dll"));
+    // The file that makes a non-recursive remove fail.
     touch(&sub.join("README.md"));
 
+    clear_extracted_dir(&sub).await;
+
     assert!(
-        std::fs::remove_dir(&sub).is_err(),
-        "the pre-fix non-recursive cleanup cannot remove a directory that still holds a file"
+        !sub.exists(),
+        "the extracted directory survived the cleanup — a non-recursive remove \
+         leaves exactly the leftover users reported"
     );
-    std::fs::remove_dir_all(&sub).unwrap();
-    assert!(!sub.exists());
+}
+
+/// Clearing a directory that is already gone is the normal case on a first
+/// install and must not be reported as a problem.
+#[tokio::test]
+async fn clearing_an_absent_directory_is_not_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let absent = dir.path().join("never-extracted");
+
+    clear_extracted_dir(&absent).await;
+
+    assert!(!absent.exists());
 }

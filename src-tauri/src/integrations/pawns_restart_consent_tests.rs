@@ -173,3 +173,54 @@ fn a_missing_log_is_not_an_error() {
     assert!(last_consent_entry_across(&[absent], "dev-a").is_none());
     assert!(last_consent_entry_across(&[], "dev-a").is_none());
 }
+
+/// The two tests above re-run the consent DECISION, which is the right unit to
+/// pin but says nothing about whether the production stop path consults it.
+/// These read the real source. Needles are assembled at runtime so the guards
+/// cannot be satisfied by their own text.
+#[test]
+fn the_stop_path_consults_the_predicate_instead_of_always_withdrawing() {
+    let src = include_str!("pawns.rs");
+    let at = src
+        .find(&format!("async fn stop{}(", "_inner"))
+        .expect("stop_inner must exist");
+    let end = src[at..]
+        .find("\n    /// Append a consent")
+        .map(|e| at + e)
+        .unwrap_or(src.len());
+    let body = &src[at..end];
+
+    let predicate = format!("stop_records{}(", "_withdrawal");
+    let write = format!("record_consent{}(\"withdrawal\")", "_event");
+    let p = body
+        .find(&predicate)
+        .expect("stop_inner must consult the predicate, not hard-code a withdrawal");
+    let w = body
+        .find(&write)
+        .expect("stop_inner must still record a withdrawal on the user-disable path");
+    assert!(
+        w > p,
+        "the withdrawal is written before the predicate is consulted:\n{body}"
+    );
+}
+
+/// And the restart path must actually override the trait method with the
+/// SupervisorRestart reason — otherwise the predicate is never reached with
+/// anything but UserDisable and the fix is inert.
+#[test]
+fn the_restart_path_overrides_the_trait_method_with_the_restart_reason() {
+    let src = include_str!("pawns.rs");
+    let at = src
+        .find(&format!("async fn stop_for{}(&self)", "_restart"))
+        .expect("pawns must override the restart-scoped stop");
+    let end = src[at..]
+        .find("\n    async fn ")
+        .map(|e| at + e)
+        .unwrap_or(src.len());
+    let body = &src[at..end];
+
+    assert!(
+        body.contains("StopReason::SupervisorRestart"),
+        "the restart override does not pass the restart reason:\n{body}"
+    );
+}

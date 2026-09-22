@@ -155,6 +155,27 @@ pub(crate) async fn install_vc_redist_elevated() -> Result<VcRedistInstallOutcom
 /// repo already recorded this same anti-pattern for the VC++ redist.
 const EXTRACT_TIMEOUT: std::time::Duration = crate::supervisor::platform::LONG_TIMEOUT;
 
+// A runtime assert over two compile-time constants can never fail, so this is a
+// build-time invariant instead: unpacking a partner release must never be
+// bounded by the short-lived-CLI-probe deadline again.
+const _: () = assert!(
+    EXTRACT_TIMEOUT.as_secs() > crate::supervisor::platform::PROBE_TIMEOUT.as_secs(),
+    "the extraction deadline must outlast the generic probe deadline"
+);
+
+/// Remove an extracted release directory and everything inside it.
+///
+/// Recursive on purpose: `remove_dir` fails the moment the archive carries any
+/// third file, and the leftover `titan-edge_v0.1.20_…` directory is exactly
+/// what users photographed. A directory that is already gone is not an error.
+async fn clear_extracted_dir(dir: &std::path::Path) {
+    match tokio::fs::remove_dir_all(dir).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!(error = %e, path = ?dir, "Could not clear the extracted Titan directory"),
+    }
+}
+
 const DOWNLOAD_URL: &str = "https://github.com/Titannet-dao/titan-node/releases/download/v0.1.20/titan-edge_v0.1.20_246b9dd_widnows_amd64.tar.gz";
 const EXPECTED_SHA256: &str = "6f37eea5cfcd6f799cd629d6e02a5636fb5c92995f73f0791ec0ff473afb558c";
 const USER_AGENT: &str = concat!("FryEdgeMiner/", env!("CARGO_PKG_VERSION"));
@@ -428,7 +449,7 @@ impl Integration for TitanIntegration {
         // Clear the residue a previously-killed extraction left behind, so a
         // retry starts from a known state instead of unpacking over it.
         let _ = tokio::fs::remove_file(&archive_path).await;
-        let _ = tokio::fs::remove_dir_all(&extracted_dir).await;
+        clear_extracted_dir(&extracted_dir).await;
 
         // Download the archive
         download_file_with_options(DOWNLOAD_URL, &archive_path, USER_AGENT, None).await?;
@@ -479,11 +500,7 @@ impl Integration for TitanIntegration {
                 info!(path = ?Self::dll_path(), "Moved goworkerd.dll to partner dir");
             }
 
-            // Clean up the extracted subdirectory. Recursive: the
-            // non-recursive form fails the moment the archive carries any
-            // third file, and the leftover directory is what users
-            // photographed.
-            let _ = tokio::fs::remove_dir_all(&extracted_dir).await;
+            clear_extracted_dir(&extracted_dir).await;
         }
 
         // Clean up archive

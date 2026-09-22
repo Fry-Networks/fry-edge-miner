@@ -1557,6 +1557,26 @@ mod b11_identity_dir_tests {
         );
     }
 
+    /// The anchoring the previous test names actually lives at the CALL SITE:
+    /// `node_identity_dir` is a pure join, so it cannot itself distinguish the
+    /// default root from the configured one. This reads the call site.
+    #[test]
+    fn the_identity_dir_call_site_uses_the_default_root_not_the_configured_one() {
+        let src = include_str!("fryvpn.rs");
+        let call = format!("node_identity{}(&", "_dir");
+        let at = src
+            .find(&call)
+            .expect("start must pass an anchored identity dir to frynode");
+        let line_start = src[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_end = src[at..].find('\n').map(|e| at + e).unwrap_or(src.len());
+        let line = &src[line_start..line_end];
+
+        assert!(
+            line.contains(&format!("default_partners{}()", "_base_dir")),
+            "the identity dir is resolved from a root the storage preference can move: {line}"
+        );
+    }
+
     #[test]
     fn adopt_copies_the_identity_and_never_removes_the_source() {
         let old_root = tempfile::tempdir().unwrap();

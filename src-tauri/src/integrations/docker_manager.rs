@@ -1011,6 +1011,40 @@ mod b19_probe_cache_ttl_tests {
         assert!(!cache_is_fresh(None, Instant::now(), VIRT_CACHE_TTL));
     }
 
+    /// The range check below only pins the constant. This pins that
+    /// `virtualization_supported` actually CONSULTS the TTL cache and no longer
+    /// caches for the whole process lifetime.
+    #[test]
+    fn the_virtualization_probe_consults_the_ttl_cache_not_a_process_lifetime_oncelock() {
+        let src = include_str!("docker_manager.rs");
+        let at = src
+            .find(&format!("pub fn virtualization{}()", "_supported"))
+            .expect("virtualization_supported must exist");
+        let end = src[at..]
+            .find(&format!("\nfn probe_virtualization{}()", "_supported"))
+            .map(|e| at + e)
+            .expect("the probe body must follow the cached accessor");
+        let body = &src[at..end];
+
+        // Comments are stripped before the OnceLock check: the doc comment in
+        // this region deliberately NAMES the OnceLock it replaced, and a guard
+        // that trips over its own explanation is worse than no guard.
+        let code: String = body
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            code.contains(&format!("cache_is{}(", "_fresh")),
+            "the probe does not consult the TTL cache:\n{code}"
+        );
+        assert!(
+            !code.contains("OnceLock"),
+            "the probe still caches its reading for the whole process lifetime:\n{code}"
+        );
+    }
+
     /// A reading taken before WSL2 had finished coming up must not outlive the
     /// condition it measured.
     #[test]
