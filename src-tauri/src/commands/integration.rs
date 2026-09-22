@@ -68,6 +68,12 @@ pub async fn get_integrations(
         .last_integration_error
         .read()
         .map_err(|e| e.to_string())?;
+    // B3 defect 4: an elevation FEM suppressed, or one the user declined, has
+    // no other way to reach the card — every elevation site is `warn!`-only and
+    // none of them writes `last_integration_error`. Merged here (a snapshot, so
+    // no lock is held across the map) and only where there is no more specific
+    // error already, so a real start failure is never masked by it.
+    let elevation_blocks = crate::elevation_gate::blocked_reasons();
 
     let statuses = entries
         .into_iter()
@@ -108,7 +114,10 @@ pub async fn get_integrations(
                     },
                     tier: crate::integrations::tier_for(&id),
                     requires_docker,
-                    error: last_errors.get(&id).and_then(|e| e.clone()),
+                    error: last_errors
+                        .get(&id)
+                        .and_then(|e| e.clone())
+                        .or_else(|| elevation_blocks.get(&id).cloned()),
                     unavailable_reason,
                 }
             },

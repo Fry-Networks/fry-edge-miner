@@ -5,6 +5,7 @@ mod api;
 mod commands;
 mod config;
 mod docker_watcher;
+mod elevation_gate;
 mod events;
 mod integrations;
 mod logging;
