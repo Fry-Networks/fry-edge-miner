@@ -185,6 +185,16 @@ export function awaitsUserSetup(health: HealthStatus): boolean {
   return reasonAwaitsUserSetup(unhealthyReason(health))
 }
 
+// B16 D4: an upstream (Titan scheduler) network condition, not a device
+// fault — FEM cannot fix it by restarting anything, and the process itself
+// stays alive and correctly classified elsewhere (see
+// src-tauri/src/integrations/mod.rs's upstream_unreachable, T3-owned).
+// Mirrors awaitsUserSetup's own prefix-match pattern, keyed off the
+// existing titan.rs:270 message.
+export function upstreamUnreachable(health: HealthStatus): boolean {
+  return !!unhealthyReason(health)?.startsWith('Titan Network: cannot reach the Titan scheduler')
+}
+
 // The Sentinel node's own `sent1...` funding address, extracted from the
 // "account not funded" health reason. The backend surfaces it (sentinel.rs
 // node_address() guarantees the sent1 prefix) but only inside the Unhealthy

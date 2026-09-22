@@ -252,10 +252,12 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                 <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 2 }} /> {startError}
               </span>
             )}
-            {/* B17 D5: also open for Setup required (not just st === 'err') —
-                once D1/D2 move a waiting-on-the-user partner like Sentinel
-                out of 'err', this gate must keep its funding block mounted. */}
-            {reason && (st === 'err' || stLbl === 'Setup required') && !startError && (
+            {/* B17 D5 + B16 D4: also open for Setup required and Upstream
+                unreachable (not just st === 'err') — once a state moves a
+                partner out of 'err' (Sentinel/Iagon/Storj waiting on the
+                user, or Titan's scheduler being unreachable), this gate must
+                keep the explanation (and Sentinel's funding block) mounted. */}
+            {reason && (st === 'err' || stLbl === 'Setup required' || stLbl === 'Upstream unreachable') && !startError && (
               fundingAddr ? (
                 <div
                   data-testid={`sentinel-fund-${id}`}

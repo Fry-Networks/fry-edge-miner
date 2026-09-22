@@ -1,5 +1,5 @@
 import type { HealthStatus, LifecycleState } from './types'
-import { awaitsUserSetup } from './types'
+import { awaitsUserSetup, upstreamUnreachable } from './types'
 
 export interface IntegrationBadgeInput {
   enabled: boolean
@@ -19,6 +19,7 @@ export type IntegrationBadgeKind =
   | 'running'
   | 'starting'
   | 'setupRequired'
+  | 'upstreamUnreachable'
   | 'unhealthy'
 
 export interface IntegrationBadge {
@@ -85,6 +86,13 @@ export function integrationBadge(i: IntegrationBadgeInput): IntegrationBadge {
     // can complete (Storj node token + identity). Amber, and say what it is.
     kind = 'setupRequired'
     label = 'Setup required'
+    dot = 'info'
+  } else if (upstreamUnreachable(i.health)) {
+    // B16 D4: an upstream network condition (e.g. the Titan scheduler is
+    // unreachable), not a device fault — restarting the partner process
+    // accomplishes nothing. Amber, not red.
+    kind = 'upstreamUnreachable'
+    label = 'Upstream unreachable'
     dot = 'info'
   } else {
     kind = 'unhealthy'
