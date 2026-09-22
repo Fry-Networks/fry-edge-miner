@@ -318,10 +318,20 @@ pub(crate) const ALGORAND_MIN_FEE_MICROALGOS: u64 = 1_000;
 /// the network minimum.
 pub(crate) const REGISTRATION_GROUP_TXNS: u64 = 2;
 
+/// What a node must keep back to DEREGISTER later: one flat fee plus the
+/// surcharge covering the contract's inner MBR-refund transaction.
+///
+/// Load-bearing, not theoretical. Measured on LocalNet against the real
+/// NodeRegistry: a wallet funded with exactly the register group's cost
+/// registers successfully and lands on exactly its own minimum with ZERO
+/// spendable — and can then never pay to leave, stranding its record and the
+/// 200_000 µALGO box MBR behind it permanently.
+pub(crate) const DEREGISTRATION_COST_MICROALGOS: u64 = 2 * ALGORAND_MIN_FEE_MICROALGOS;
+
 /// Documented headroom over the measured cost, so a min-fee change or a
 /// slightly larger box does not strand a wallet that funded exactly what the
-/// card asked for.
-pub(crate) const REGISTRATION_MARGIN_MICROALGOS: u64 = 10_000;
+/// card asked for. Sits ON TOP of the deregistration reserve.
+pub(crate) const REGISTRATION_MARGIN_MICROALGOS: u64 = 8_000;
 
 /// Minimum SPENDABLE balance (microAlgos) fryDVPN needs to register on-chain.
 ///
@@ -333,6 +343,7 @@ pub(crate) const REGISTRATION_MARGIN_MICROALGOS: u64 = 10_000;
 /// this number.
 pub(crate) const REGISTRATION_MIN_MICROALGOS: u64 = REGISTRY_BOX_MBR_MICROALGOS
     + REGISTRATION_GROUP_TXNS * ALGORAND_MIN_FEE_MICROALGOS
+    + DEREGISTRATION_COST_MICROALGOS
     + REGISTRATION_MARGIN_MICROALGOS;
 
 /// PURE: what an account can actually spend — algod reports the TOTAL `amount`
@@ -1309,6 +1320,21 @@ mod b7_registration_cost_tests {
             REGISTRATION_MIN_MICROALGOS >= 202_000,
             "the pre-check must cover the box MBR AND both fees, not just the fees: \
              {REGISTRATION_MIN_MICROALGOS}"
+        );
+    }
+
+    /// Measured on LocalNet: a wallet funded with exactly the register group's
+    /// cost registers and is then stranded, because the deregister it will
+    /// eventually need costs 2_000 it no longer has. The requirement has to
+    /// let a node leave as well as arrive.
+    #[test]
+    fn the_requirement_also_covers_getting_back_out() {
+        let register_only =
+            REGISTRY_BOX_MBR_MICROALGOS + REGISTRATION_GROUP_TXNS * ALGORAND_MIN_FEE_MICROALGOS;
+        assert!(
+            REGISTRATION_MIN_MICROALGOS - register_only >= DEREGISTRATION_COST_MICROALGOS,
+            "nothing is left to deregister with: {REGISTRATION_MIN_MICROALGOS} - \
+             {register_only} < {DEREGISTRATION_COST_MICROALGOS}"
         );
     }
 
