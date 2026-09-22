@@ -21,6 +21,64 @@ function deriveLifecycle(enabled: boolean, health: HealthStatus): LifecycleState
   return 'Starting'
 }
 
+// B14 D2 / B17 D-12: browser-preview-only test hook, mirrors the existing
+// `?docker=<kind>` (fetchSystem, below) and useDevice's `?wizard=1`. Lets a
+// Playwright spec drive an individual mock integration into any badge state
+// without a live backend, e.g. `?intg=titan:running&intg=storj:setupRequired`.
+export type IntgHintState =
+  | 'running'
+  | 'starting'
+  | 'disabled'
+  | 'notInstalled'
+  | 'unavailable'
+  | 'installing'
+  | 'setupRequired'
+  | 'unhealthy'
+
+export function intgHintOverrides(state: string): Partial<IntegrationStatus> {
+  switch (state as IntgHintState) {
+    case 'running':
+      return { enabled: true, health: 'Healthy', lifecycle: 'Running', version: '1.0.0' }
+    case 'starting':
+      return { enabled: true, health: 'Starting', lifecycle: 'Starting', version: '1.0.0' }
+    case 'disabled':
+      return { enabled: false, health: 'Stopped', lifecycle: 'Disabled', version: '1.0.0' }
+    case 'notInstalled':
+      return { enabled: false, health: 'Stopped', lifecycle: 'Disabled', version: null }
+    case 'unavailable':
+      return {
+        enabled: false,
+        health: 'Stopped',
+        lifecycle: 'Disabled',
+        version: null,
+        unavailable_reason: 'this device does not meet requirements'
+      }
+    case 'installing':
+      return { enabled: true, health: 'Stopped', lifecycle: 'Installing', version: null }
+    case 'setupRequired':
+      return {
+        enabled: true,
+        health: { Unhealthy: 'Awaiting Storj setup — create a node auth token' },
+        lifecycle: 'Unhealthy',
+        version: '1.0.0'
+      }
+    case 'unhealthy':
+      return { enabled: true, health: { Unhealthy: 'container exited: panic' }, lifecycle: 'Unhealthy', version: '1.0.0' }
+    default:
+      return {}
+  }
+}
+
+// B14 D3: runToggle/forceReinstall set a specific error, then their own
+// `finally` resyncs with the backend by calling fetch(). fetch()'s success
+// path unconditionally cleared the error, erasing it within one IPC
+// round-trip — the toggle appeared to silently revert with no explanation.
+// preserveError lets a caller resync state without wiping the error it just
+// set; an ordinary poll (no caller opts in) still clears a stale error.
+export function shouldClearError(fetchOk: boolean, preserveError: boolean): boolean {
+  return fetchOk && !preserveError
+}
+
 export interface FrontendIntegration extends IntegrationMeta {
   enabled: boolean
   health: HealthStatus
@@ -89,9 +147,15 @@ export function useIntegrations() {
   // can't hide another's still-running Docker install.
   const inflightToggles = useRef(0)
 
-  const fetch = useCallback(async () => {
+  const fetch = useCallback(async (opts?: { preserveError?: boolean }) => {
     if (!isTauri()) {
       // Browser preview mode — show all integrations with mock data
+      const intgHints = new Map(
+        new URLSearchParams(window.location.search).getAll('intg').map((pair) => {
+          const [id, state] = pair.split(':')
+          return [id, state] as const
+        })
+      )
       const mock: IntegrationStatus[] = INTEGRATION_META.map((m) => ({
         id: m.id,
         display_name: m.name,
@@ -101,6 +165,7 @@ export function useIntegrations() {
         version: '0.0.0-preview',
         poc_contribution: 1 / INTEGRATION_META.length,
         requires_docker: true,
+        ...(intgHints.has(m.id) ? intgHintOverrides(intgHints.get(m.id)!) : {})
       }))
       setIntegrations(toFrontend(mock))
       setLoading(false)
@@ -115,7 +180,7 @@ export function useIntegrations() {
       try {
         const data = await invoke<IntegrationStatus[]>('get_integrations')
         setIntegrations(toFrontend(data))
-        setError(null)
+        if (shouldClearError(true, !!opts?.preserveError)) setError(null)
         lastErr = null
         try {
           localStorage.setItem('fem.integrations.lastGood', JSON.stringify(data))
@@ -293,8 +358,10 @@ export function useIntegrations() {
           setDockerProgress(null)
         }
         // Resync with backend truth (success AND failure) so the toggle can
-        // never display a state the backend doesn't hold.
-        await fetch()
+        // never display a state the backend doesn't hold — but keep the
+        // error just set above alive instead of letting this call's own
+        // success path erase it (B14 D3).
+        await fetch({ preserveError: true })
         fetchSystem()
       }
       return ok
@@ -394,7 +461,8 @@ export function useIntegrations() {
         if (inflightToggles.current === 0) {
           setDockerProgress(null)
         }
-        await fetch()
+        // Same as runToggle: preserve the error this call just set (B14 D3).
+        await fetch({ preserveError: true })
         fetchSystem()
       }
     },
