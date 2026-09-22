@@ -111,9 +111,9 @@ async fn graceful_shutdown_request_reports_success_on_204() {
         let (mut sock, _) = listener.accept().await.unwrap();
         let mut buf = [0u8; 1024];
         let _ = sock.read(&mut buf).await;
-        let _ = sock
-            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
-            .await;
+        // No Content-Length: a 204 carries no body by definition, and some
+        // HTTP parsers reject the header on that status.
+        let _ = sock.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await;
         let _ = sock.flush().await;
     });
 
