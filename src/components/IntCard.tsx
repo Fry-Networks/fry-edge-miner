@@ -53,7 +53,9 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
   const isSdk = tier === 'sdk'
   // F17: reward role (required vs boost) is independent of partner provenance.
   const isRequired = isRequiredIntegration(id)
-  const consent = consentBadge(consentActive)
+  // B18 D3: pass the card's own health reason so a stale consentActive flag
+  // can never contradict what the health line already says.
+  const consent = consentBadge(consentActive, reason)
 
   // F4: disabling an official partner costs reward proportion, so the first
   // click arms a caution row and the second commits. The row disarms itself so

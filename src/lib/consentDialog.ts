@@ -74,8 +74,23 @@ export function nextActionAfterConfirm(status: ConsentStatus | null, checked: bo
   return { kind: 'grant-then-toggle', wordingVersion: status.wording_version }
 }
 
-/** The consent line on the Pawns card; null while the state is still unknown. */
-export function consentBadge(active: boolean | null): { label: string; variant: 'run' | 'warn' } | null {
+/**
+ * The consent line on the Pawns card; null while the state is still unknown.
+ *
+ * B18 D3: `active` is only refreshed on mount and by user-driven actions, so
+ * it can go stale after the backend loses consent between refreshes (a
+ * supervisor restart, B18 D1/D2). `healthReason` — the same Unhealthy reason
+ * the card already renders — is checked first so the badge cannot show
+ * "Consent active" beside a card that says "needs your consent". Optional,
+ * so every existing 1-arg call keeps its exact behaviour.
+ */
+export function consentBadge(
+  active: boolean | null,
+  healthReason?: string | null
+): { label: string; variant: 'run' | 'warn' } | null {
+  if (healthReason && healthReason.includes('needs your consent')) {
+    return { label: 'Consent required', variant: 'warn' }
+  }
   if (active === null) return null
   return active
     ? { label: 'Consent active', variant: 'run' }

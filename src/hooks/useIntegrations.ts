@@ -35,6 +35,7 @@ export type IntgHintState =
   | 'setupRequired'
   | 'setupRequiredFunding'
   | 'unhealthy'
+  | 'needsConsent'
 
 export function intgHintOverrides(state: string): Partial<IntegrationStatus> {
   switch (state as IntgHintState) {
@@ -74,6 +75,17 @@ export function intgHintOverrides(state: string): Partial<IntegrationStatus> {
       }
     case 'unhealthy':
       return { enabled: true, health: { Unhealthy: 'container exited: panic' }, lifecycle: 'Unhealthy', version: '1.0.0' }
+    case 'needsConsent':
+      // B18 D3: the verbatim Pawns "needs your consent" health reason —
+      // exercises consentBadge's health-reason override independent of the
+      // separate (backend-driven, not reachable in browser preview)
+      // consentActive flag.
+      return {
+        enabled: true,
+        health: { Unhealthy: 'Pawns.app needs your consent before it can share bandwidth — open it to review and enable.' },
+        lifecycle: 'Unhealthy',
+        version: '1.0.0'
+      }
     default:
       return {}
   }
@@ -242,15 +254,38 @@ export function useIntegrations() {
     fetchSystem()
   }, [fetch, fetchSystem])
 
+  // Consent state for an integration that tracks one. Never throws: a status
+  // we cannot read is reported as unknown so the caller can decide.
+  // (Moved above the poll effect below, which — B18 D3 — now also calls
+  // this on every tick, not just on mount.)
+  const refreshConsent = useCallback(async (id: string): Promise<ConsentStatus | null> => {
+    if (!isTauri()) return null
+    try {
+      const status = await invoke<ConsentStatus>('check_consent', { integrationId: id })
+      setConsentActive((prev) => ({ ...prev, [id]: status.active }))
+      return status
+    } catch (e) {
+      console.warn(`check_consent(${id}) failed:`, e)
+      return null
+    }
+  }, [])
+
   // Poll as a fallback so the UI can never go permanently stale if the
   // health-event stream dies (and to pick up Docker state changes).
+  // B18 D3: also re-check consent here — it was previously fetched only on
+  // mount, so a consent loss between polls (e.g. a supervisor restart
+  // wrongly recording a withdrawal, B18 D1/D2) left the badge stuck on
+  // "Consent active" until the user next navigated away and back.
   useEffect(() => {
     const timer = setInterval(() => {
       fetch()
       fetchSystem()
+      INTEGRATION_META.filter((m) => requiresConsent(m.id)).forEach((m) => {
+        refreshConsent(m.id)
+      })
     }, 30_000)
     return () => clearInterval(timer)
-  }, [fetch, fetchSystem])
+  }, [fetch, fetchSystem, refreshConsent])
 
   // Listen to real-time health events emitted by the backend health loop.
   useEffect(() => {
@@ -298,20 +333,6 @@ export function useIntegrations() {
     setup()
     return () => {
       unlisten?.()
-    }
-  }, [])
-
-  // Consent state for an integration that tracks one. Never throws: a status
-  // we cannot read is reported as unknown so the caller can decide.
-  const refreshConsent = useCallback(async (id: string): Promise<ConsentStatus | null> => {
-    if (!isTauri()) return null
-    try {
-      const status = await invoke<ConsentStatus>('check_consent', { integrationId: id })
-      setConsentActive((prev) => ({ ...prev, [id]: status.active }))
-      return status
-    } catch (e) {
-      console.warn(`check_consent(${id}) failed:`, e)
-      return null
     }
   }, [])
 
