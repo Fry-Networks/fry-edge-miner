@@ -11,7 +11,8 @@ export const AWAITING_MARKERS = [
   'node token not provisioned',
   'node account not funded',
   'Awaiting fryDVPN funding',
-  'Awaiting administrator action'
+  'Awaiting administrator action',
+  'waiting for that program to release it'
 ] as const
 
 export function reasonAwaitsUserSetup(reason: string | null): boolean {

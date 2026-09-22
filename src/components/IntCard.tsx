@@ -8,7 +8,7 @@ import { integrationBadge } from '../lib/integrationBadge'
 import { isRequiredIntegration, SETUP_GUIDANCE } from '../lib/integrationMeta'
 import { OFFICIAL_DISABLED_WARNING, REQUIRED_DISABLED_WARNING, SDK_REPORT_LINE } from '../lib/support'
 import { safeInvoke } from '../lib/tauri'
-import { unhealthyReason, sentinelFundingAddress } from '../lib/types'
+import { awaitsUserSetup, unhealthyReason, sentinelFundingAddress } from '../lib/types'
 import CopyField from './primitives/CopyField'
 import Tag from './primitives/Tag'
 import TierBadge from './primitives/TierBadge'
@@ -111,7 +111,11 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
   // thing we can tell the user, and without it the toggle just springs back
   // to off with no explanation at all.
   // Condensed for the one-line card slot; the full text stays in the tooltip.
-  const startError = !unavailable && lastError ? condenseError(lastError) : null
+  // Cross-team fix (T3, via lead — B7 D4/B8 D3-D4): a STALE error from an
+  // earlier failed toggle attempt must not outrank a LIVE awaitsUserSetup
+  // reason — otherwise the funding/setup guidance (and its body text below)
+  // never renders once any past attempt failed, even after health moves on.
+  const startError = !unavailable && !awaitsUserSetup(health) && lastError ? condenseError(lastError) : null
 
   // B14 D2: single shared source for the status ladder — see
   // ../lib/integrationBadge.ts. The Dashboard tile consumes the same
@@ -258,8 +262,14 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                 unreachable (not just st === 'err') — once a state moves a
                 partner out of 'err' (Sentinel/Iagon/Storj waiting on the
                 user, or Titan's scheduler being unreachable), this gate must
-                keep the explanation (and Sentinel's funding block) mounted. */}
-            {reason && (st === 'err' || stLbl === 'Setup required' || stLbl === 'Upstream unreachable') && !startError && (
+                keep the explanation (and Sentinel's funding block) mounted.
+                The trailing `|| awaitsUserSetup(health)` (cross-team fix for
+                B7 D4/B8 D3-D4) additionally closes a ladder-precedence edge
+                case: stLbl only reads 'Setup required' when no earlier arm
+                in integrationBadge.ts's ladder fired first, but a live
+                awaiting-user-setup reason should still explain itself even
+                then. */}
+            {reason && (st === 'err' || stLbl === 'Setup required' || stLbl === 'Upstream unreachable' || awaitsUserSetup(health)) && !startError && (
               fundingAddr ? (
                 <div
                   data-testid={`sentinel-fund-${id}`}
