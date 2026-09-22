@@ -1189,3 +1189,104 @@ mod c3_reconciler_wiring_tests {
         );
     }
 }
+
+/// B1: the CRT linkage of the shipped Windows binary, and the gate that proves
+/// it, are both load-bearing and both invisible from the Rust source — so they
+/// are asserted here rather than left to a reviewer to notice.
+///
+/// v0.4.28 and v0.4.29 imported no CRT DLL. From v0.4.30 the release binary
+/// imported VCRUNTIME140.dll and VCRUNTIME140_1.dll, and every user without the
+/// VC++ redistributable got "VCRUNTIME140_1.dll was not found" and could not
+/// start the app. The linkage was never stated anywhere, so it drifted in
+/// silence across a release boundary with the same rustc, the same Cargo.lock
+/// and the same [profile.release]. Deleting either the pin or the gate would
+/// re-open exactly that door.
+#[cfg(test)]
+mod b1_crt_linkage_tests {
+    const CARGO_CONFIG: &str = include_str!("../.cargo/config.toml");
+    const BUILD_WORKFLOW: &str = include_str!("../../.github/workflows/build.yml");
+
+    /// Strip line comments so the prose explaining the pin can never be what
+    /// satisfies the assertion — the same guard the other source-scan tests use.
+    fn code_only(src: &str) -> String {
+        src.lines()
+            .map(|l| l.split('#').next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_windows_target_pins_a_static_crt() {
+        let code = code_only(CARGO_CONFIG);
+        let target = code
+            .find("[target.x86_64-pc-windows-msvc]")
+            .expect("src-tauri/.cargo/config.toml must carry a table for the shipped target");
+        let pin = code
+            .find("target-feature=+crt-static")
+            .expect("the shipped Windows target must link the CRT statically");
+        assert!(
+            target < pin,
+            "the +crt-static flag must sit under the x86_64-pc-windows-msvc table, \
+             not under some other target"
+        );
+    }
+
+    #[test]
+    fn the_release_workflow_runs_the_crt_import_gate_before_it_uploads_anything() {
+        let gate = BUILD_WORKFLOW
+            .find("check_crt_imports.py")
+            .expect("build.yml must run the CRT-import gate");
+        let first_upload = BUILD_WORKFLOW
+            .find("upload-artifact")
+            .expect("build.yml must still upload the installer");
+        assert!(
+            gate < first_upload,
+            "the CRT-import gate must run BEFORE the first upload, or a binary that \
+             reproduces the bug is published anyway"
+        );
+    }
+
+    /// The gate is only worth anything if it covers the binary that actually
+    /// failed on users' machines, not just the installer wrapper around it.
+    #[test]
+    fn the_gate_covers_the_app_binary_the_bundle_and_the_bundled_resources() {
+        let step = {
+            let at = BUILD_WORKFLOW
+                .find("check_crt_imports.py")
+                .expect("build.yml must run the CRT-import gate");
+            &BUILD_WORKFLOW[at..]
+        };
+        for target in [
+            "target/release/fry-edge-miner.exe",
+            "target/release/bundle",
+            "src-tauri/resources",
+        ] {
+            assert!(
+                step.contains(target),
+                "the CRT-import gate must scan {target}"
+            );
+        }
+    }
+
+    /// The root cause itself: from v0.4.30 the test pass shared the release
+    /// target directory, and the release link stopped being decided by the
+    /// release build alone.
+    #[test]
+    fn the_test_pass_does_not_share_the_release_target_directory() {
+        let at = BUILD_WORKFLOW
+            .find("cargo test --release")
+            .expect("build.yml must still run the Rust tests");
+        let before = &BUILD_WORKFLOW[..at];
+        let export = before
+            .rfind("CARGO_TARGET_DIR")
+            .expect("the gates must run in their own target directory");
+        let cd = before
+            .rfind("cd src-tauri")
+            .expect("the gates still run from src-tauri");
+        assert!(
+            cd < export,
+            "CARGO_TARGET_DIR must be set after the step enters src-tauri, so the \
+             path it names is the one cargo actually uses"
+        );
+    }
+}
