@@ -10,6 +10,7 @@ import { useRewards } from '../hooks/useRewards'
 import { useReporting } from '../hooks/useReporting'
 import { condenseError } from '../lib/error'
 import { activeFraction } from '../lib/integrationCount'
+import { integrationBadge } from '../lib/integrationBadge'
 import { REQUIRED_INTEGRATIONS, type IntegrationTier } from '../lib/integrationMeta'
 import {
   SECOND_REQUIRED_BOOST,
@@ -21,6 +22,7 @@ import {
 import { SDK_REPORT_LINE } from '../lib/support'
 import { sdkActiveLine, sdkCounts, splitByRewardRole, splitByTier, tierCounts } from '../lib/tierSplit'
 import { deriveRewardDisplay } from '../lib/rewardReadiness'
+import type { HealthStatus, LifecycleState } from '../lib/types'
 
 interface DashboardIntegration {
   id: string
@@ -29,6 +31,9 @@ interface DashboardIntegration {
   col: string
   enabled: boolean
   healthy: boolean
+  health: HealthStatus
+  lifecycle: LifecycleState
+  version: string | null
   tier: IntegrationTier
   unavailable_reason?: string | null
 }
@@ -43,8 +48,14 @@ interface DashboardProps {
  * accent colour, so the official partners stay the thing you read first.
  */
 function MiniCard({ intg, compact }: { intg: DashboardIntegration; compact: boolean }) {
-  const { name, Icon, col, enabled, healthy } = intg
-  const st = !enabled ? 'stopped' : healthy ? 'run' : 'err'
+  const { id, name, Icon, col, enabled } = intg
+  // B14 D2: same shared ladder the Integrations card uses — see
+  // ../lib/integrationBadge.ts — so the two pages can never disagree.
+  const badge = integrationBadge(intg)
+  // Dot only knows 4 statuses (no 'info'); the badge's 'info' states
+  // (Installing/Starting/Setup required) read as attention-amber here, same
+  // as the sidebar's convention for "needs a look, not a failure".
+  const dotStatus = badge.dot === 'info' ? 'warn' : badge.dot
   const box = compact ? 24 : 30
   return (
     <div
@@ -88,11 +99,11 @@ function MiniCard({ intg, compact }: { intg: DashboardIntegration; compact: bool
         >
           {name}
         </div>
-        <div style={{ fontFamily: 'var(--fb)', fontSize: compact ? 10 : 11, color: 'var(--t2)' }}>
-          {!enabled ? 'Disabled' : healthy ? 'Running' : 'Unhealthy'}
+        <div data-testid={`tile-status-${id}`} style={{ fontFamily: 'var(--fb)', fontSize: compact ? 10 : 11, color: 'var(--t2)' }}>
+          {badge.label}
         </div>
       </div>
-      <Dot status={st} />
+      <Dot status={dotStatus} />
     </div>
   )
 }

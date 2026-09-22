@@ -4,9 +4,10 @@ import type { FrontendIntegration } from '../hooks/useIntegrations'
 import { consentBadge } from '../lib/consentDialog'
 import { DISABLE_CONFIRM_MS, shouldConfirmDisable } from '../lib/disableConfirm'
 import { condenseError } from '../lib/error'
+import { integrationBadge } from '../lib/integrationBadge'
 import { isRequiredIntegration } from '../lib/integrationMeta'
 import { OFFICIAL_DISABLED_WARNING, REQUIRED_DISABLED_WARNING, SDK_REPORT_LINE } from '../lib/support'
-import { awaitsUserSetup, unhealthyReason, sentinelFundingAddress } from '../lib/types'
+import { unhealthyReason, sentinelFundingAddress } from '../lib/types'
 import CopyField from './primitives/CopyField'
 import Tag from './primitives/Tag'
 import TierBadge from './primitives/TierBadge'
@@ -83,62 +84,22 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
   // Condensed for the one-line card slot; the full text stays in the tooltip.
   const startError = !unavailable && lastError ? condenseError(lastError) : null
 
-  let st: 'run' | 'err' | 'stopped' | 'info' = 'stopped'
-  let stLbl = 'Not installed'
-  let stNode: ReactNode = stLbl
-
-  if (lifecycle === 'Installing') {
-    st = 'info'
-    stLbl = 'Installing'
-    stNode = (
+  // B14 D2: single shared source for the status ladder — see
+  // ../lib/integrationBadge.ts. The Dashboard tile consumes the same
+  // function so the two pages can never disagree.
+  const badge = integrationBadge({ ...intg, dockerBlocked })
+  const st = badge.dot
+  const stLbl = badge.label
+  const stNode: ReactNode =
+    badge.kind === 'installing' ? (
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
         <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
         {stLbl}
       </span>
+    ) : (
+      stLbl
     )
-  } else if (unavailable) {
-    st = 'stopped'
-    stLbl = 'Unavailable'
-  } else if (!inst && dockerBlocked) {
-    st = 'stopped'
-    stLbl = 'Unavailable'
-  } else if (!inst) {
-    st = 'stopped'
-    stLbl = 'Not installed'
-  } else if (!enabled) {
-    st = 'stopped'
-    stLbl = 'Disabled'
-  } else if (healthy) {
-    st = 'run'
-    stLbl = 'Running'
-  } else if (health === 'Stopped' || health === 'Starting' || health === 'Unknown') {
-    // Enabled but not running yet — the backend health loop auto-restarts;
-    // don't scare the user with a red badge for a transient state.
-    st = 'info'
-    stLbl = 'Starting'
-  } else if (awaitsUserSetup(health)) {
-    // Not a failure — the partner is waiting on a setup step only the user
-    // can complete (Storj node token + identity). Amber, and say what it is.
-    st = 'info'
-    stLbl = 'Setup required'
-  } else {
-    st = 'err'
-    stLbl = 'Unhealthy'
-  }
-  if (lifecycle !== 'Installing') stNode = stLbl
-
-  const tv =
-    lifecycle === 'Installing'
-      ? 'info'
-      : !inst
-        ? 'warn'
-        : st === 'run'
-          ? 'run'
-          : st === 'err'
-            ? 'err'
-            : st === 'info'
-              ? 'info'
-              : 'def'
+  const tv = badge.tag
   const pct = enabled && healthy ? Math.round(intg.poc_contribution * 100) : 0
 
   return (
@@ -202,7 +163,7 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                 isRequired ? 'required' : intg.tier === 'official' ? 'optionalPartner' : 'optionalCommunity'
               }
             />
-            <span title={reason ?? undefined} style={reason ? { cursor: 'help' } : undefined}>
+            <span data-testid={`status-${id}`} title={reason ?? undefined} style={reason ? { cursor: 'help' } : undefined}>
               <Tag v={tv}>{stNode}</Tag>
             </span>
           </div>
@@ -362,7 +323,7 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                 <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 2 }} /> {unavailableReason}
               </span>
             )}
-            {!unavailable && !startError && !inst && !dockerNote && lifecycle !== 'Installing' && (
+            {!unavailable && !startError && !inst && !dockerNote && lifecycle !== 'Installing' && !(enabled && healthy) && (
               <span
                 style={{
                   fontFamily: 'var(--fb)',
