@@ -227,6 +227,16 @@ pub trait Integration: Send + Sync {
     async fn install(&self) -> Result<()>;
     async fn start(&self) -> Result<()>;
     async fn stop(&self) -> Result<()>;
+    /// Stop this integration because the SUPERVISOR is recycling it, as
+    /// distinct from the user turning it off.
+    ///
+    /// The owner's decision has not changed — only the process is being
+    /// restarted — so an integration that keeps a durable record of the
+    /// owner's consent must NOT record a withdrawal here. Defaults to `stop()`,
+    /// so nothing changes for any integration that does not track consent.
+    async fn stop_for_restart(&self) -> Result<()> {
+        self.stop().await
+    }
     /// Stop this integration because the USER disabled it, as distinct from
     /// the supervisor restarting it.
     ///
