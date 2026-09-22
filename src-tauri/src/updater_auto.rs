@@ -30,27 +30,120 @@ const ORPHAN_IMAGES: [&str; 1] = ["frynode.exe"];
 /// harmful, not a fix.
 pub const STARTUP_ORPHAN_IMAGES: [&str; 2] = ["sdk_client.exe", "titan-edge.exe"];
 
-/// Sweep `STARTUP_ORPHAN_IMAGES` at boot. Same "exit non-zero == nothing
-/// matched, and that's success" contract as `kill_orphan_partners`.
-pub(crate) fn kill_startup_orphans() {
-    for image in STARTUP_ORPHAN_IMAGES {
-        match crate::supervisor::platform::command("taskkill")
-            .args(["/IM", image, "/T", "/F"])
-            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
-        {
-            Ok(o) if o.status.success() => {
-                info!(
-                    image,
-                    "Killed leftover untracked partner process at startup"
-                )
-            }
-            Ok(_) => info!(
-                image,
-                "No leftover untracked partner process was running at startup"
-            ),
-            Err(e) => warn!(image, error = %e, "Startup orphan cleanup could not run — continuing"),
+/// B4: the path-scoping of both orphan sweeps and of the installer hook, kept
+/// in its own file so the source-scan machinery stays out of updater_auto.rs's
+/// behavioural tests.
+#[cfg(test)]
+#[path = "updater_auto_scope_tests.rs"]
+mod updater_auto_scope_tests;
+
+/// B4: the only directories FEM is entitled to stop a process inside — its own
+/// install tree and the partner storage root.
+///
+/// Both sweeps used to pass `taskkill /IM <image>`, which matches by image name
+/// across the WHOLE session with no path filter. A user running their own
+/// Titan or MystNodes install outside FEM had it force-killed on every FEM
+/// launch (`kill_startup_orphans` runs from main.rs at every start) and before
+/// every update. The Done-when is explicit: FEM stops only processes whose
+/// image path is under its own directories.
+fn fem_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.push(dir.to_path_buf());
         }
     }
+    roots.push(crate::integrations::download::partners_base_dir());
+    roots
+}
+
+/// Pure: is `exe_path` inside one of `roots`? Case-insensitive and
+/// separator-normalised, because Win32_Process reports whatever case and
+/// separators the process was started with.
+pub(crate) fn process_is_under(exe_path: &str, roots: &[PathBuf]) -> bool {
+    let candidate = exe_path.trim();
+    if candidate.is_empty() {
+        return false;
+    }
+    let candidate = candidate.replace('/', "\\").to_lowercase();
+    roots.iter().any(|root| {
+        let mut root = root.to_string_lossy().replace('/', "\\").to_lowercase();
+        if root.is_empty() {
+            return false;
+        }
+        if !root.ends_with('\\') {
+            root.push('\\');
+        }
+        candidate.starts_with(&root)
+    })
+}
+
+/// Pure: the PowerShell that lists `<pid>|<ExecutablePath>` for the given
+/// images. Enumerating once and deciding in Rust keeps the decision testable.
+pub(crate) fn process_listing_script(images: &[&str]) -> String {
+    let filter = images
+        .iter()
+        .map(|i| format!("Name='{i}'"))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    format!(
+        "Get-CimInstance Win32_Process -Filter \"{filter}\" | \
+         ForEach-Object {{ \"$($_.ProcessId)|$($_.ExecutablePath)\" }}"
+    )
+}
+
+/// Pure: which of the listed processes are ours to stop.
+pub(crate) fn select_orphan_pids(listing: &str, roots: &[PathBuf]) -> Vec<u32> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let (pid, path) = line.trim().split_once('|')?;
+            let pid = pid.trim().parse::<u32>().ok()?;
+            process_is_under(path, roots).then_some(pid)
+        })
+        .collect()
+}
+
+/// Stop every process of `images` whose image path is under `roots`, and
+/// nothing else. Best-effort throughout: a sweep that cannot run must never
+/// stop FEM starting or updating.
+fn kill_orphans_under(images: &[&str], roots: &[PathBuf], when: &str) {
+    if roots.is_empty() {
+        warn!(when, "Could not resolve FEM's own directories — skipping the orphan sweep rather than killing by image name");
+        return;
+    }
+    let listing = match crate::supervisor::platform::command("powershell")
+        .args(["-NoProfile", "-Command", &process_listing_script(images)])
+        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+    {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+        Err(e) => {
+            warn!(when, error = %e, "Orphan cleanup could not enumerate processes — continuing");
+            return;
+        }
+    };
+    let pids = select_orphan_pids(&listing, roots);
+    if pids.is_empty() {
+        info!(when, "No orphaned partner process of FEM's own was running");
+        return;
+    }
+    for pid in pids {
+        let pid_arg = pid.to_string();
+        match crate::supervisor::platform::command("taskkill")
+            .args(["/PID", &pid_arg, "/T", "/F"])
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+        {
+            Ok(o) if o.status.success() => info!(when, pid, "Killed orphaned partner process"),
+            Ok(o) => info!(when, pid, code = o.status.code(), "Orphaned partner process was already gone"),
+            Err(e) => warn!(when, pid, error = %e, "Orphan cleanup could not run — continuing"),
+        }
+    }
+}
+
+/// Sweep `STARTUP_ORPHAN_IMAGES` at boot — but only copies living under FEM's
+/// own directories (B4).
+pub(crate) fn kill_startup_orphans() {
+    kill_orphans_under(&STARTUP_ORPHAN_IMAGES[..], &fem_roots(), "startup");
 }
 
 /// Settle time after the last partner process exits, before the updater
@@ -290,16 +383,7 @@ pub(crate) fn stop_partner_processes(supervisor: &Arc<Mutex<Supervisor>>) -> Vec
 /// `taskkill` exits non-zero when nothing matched the image name, which is the
 /// normal case and is success here — the precedent is `aem.rs`'s stop path.
 pub(crate) fn kill_orphan_partners() {
-    for image in ORPHAN_IMAGES {
-        match crate::supervisor::platform::command("taskkill")
-            .args(["/IM", image, "/T", "/F"])
-            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
-        {
-            Ok(o) if o.status.success() => info!(image, "Killed orphaned partner process"),
-            Ok(_) => info!(image, "No orphaned partner process was running"),
-            Err(e) => warn!(image, error = %e, "Orphan cleanup could not run — continuing"),
-        }
-    }
+    kill_orphans_under(&ORPHAN_IMAGES[..], &fem_roots(), "pre-update");
 }
 
 /// Release the install tree before ANY updater install — shared by the

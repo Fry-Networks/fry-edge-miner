@@ -43,21 +43,23 @@
   ; resources\frynode.exe open, and the file copy fails with
   ; "Error opening file for writing". Kill it here; a non-zero exit just means
   ; nothing matched, which is the normal case.
-  DetailPrint "Stopping partner processes that hold the install folder..."
-  nsExec::Exec 'taskkill /F /T /IM frynode.exe'
-  Pop $1
-
+  ;
   ; BUG 1/2: the same class of locked-file failure applies to every OTHER
   ; supervisor/untracked partner binary FEM ships resources for or installs
   ; alongside itself. The running app's own release_install_tree/orphan-sweep
   ; cover the normal update path, but a manual installer run (or an update
   ; from a version that predates those sweeps) can still hit a locked file
   ; here. Best-effort, same "non-zero = nothing matched" contract.
-  nsExec::Exec 'taskkill /F /T /IM titan-edge.exe'
-  Pop $1
-  nsExec::Exec 'taskkill /F /T /IM sdk_client.exe'
-  Pop $1
-  nsExec::Exec 'taskkill /F /T /IM space-acres.exe'
+  ;
+  ; B4: this used to be four `taskkill /F /T /IM <image>` calls. `/IM` matches
+  ; by image name across the WHOLE session with no path filter, so installing
+  ; or updating FEM force-killed a user's OWN unrelated Space Acres, Titan or
+  ; MystNodes install. taskkill has no path filter, so the only way to narrow
+  ; it is to select the processes ourselves: same four images, but ONLY the
+  ; copies whose ExecutablePath is inside FEM's own install tree or partner
+  ; root — which is exactly the set that can hold this install folder open.
+  DetailPrint "Stopping partner processes that hold the install folder..."
+  nsExec::Exec `powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $$_.ExecutablePath -and $$_.Name -in 'frynode.exe','titan-edge.exe','sdk_client.exe','space-acres.exe' -and ($$_.ExecutablePath -like '$INSTDIR\*' -or $$_.ExecutablePath -like '$APPDATA\FryEdgeMiner\partners\*' -or $$_.ExecutablePath -like '$LOCALAPPDATA\FryEdgeMiner\partners\*') } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }"`
   Pop $1
   Sleep 2000
 
