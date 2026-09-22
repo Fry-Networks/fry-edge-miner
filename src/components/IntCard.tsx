@@ -3,9 +3,11 @@ import { AlertTriangle, Download, Loader2, MessageCircle, RefreshCw } from 'luci
 import type { FrontendIntegration } from '../hooks/useIntegrations'
 import { consentBadge } from '../lib/consentDialog'
 import { DISABLE_CONFIRM_MS, shouldConfirmDisable } from '../lib/disableConfirm'
-import { condenseError } from '../lib/error'
-import { isRequiredIntegration } from '../lib/integrationMeta'
+import { condenseError, extractErrorMessage } from '../lib/error'
+import { integrationBadge } from '../lib/integrationBadge'
+import { isRequiredIntegration, SETUP_GUIDANCE } from '../lib/integrationMeta'
 import { OFFICIAL_DISABLED_WARNING, REQUIRED_DISABLED_WARNING, SDK_REPORT_LINE } from '../lib/support'
+import { safeInvoke } from '../lib/tauri'
 import { awaitsUserSetup, unhealthyReason, sentinelFundingAddress } from '../lib/types'
 import CopyField from './primitives/CopyField'
 import Tag from './primitives/Tag'
@@ -51,7 +53,9 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
   const isSdk = tier === 'sdk'
   // F17: reward role (required vs boost) is independent of partner provenance.
   const isRequired = isRequiredIntegration(id)
-  const consent = consentBadge(consentActive)
+  // B18 D3: pass the card's own health reason so a stale consentActive flag
+  // can never contradict what the health line already says.
+  const consent = consentBadge(consentActive, reason)
 
   // F4: disabling an official partner costs reward proportion, so the first
   // click arms a caution row and the second commits. The row disarms itself so
@@ -71,6 +75,32 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
     setConfirmingDisable(false)
     onToggle(id)
   }
+
+  // B17 D6: in-app way to supply the Iagon node_token the Setup required
+  // guidance above asks for. Backend allow-list (partner_secret.rs,
+  // T2/T3-owned) is Iagon-only today; mirror that here rather than showing a
+  // dead input on partners the command will reject.
+  const [secretValue, setSecretValue] = useState('')
+  const [secretSaving, setSecretSaving] = useState(false)
+  const [secretError, setSecretError] = useState<string | null>(null)
+  const canSetSecret = id === 'iagon'
+  const handleSaveSecret = async () => {
+    if (!secretValue.trim()) return
+    setSecretSaving(true)
+    setSecretError(null)
+    try {
+      await safeInvoke('set_partner_secret', { id, value: secretValue })
+      setSecretValue('')
+      // Re-run the toggle so the backend picks up the fresh token without a
+      // full app restart (iagon.rs reads it fresh on every start() call).
+      onToggle(id)
+    } catch (e) {
+      setSecretError(extractErrorMessage(e))
+    } finally {
+      setSecretSaving(false)
+    }
+  }
+
   const dockerBlocked = !!dockerNote
   // This machine cannot meet the partner's published minimums. Distinct from
   // "unhealthy": nothing is wrong, it simply can never run here — so the card
@@ -81,64 +111,28 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
   // thing we can tell the user, and without it the toggle just springs back
   // to off with no explanation at all.
   // Condensed for the one-line card slot; the full text stays in the tooltip.
-  const startError = !unavailable && lastError ? condenseError(lastError) : null
+  // Cross-team fix (T3, via lead — B7 D4/B8 D3-D4): a STALE error from an
+  // earlier failed toggle attempt must not outrank a LIVE awaitsUserSetup
+  // reason — otherwise the funding/setup guidance (and its body text below)
+  // never renders once any past attempt failed, even after health moves on.
+  const startError = !unavailable && !awaitsUserSetup(health) && lastError ? condenseError(lastError) : null
 
-  let st: 'run' | 'err' | 'stopped' | 'info' = 'stopped'
-  let stLbl = 'Not installed'
-  let stNode: ReactNode = stLbl
-
-  if (lifecycle === 'Installing') {
-    st = 'info'
-    stLbl = 'Installing'
-    stNode = (
+  // B14 D2: single shared source for the status ladder — see
+  // ../lib/integrationBadge.ts. The Dashboard tile consumes the same
+  // function so the two pages can never disagree.
+  const badge = integrationBadge({ ...intg, dockerBlocked })
+  const st = badge.dot
+  const stLbl = badge.label
+  const stNode: ReactNode =
+    badge.kind === 'installing' ? (
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
         <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
         {stLbl}
       </span>
+    ) : (
+      stLbl
     )
-  } else if (unavailable) {
-    st = 'stopped'
-    stLbl = 'Unavailable'
-  } else if (!inst && dockerBlocked) {
-    st = 'stopped'
-    stLbl = 'Unavailable'
-  } else if (!inst) {
-    st = 'stopped'
-    stLbl = 'Not installed'
-  } else if (!enabled) {
-    st = 'stopped'
-    stLbl = 'Disabled'
-  } else if (healthy) {
-    st = 'run'
-    stLbl = 'Running'
-  } else if (health === 'Stopped' || health === 'Starting' || health === 'Unknown') {
-    // Enabled but not running yet — the backend health loop auto-restarts;
-    // don't scare the user with a red badge for a transient state.
-    st = 'info'
-    stLbl = 'Starting'
-  } else if (awaitsUserSetup(health)) {
-    // Not a failure — the partner is waiting on a setup step only the user
-    // can complete (Storj node token + identity). Amber, and say what it is.
-    st = 'info'
-    stLbl = 'Setup required'
-  } else {
-    st = 'err'
-    stLbl = 'Unhealthy'
-  }
-  if (lifecycle !== 'Installing') stNode = stLbl
-
-  const tv =
-    lifecycle === 'Installing'
-      ? 'info'
-      : !inst
-        ? 'warn'
-        : st === 'run'
-          ? 'run'
-          : st === 'err'
-            ? 'err'
-            : st === 'info'
-              ? 'info'
-              : 'def'
+  const tv = badge.tag
   const pct = enabled && healthy ? Math.round(intg.poc_contribution * 100) : 0
 
   return (
@@ -202,7 +196,7 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                 isRequired ? 'required' : intg.tier === 'official' ? 'optionalPartner' : 'optionalCommunity'
               }
             />
-            <span title={reason ?? undefined} style={reason ? { cursor: 'help' } : undefined}>
+            <span data-testid={`status-${id}`} title={reason ?? undefined} style={reason ? { cursor: 'help' } : undefined}>
               <Tag v={tv}>{stNode}</Tag>
             </span>
           </div>
@@ -264,7 +258,18 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                 <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 2 }} /> {startError}
               </span>
             )}
-            {reason && st === 'err' && !startError && (
+            {/* B17 D5 + B16 D4: also open for Setup required and Upstream
+                unreachable (not just st === 'err') — once a state moves a
+                partner out of 'err' (Sentinel/Iagon/Storj waiting on the
+                user, or Titan's scheduler being unreachable), this gate must
+                keep the explanation (and Sentinel's funding block) mounted.
+                The trailing `|| awaitsUserSetup(health)` (cross-team fix for
+                B7 D4/B8 D3-D4) additionally closes a ladder-precedence edge
+                case: stLbl only reads 'Setup required' when no earlier arm
+                in integrationBadge.ts's ladder fired first, but a live
+                awaiting-user-setup reason should still explain itself even
+                then. */}
+            {reason && (st === 'err' || stLbl === 'Setup required' || stLbl === 'Upstream unreachable' || awaitsUserSetup(health)) && !startError && (
               fundingAddr ? (
                 <div
                   data-testid={`sentinel-fund-${id}`}
@@ -309,6 +314,88 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                   <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 2 }} /> {reason}
                 </span>
               )
+            )}
+            {stLbl === 'Setup required' && SETUP_GUIDANCE[id] && (
+              <span
+                role="note"
+                style={{
+                  fontFamily: 'var(--fb)',
+                  fontSize: 11,
+                  color: 'var(--amb)',
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: 4,
+                  minWidth: 0,
+                  maxWidth: 420,
+                  whiteSpace: 'normal',
+                  overflowWrap: 'anywhere',
+                  lineHeight: 1.4
+                }}
+              >
+                {SETUP_GUIDANCE[id].what}{' '}
+                <a href={SETUP_GUIDANCE[id].url} target="_blank" rel="noreferrer">
+                  {SETUP_GUIDANCE[id].urlLabel}
+                </a>
+              </span>
+            )}
+            {stLbl === 'Setup required' && canSetSecret && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 }}>
+                <div style={{ display: 'flex', gap: 6, minWidth: 0 }}>
+                  <input
+                    type="password"
+                    data-testid={`secret-input-${id}`}
+                    placeholder="Node auth token"
+                    value={secretValue}
+                    onChange={(e) => setSecretValue(e.target.value)}
+                    disabled={secretSaving}
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      fontFamily: 'var(--fm)',
+                      fontSize: 11,
+                      padding: '4px 6px',
+                      background: 'var(--s0)',
+                      border: '1px solid var(--b0)',
+                      borderRadius: 'var(--radsm)',
+                      color: 'var(--txt)'
+                    }}
+                  />
+                  <button
+                    type="button"
+                    data-testid={`secret-save-${id}`}
+                    onClick={handleSaveSecret}
+                    disabled={secretSaving || !secretValue.trim()}
+                    style={{
+                      fontFamily: 'var(--fh)',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      padding: '4px 10px',
+                      borderRadius: 'var(--radsm)',
+                      border: '1px solid var(--b0)',
+                      background: 'var(--s1)',
+                      color: 'var(--txt)',
+                      cursor: secretSaving || !secretValue.trim() ? 'default' : 'pointer'
+                    }}
+                  >
+                    {secretSaving ? 'Saving…' : 'Save'}
+                  </button>
+                </div>
+                {secretError && (
+                  <span
+                    role="alert"
+                    data-testid={`secret-error-${id}`}
+                    style={{
+                      fontFamily: 'var(--fb)',
+                      fontSize: 11,
+                      color: 'var(--red)',
+                      whiteSpace: 'normal',
+                      overflowWrap: 'anywhere'
+                    }}
+                  >
+                    {condenseError(secretError)}
+                  </span>
+                )}
+              </div>
             )}
             {dockerNote && !startError && (
               <span
@@ -362,7 +449,7 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                 <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 2 }} /> {unavailableReason}
               </span>
             )}
-            {!unavailable && !startError && !inst && !dockerNote && lifecycle !== 'Installing' && (
+            {!unavailable && !startError && !inst && !dockerNote && lifecycle !== 'Installing' && !(enabled && healthy) && (
               <span
                 style={{
                   fontFamily: 'var(--fb)',

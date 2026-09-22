@@ -21,6 +21,98 @@ function deriveLifecycle(enabled: boolean, health: HealthStatus): LifecycleState
   return 'Starting'
 }
 
+// B14 D2 / B17 D-12: browser-preview-only test hook, mirrors the existing
+// `?docker=<kind>` (fetchSystem, below) and useDevice's `?wizard=1`. Lets a
+// Playwright spec drive an individual mock integration into any badge state
+// without a live backend, e.g. `?intg=titan:running&intg=storj:setupRequired`.
+export type IntgHintState =
+  | 'running'
+  | 'starting'
+  | 'disabled'
+  | 'notInstalled'
+  | 'unavailable'
+  | 'installing'
+  | 'setupRequired'
+  | 'setupRequiredFunding'
+  | 'unhealthy'
+  | 'needsConsent'
+  | 'setupRequiredWithStaleError'
+
+export function intgHintOverrides(state: string): Partial<IntegrationStatus> {
+  switch (state as IntgHintState) {
+    case 'running':
+      return { enabled: true, health: 'Healthy', lifecycle: 'Running', version: '1.0.0' }
+    case 'starting':
+      return { enabled: true, health: 'Starting', lifecycle: 'Starting', version: '1.0.0' }
+    case 'disabled':
+      return { enabled: false, health: 'Stopped', lifecycle: 'Disabled', version: '1.0.0' }
+    case 'notInstalled':
+      return { enabled: false, health: 'Stopped', lifecycle: 'Disabled', version: null }
+    case 'unavailable':
+      return {
+        enabled: false,
+        health: 'Stopped',
+        lifecycle: 'Disabled',
+        version: null,
+        unavailable_reason: 'this device does not meet requirements'
+      }
+    case 'installing':
+      return { enabled: true, health: 'Stopped', lifecycle: 'Installing', version: null }
+    case 'setupRequired':
+      return {
+        enabled: true,
+        health: { Unhealthy: 'Awaiting Storj setup — create a node auth token' },
+        lifecycle: 'Unhealthy',
+        version: '1.0.0'
+      }
+    case 'setupRequiredFunding':
+      // Verbatim shape of the Sentinel unfunded-account reason (sentinel.rs)
+      // — carries a sent1 address so sentinelFundingAddress() extracts it.
+      return {
+        enabled: true,
+        health: { Unhealthy: 'Sentinel node account not funded — send DVPN to sent1qqqqexample to activate this node' },
+        lifecycle: 'Unhealthy',
+        version: '1.0.0'
+      }
+    case 'unhealthy':
+      return { enabled: true, health: { Unhealthy: 'container exited: panic' }, lifecycle: 'Unhealthy', version: '1.0.0' }
+    case 'needsConsent':
+      // B18 D3: the verbatim Pawns "needs your consent" health reason —
+      // exercises consentBadge's health-reason override independent of the
+      // separate (backend-driven, not reachable in browser preview)
+      // consentActive flag.
+      return {
+        enabled: true,
+        health: { Unhealthy: 'Pawns.app needs your consent before it can share bandwidth — open it to review and enable.' },
+        lifecycle: 'Unhealthy',
+        version: '1.0.0'
+      }
+    case 'setupRequiredWithStaleError':
+      // Cross-team fix for B7 D4/B8 D3-D4: a STALE `error` from an earlier
+      // failed toggle attempt used to outrank a LIVE awaitsUserSetup health
+      // reason, hiding the funding/setup guidance body text entirely.
+      return {
+        enabled: true,
+        health: { Unhealthy: 'Awaiting fryDVPN funding — fryDVPN needs about 0.312 ALGO in this device\'s wallet to register on-chain, and it currently has 0.100 ALGO — about 0.212 ALGO short. Send ALGO to ADDR and fryDVPN will register automatically on the next check.' },
+        lifecycle: 'Unhealthy',
+        version: '1.0.0',
+        error: 'frynode could not be started: a previous attempt timed out'
+      }
+    default:
+      return {}
+  }
+}
+
+// B14 D3: runToggle/forceReinstall set a specific error, then their own
+// `finally` resyncs with the backend by calling fetch(). fetch()'s success
+// path unconditionally cleared the error, erasing it within one IPC
+// round-trip — the toggle appeared to silently revert with no explanation.
+// preserveError lets a caller resync state without wiping the error it just
+// set; an ordinary poll (no caller opts in) still clears a stale error.
+export function shouldClearError(fetchOk: boolean, preserveError: boolean): boolean {
+  return fetchOk && !preserveError
+}
+
 export interface FrontendIntegration extends IntegrationMeta {
   enabled: boolean
   health: HealthStatus
@@ -89,9 +181,15 @@ export function useIntegrations() {
   // can't hide another's still-running Docker install.
   const inflightToggles = useRef(0)
 
-  const fetch = useCallback(async () => {
+  const fetch = useCallback(async (opts?: { preserveError?: boolean }) => {
     if (!isTauri()) {
       // Browser preview mode — show all integrations with mock data
+      const intgHints = new Map(
+        new URLSearchParams(window.location.search).getAll('intg').map((pair) => {
+          const [id, state] = pair.split(':')
+          return [id, state] as const
+        })
+      )
       const mock: IntegrationStatus[] = INTEGRATION_META.map((m) => ({
         id: m.id,
         display_name: m.name,
@@ -101,6 +199,7 @@ export function useIntegrations() {
         version: '0.0.0-preview',
         poc_contribution: 1 / INTEGRATION_META.length,
         requires_docker: true,
+        ...(intgHints.has(m.id) ? intgHintOverrides(intgHints.get(m.id)!) : {})
       }))
       setIntegrations(toFrontend(mock))
       setLoading(false)
@@ -115,7 +214,7 @@ export function useIntegrations() {
       try {
         const data = await invoke<IntegrationStatus[]>('get_integrations')
         setIntegrations(toFrontend(data))
-        setError(null)
+        if (shouldClearError(true, !!opts?.preserveError)) setError(null)
         lastErr = null
         try {
           localStorage.setItem('fem.integrations.lastGood', JSON.stringify(data))
@@ -167,15 +266,38 @@ export function useIntegrations() {
     fetchSystem()
   }, [fetch, fetchSystem])
 
+  // Consent state for an integration that tracks one. Never throws: a status
+  // we cannot read is reported as unknown so the caller can decide.
+  // (Moved above the poll effect below, which — B18 D3 — now also calls
+  // this on every tick, not just on mount.)
+  const refreshConsent = useCallback(async (id: string): Promise<ConsentStatus | null> => {
+    if (!isTauri()) return null
+    try {
+      const status = await invoke<ConsentStatus>('check_consent', { integrationId: id })
+      setConsentActive((prev) => ({ ...prev, [id]: status.active }))
+      return status
+    } catch (e) {
+      console.warn(`check_consent(${id}) failed:`, e)
+      return null
+    }
+  }, [])
+
   // Poll as a fallback so the UI can never go permanently stale if the
   // health-event stream dies (and to pick up Docker state changes).
+  // B18 D3: also re-check consent here — it was previously fetched only on
+  // mount, so a consent loss between polls (e.g. a supervisor restart
+  // wrongly recording a withdrawal, B18 D1/D2) left the badge stuck on
+  // "Consent active" until the user next navigated away and back.
   useEffect(() => {
     const timer = setInterval(() => {
       fetch()
       fetchSystem()
+      INTEGRATION_META.filter((m) => requiresConsent(m.id)).forEach((m) => {
+        refreshConsent(m.id)
+      })
     }, 30_000)
     return () => clearInterval(timer)
-  }, [fetch, fetchSystem])
+  }, [fetch, fetchSystem, refreshConsent])
 
   // Listen to real-time health events emitted by the backend health loop.
   useEffect(() => {
@@ -223,20 +345,6 @@ export function useIntegrations() {
     setup()
     return () => {
       unlisten?.()
-    }
-  }, [])
-
-  // Consent state for an integration that tracks one. Never throws: a status
-  // we cannot read is reported as unknown so the caller can decide.
-  const refreshConsent = useCallback(async (id: string): Promise<ConsentStatus | null> => {
-    if (!isTauri()) return null
-    try {
-      const status = await invoke<ConsentStatus>('check_consent', { integrationId: id })
-      setConsentActive((prev) => ({ ...prev, [id]: status.active }))
-      return status
-    } catch (e) {
-      console.warn(`check_consent(${id}) failed:`, e)
-      return null
     }
   }, [])
 
@@ -293,8 +401,10 @@ export function useIntegrations() {
           setDockerProgress(null)
         }
         // Resync with backend truth (success AND failure) so the toggle can
-        // never display a state the backend doesn't hold.
-        await fetch()
+        // never display a state the backend doesn't hold — but keep the
+        // error just set above alive instead of letting this call's own
+        // success path erase it (B14 D3).
+        await fetch({ preserveError: true })
         fetchSystem()
       }
       return ok
@@ -394,7 +504,8 @@ export function useIntegrations() {
         if (inflightToggles.current === 0) {
           setDockerProgress(null)
         }
-        await fetch()
+        // Same as runToggle: preserve the error this call just set (B14 D3).
+        await fetch({ preserveError: true })
         fetchSystem()
       }
     },

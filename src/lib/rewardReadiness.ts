@@ -48,3 +48,13 @@ export function deriveRewardDisplay(summary: RewardSummary | null | undefined): 
     stakeLabel: summary.stake_label
   }
 }
+
+/**
+ * B22 D1: "No stake" + " stake active" reads "No stake stake active". Same
+ * de-dup guard SettingsPage.tsx's stake line already applies, extracted here
+ * so Rewards.tsx can use it too.
+ */
+export function stakeSubtitle(stakeLabel: string): string {
+  if (stakeLabel === DASH) return DASH
+  return `${stakeLabel}${stakeLabel.toLowerCase().includes('stake') ? '' : ' stake'} active`
+}
