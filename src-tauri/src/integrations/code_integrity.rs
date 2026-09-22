@@ -35,16 +35,26 @@ const BLOCK_EVENT_IDS: [&str; 3] = ["3033", "3076", "3077"];
 /// restarting, and then says the three things the user needs: which file, what
 /// did it, and that this is not a broken download.
 pub(crate) fn user_message(image: &Path) -> String {
-    let name = image
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| image.to_string_lossy().into_owned());
+    let name = image_file_name(image).unwrap_or_else(|| image.to_string_lossy().into_owned());
     format!(
         "{AWAITING_ADMIN_MARKER} — Windows blocked {name} from loading (Smart App Control or an \
          app-control policy refused the unsigned file). The file itself is intact, so \
          reinstalling will not help. Allow {name} in Windows Security, or turn Smart App Control \
          off, then re-enable this integration."
     )
+}
+
+/// The last path component of `image`, splitting on EITHER separator.
+///
+/// `Path::file_name` is host-dependent: on a non-Windows host it does not treat
+/// `\` as a separator, so a Windows path comes back as one whole component.
+/// This module is about Windows paths by definition — the event log reports NT
+/// device paths and FEM holds drive-letter paths — so the split has to be
+/// explicit rather than inherited from whatever host the code is compiled on.
+fn image_file_name(image: &Path) -> Option<String> {
+    let text = image.to_string_lossy();
+    let name = text.rsplit(['\\', '/']).next()?;
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 /// PURE: does this event XML name the image we are asking about, and is it one
@@ -54,15 +64,10 @@ pub(crate) fn user_message(image: &Path) -> String {
 /// device path (`\Device\HarddiskVolume3\Users\...`) rather than the drive
 /// letter FEM knows the file by, so a full-path comparison would never match.
 pub(crate) fn event_names_our_image(event_xml: &str, image: &Path) -> bool {
-    let Some(name) = image
-        .file_name()
-        .map(|n| n.to_string_lossy().to_lowercase())
-    else {
+    let Some(name) = image_file_name(image) else {
         return false;
     };
-    if name.is_empty() {
-        return false;
-    }
+    let name = name.to_lowercase();
     let haystack = event_xml.to_lowercase();
     if !haystack.contains(&name) {
         return false;

@@ -13,7 +13,7 @@
 //! (a root that could flip mid-run would make `installed_version()` return None
 //! and reinstall on top of a live partner). Only the reporting is added.
 
-use super::download::storage_fallback_message;
+use super::storage_fallback_message;
 use std::path::Path;
 
 fn code_only(src: &str) -> String {

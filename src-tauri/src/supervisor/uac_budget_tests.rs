@@ -13,7 +13,7 @@
 //! firewall.rs and security_setup.rs were never given the same treatment. This
 //! is that guard, generalised over every UAC-bearing wrapper in the tree.
 
-use super::platform::{PROBE_TIMEOUT, UAC_ANSWER_TIMEOUT};
+use super::{PROBE_TIMEOUT, UAC_ANSWER_TIMEOUT};
 
 const SOURCES: [(&str, &str); 2] = [
     ("firewall.rs", include_str!("../integrations/firewall.rs")),
