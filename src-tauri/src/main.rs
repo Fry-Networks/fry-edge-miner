@@ -433,11 +433,11 @@ fn main() {
                             names.push(format!("presearch-{}", suffix));
                         }
                         for name in names {
-                            let _ = supervisor::platform::command("docker")
+                            let _ = crate::integrations::docker_manager::docker_command()
                                 .args(["rm", "-f", &name])
                                 .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
                         }
-                        let _ = supervisor::platform::command("docker")
+                        let _ = crate::integrations::docker_manager::docker_command()
                             .args(["volume", "rm", "presearch-node-storage"])
                             .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
                     });
@@ -557,9 +557,17 @@ fn main() {
                                     );
                                     return false;
                                 }
+                                // B18: a SUPERVISOR restart is not the user
+                                // withdrawing consent. `stop()` records a
+                                // withdrawal for Pawns, so every automatic
+                                // restart silently revoked it — the mechanism
+                                // behind "Pawns keeps resetting the consent
+                                // every hour or two". The trait method exists
+                                // and Pawns overrides it; this is the call site
+                                // that makes it do anything.
                                 let _ = tokio::task::block_in_place(|| {
                                     tokio::runtime::Handle::current()
-                                        .block_on(integration.stop())
+                                        .block_on(integration.stop_for_restart())
                                 });
                                 tokio::task::block_in_place(|| {
                                     tokio::runtime::Handle::current()
