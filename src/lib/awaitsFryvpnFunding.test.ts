@@ -12,7 +12,7 @@ import { awaitsUserSetup, unhealthyReason } from './types'
 
 describe('awaitsUserSetup recognises the fryDVPN funding-needed reason (B7 D4)', () => {
   const FUNDING =
-    'Awaiting fryDVPN funding — fryDVPN needs about 0.352 ALGO in this device\'s wallet to register on-chain, and it currently has 0.100 ALGO — about 0.252 ALGO short. Send ALGO to ADDR and fryDVPN will register automatically on the next check.'
+    'Awaiting fryDVPN funding — fryDVPN needs about 0.312 ALGO in this device\'s wallet to register on-chain, and it currently has 0.100 ALGO — about 0.212 ALGO short. Send ALGO to ADDR and fryDVPN will register automatically on the next check.'
 
   it('is true for the funding-needed reason', () => {
     expect(awaitsUserSetup({ Unhealthy: FUNDING })).toBe(true)

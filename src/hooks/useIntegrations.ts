@@ -93,7 +93,7 @@ export function intgHintOverrides(state: string): Partial<IntegrationStatus> {
       // reason, hiding the funding/setup guidance body text entirely.
       return {
         enabled: true,
-        health: { Unhealthy: 'Awaiting fryDVPN funding — fryDVPN needs about 0.352 ALGO in this device\'s wallet to register on-chain, and it currently has 0.100 ALGO — about 0.252 ALGO short. Send ALGO to ADDR and fryDVPN will register automatically on the next check.' },
+        health: { Unhealthy: 'Awaiting fryDVPN funding — fryDVPN needs about 0.312 ALGO in this device\'s wallet to register on-chain, and it currently has 0.100 ALGO — about 0.212 ALGO short. Send ALGO to ADDR and fryDVPN will register automatically on the next check.' },
         lifecycle: 'Unhealthy',
         version: '1.0.0',
         error: 'frynode could not be started: a previous attempt timed out'
