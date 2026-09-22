@@ -176,7 +176,7 @@ fn compose_file() -> PathBuf {
 /// published to a registry, so `compose up` must not be allowed to fall back
 /// to pulling it.
 fn image_built() -> bool {
-    crate::supervisor::platform::command("docker")
+    crate::integrations::docker_manager::docker_command()
         .args(["images", "-q", "diiisco-node:latest"])
         .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
         .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
@@ -259,7 +259,7 @@ impl Integration for DiiiscoIntegration {
             anyhow::bail!("DIIISCO_BEARER_TOKEN not configured — set the environment variable before enabling Diiisco");
         }
         info!("Building Diiisco Docker image");
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["compose", "build"])
             .env("ALGO_ADDRESS", &algo_address)
             .env("ALGO_MNEMONIC", &algo_mnemonic)
@@ -339,7 +339,7 @@ impl Integration for DiiiscoIntegration {
         // from a registry — "pull access denied". Build first.
         if !image_built() {
             info!("diiisco-node image missing — building before start");
-            let output = crate::supervisor::platform::command("docker")
+            let output = crate::integrations::docker_manager::docker_command()
                 .args(["compose", "build"])
                 .env("ALGO_ADDRESS", &algo_address)
                 .env("ALGO_MNEMONIC", &algo_mnemonic)
@@ -359,7 +359,7 @@ impl Integration for DiiiscoIntegration {
         // runs ("network diiisco_default already exists"). Volumes survive.
         // Failures don't block startup, but they must be visible in logs.
         info!("Cleaning up stale Diiisco containers/networks");
-        match crate::supervisor::platform::command("docker")
+        match crate::integrations::docker_manager::docker_command()
             .args(["compose", "down", "--remove-orphans"])
             .env("ALGO_ADDRESS", &algo_address)
             .env("ALGO_MNEMONIC", &algo_mnemonic)
@@ -382,7 +382,7 @@ impl Integration for DiiiscoIntegration {
         }
 
         info!("Starting Diiisco containers");
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["compose", "up", "-d"])
             .env("ALGO_ADDRESS", &algo_address)
             .env("ALGO_MNEMONIC", &algo_mnemonic)
@@ -403,7 +403,7 @@ impl Integration for DiiiscoIntegration {
     async fn stop(&self) -> Result<()> {
         let compose = compose_file();
         if compose.exists() {
-            crate::supervisor::platform::command("docker")
+            crate::integrations::docker_manager::docker_command()
                 .args(["compose", "-f", &compose.to_string_lossy(), "stop"])
                 .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
             info!("Stopped Diiisco containers");

@@ -352,7 +352,7 @@ impl PawnsIntegration {
     /// Observably identical to the old `stop()` for a user disable, so the
     /// §5.8 withdrawal record is unchanged for the case that actually is one.
     async fn stop_inner(&self, reason: StopReason) -> Result<()> {
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["rm", "-f", PAWNS_CONTAINER])
             .output_bounded(PROBE_TIMEOUT);
         match output {
@@ -419,7 +419,7 @@ impl PawnsIntegration {
 
     /// `running` / `exited` / … for the managed container, or None when absent.
     fn container_state() -> Option<String> {
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["inspect", "-f", "{{.State.Status}}", PAWNS_CONTAINER])
             .output_bounded(PROBE_TIMEOUT)
             .ok()?;
@@ -435,7 +435,7 @@ impl PawnsIntegration {
     }
 
     fn container_logs(tail: &str) -> Option<String> {
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["logs", "--tail", tail, PAWNS_CONTAINER])
             .output_bounded(PROBE_TIMEOUT)
             .ok()?;
@@ -745,7 +745,7 @@ impl Integration for PawnsIntegration {
         tokio::fs::create_dir_all(Self::partner_dir()).await?;
 
         info!(image = PAWNS_IMAGE, "Pulling Pawns.app CLI agent image");
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["pull", PAWNS_IMAGE])
             .output_bounded(LONG_TIMEOUT)?;
         if !output.status.success() {
@@ -788,7 +788,7 @@ impl Integration for PawnsIntegration {
 
         // Drop any container left from a previous run so the fixed name is free
         // and the agent restarts with current credentials.
-        let _ = crate::supervisor::platform::command("docker")
+        let _ = crate::integrations::docker_manager::docker_command()
             .args(["rm", "-f", PAWNS_CONTAINER])
             .output_bounded(PROBE_TIMEOUT);
 
@@ -802,7 +802,7 @@ impl Integration for PawnsIntegration {
 
         // Credentials are passed as arguments because the agent takes no other
         // input; they are never logged and never written to disk.
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args([
                 "run",
                 "-d",

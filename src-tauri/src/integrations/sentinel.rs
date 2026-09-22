@@ -107,7 +107,7 @@ impl SentinelIntegration {
         args.push("sentinel-dvpnx");
         args.extend_from_slice(extra);
 
-        let mut child = crate::supervisor::platform::command("docker")
+        let mut child = crate::integrations::docker_manager::docker_command()
             .args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -265,7 +265,7 @@ impl Integration for SentinelIntegration {
         .await?;
 
         info!("Pulling Sentinel dVPN image");
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["compose", "-f", &compose_file().to_string_lossy(), "pull"])
             .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
 
@@ -306,7 +306,7 @@ impl Integration for SentinelIntegration {
         }
 
         info!("Starting Sentinel dVPN containers");
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["compose", "-f", &compose.to_string_lossy(), "up", "-d"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -328,7 +328,7 @@ impl Integration for SentinelIntegration {
     async fn stop(&self) -> Result<()> {
         let compose = compose_file();
         if compose.exists() {
-            crate::supervisor::platform::command("docker")
+            crate::integrations::docker_manager::docker_command()
                 .args(["compose", "-f", &compose.to_string_lossy(), "stop"])
                 .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
             info!("Stopped Sentinel dVPN containers");
@@ -351,7 +351,7 @@ impl Integration for SentinelIntegration {
         }
 
         // Check container state via docker compose ps
-        match crate::supervisor::platform::command("docker")
+        match crate::integrations::docker_manager::docker_command()
             .args([
                 "compose",
                 "-f",
@@ -420,7 +420,7 @@ impl Integration for SentinelIntegration {
 
                     {
                         // Try to get logs for more detail
-                        if let Ok(log_output) = crate::supervisor::platform::command("docker")
+                        if let Ok(log_output) = crate::integrations::docker_manager::docker_command()
                             .args([
                                 "compose",
                                 "-f",

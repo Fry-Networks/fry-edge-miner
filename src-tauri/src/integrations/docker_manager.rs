@@ -66,13 +66,110 @@ pub enum DockerProbe {
     CliMissing,
 }
 
+/// PURE: which `docker` executable to spawn.
+///
+/// `None` means "keep using the bare name". Every one of the 25 docker spawn
+/// sites resolved `docker` by bare name against the PATH this PROCESS was
+/// launched with, and Windows does not refresh a running process's
+/// environment. Installing Docker — or fixing its PATH entry — while FEM was
+/// already running therefore left it permanently CliMissing, and the only
+/// cure was restarting the app, which is exactly what users found.
+pub(crate) fn pick_docker_cli(on_path: bool, candidates: &[PathBuf]) -> Option<PathBuf> {
+    if on_path {
+        return None;
+    }
+    candidates.iter().find(|p| p.exists()).cloned()
+}
+
+/// `...\Docker\Docker\Docker Desktop.exe` -> `...\Docker\Docker\resources\bin\docker.exe`
+pub(crate) fn cli_beside_desktop_exe(desktop: &std::path::Path) -> Option<PathBuf> {
+    desktop
+        .parent()
+        .map(|dir| dir.join("resources").join("bin").join("docker.exe"))
+}
+
+/// Absolute `docker.exe` locations worth trying, derived from the SAME install
+/// paths the installed-check already uses.
+#[cfg(target_os = "windows")]
+fn docker_cli_candidates() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for p in DOCKER_PATHS {
+        if let Some(cli) = cli_beside_desktop_exe(std::path::Path::new(p)) {
+            out.push(cli);
+        }
+    }
+    for (var, rel) in DOCKER_USER_SCOPE_PATHS {
+        if let Ok(base) = std::env::var(var) {
+            if let Some(cli) = cli_beside_desktop_exe(&PathBuf::from(base).join(rel)) {
+                out.push(cli);
+            }
+        }
+    }
+    out.dedup();
+    out
+}
+
+#[cfg(not(target_os = "windows"))]
+fn docker_cli_candidates() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+static DOCKER_CLI_CACHE: std::sync::Mutex<Option<(Option<PathBuf>, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// Forget the resolved CLI so the next spawn re-resolves it. Called whenever a
+/// spawn fails, so a path that stops working is not cached until the TTL.
+fn invalidate_docker_cli() {
+    if let Ok(mut guard) = DOCKER_CLI_CACHE.lock() {
+        *guard = None;
+    }
+}
+
+/// A `Command` for the docker CLI, resolved to an absolute path when the bare
+/// name is not spawnable. Drop-in for `platform::command("docker")`.
+pub fn docker_command() -> std::process::Command {
+    if let Ok(guard) = DOCKER_CLI_CACHE.lock() {
+        if let Some((resolved, at)) = guard.as_ref() {
+            if cache_is_fresh(Some(*at), std::time::Instant::now(), VIRT_CACHE_TTL) {
+                return match resolved {
+                    Some(p) => crate::supervisor::platform::command(p),
+                    None => crate::supervisor::platform::command("docker"),
+                };
+            }
+        }
+    }
+
+    let on_path = crate::supervisor::platform::command("docker")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|mut c| {
+            let _ = c.wait();
+            true
+        })
+        .unwrap_or(false);
+
+    let resolved = pick_docker_cli(on_path, &docker_cli_candidates());
+    if let Some(path) = resolved.as_ref() {
+        warn!(path = ?path, "Docker CLI is not on this process's PATH — using the installed copy");
+    }
+    if let Ok(mut guard) = DOCKER_CLI_CACHE.lock() {
+        *guard = Some((resolved.clone(), std::time::Instant::now()));
+    }
+    match resolved {
+        Some(p) => crate::supervisor::platform::command(p),
+        None => crate::supervisor::platform::command("docker"),
+    }
+}
+
 /// Spawn a bounded `docker <args...>` probe, polling every 100ms up to
 /// `timeout_secs`, killing and reaping the child on timeout.
 fn docker_bounded_probe(args: &[&str], timeout_secs: u64) -> DockerProbe {
     const POLL_INTERVAL_MS: u64 = 100;
     let max_polls = (timeout_secs * 1000) / POLL_INTERVAL_MS;
 
-    let mut cmd = crate::supervisor::platform::command("docker");
+    let mut cmd = docker_command();
     for a in args {
         cmd.arg(a);
     }
@@ -83,7 +180,10 @@ fn docker_bounded_probe(args: &[&str], timeout_secs: u64) -> DockerProbe {
     {
         Ok(c) => c,
         Err(e) => {
-            tracing::debug!(error = %e, "Docker CLI could not be spawned");
+            // Was debug!, so the one fact that explains a "Docker unavailable"
+            // chip never reached a shipped log.
+            warn!(error = %e, "Docker CLI could not be spawned");
+            invalidate_docker_cli();
             return DockerProbe::CliMissing;
         }
     };
@@ -155,8 +255,46 @@ fn docker_running() -> bool {
 /// Cached: the CIM query costs ~1-2s and firmware state can't change while
 /// the app is running.
 pub fn virtualization_supported() -> bool {
-    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CACHE.get_or_init(|| {
+    if let Ok(guard) = VIRT_CACHE.lock() {
+        if let Some((value, at)) = *guard {
+            if cache_is_fresh(Some(at), std::time::Instant::now(), VIRT_CACHE_TTL) {
+                return value;
+            }
+        }
+    }
+    let value = probe_virtualization_supported();
+    if let Ok(mut guard) = VIRT_CACHE.lock() {
+        *guard = Some((value, std::time::Instant::now()));
+    }
+    value
+}
+
+/// How long a virtualization reading is trusted. Same shape and duration as
+/// the SSD probe cache in `space_acres.rs`.
+const VIRT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+static VIRT_CACHE: std::sync::Mutex<Option<(bool, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// PURE: is a cached reading still good?
+///
+/// The old cache was a process-lifetime `OnceLock`, so a single sample taken
+/// before WSL2/Hyper-V had finished coming up was never re-probed for the life
+/// of the app — and that reading is serialised straight to the UI. A TTL can
+/// only turn a stale `false` into a fresh `true`, so nothing tightens.
+pub(crate) fn cache_is_fresh(
+    recorded: Option<std::time::Instant>,
+    now: std::time::Instant,
+    ttl: std::time::Duration,
+) -> bool {
+    match recorded {
+        Some(at) => now.duration_since(at) < ttl,
+        None => false,
+    }
+}
+
+fn probe_virtualization_supported() -> bool {
+    {
         #[cfg(target_os = "windows")]
         {
             let out = crate::supervisor::platform::command("powershell")
@@ -193,7 +331,7 @@ pub fn virtualization_supported() -> bool {
         {
             true
         }
-    })
+    }
 }
 
 /// Whether this Windows install is itself a VM guest (Proxmox/KVM, VMware,
@@ -269,12 +407,21 @@ pub fn resolve_docker_status(
             }
         }
         DockerProbe::CliMissing => {
-            if !virtualization {
-                DockerStatus::VirtualizationDisabled
-            } else if installed {
+            if installed {
                 // Installed but not on this process's PATH (common right after
                 // an install, before the environment is refreshed).
+                //
+                // Checked BEFORE the firmware probe on purpose: `installed` is
+                // hard evidence — the engine's named pipe, or Docker Desktop's
+                // uninstall key — while the probe is a CIM query that fails
+                // open and can be stale. Testing the probe first let a machine
+                // with Docker demonstrably present be reported as
+                // "Docker unavailable", which also made ensure_docker bail
+                // with BIOS guidance and left the watcher's auto-start
+                // unarmed.
                 DockerStatus::DaemonStopped
+            } else if !virtualization {
+                DockerStatus::VirtualizationDisabled
             } else {
                 DockerStatus::NotInstalled
             }
@@ -703,5 +850,157 @@ mod tests {
                 status_user_message_for(DockerStatus::NotInstalled, !vm)
             );
         }
+    }
+}
+
+/// B19 — "Docker unavailable" while Docker Desktop is running.
+///
+/// Every docker spawn site resolved `docker` by bare name against the PATH
+/// THIS PROCESS was launched with, and Windows does not refresh a running
+/// process's environment. Installing Docker, or fixing its PATH entry, while
+/// FEM was already running therefore left it permanently CliMissing, and the
+/// only cure was restarting the app.
+#[cfg(test)]
+mod b19_docker_cli_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn falls_back_to_a_known_install_path_when_the_launch_time_path_misses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cli = tmp.path().join("docker.exe");
+        std::fs::write(&cli, b"stub").unwrap();
+
+        assert_eq!(pick_docker_cli(false, &[cli.clone()]), Some(cli));
+    }
+
+    #[test]
+    fn keeps_the_bare_name_when_the_cli_is_already_on_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cli = tmp.path().join("docker.exe");
+        std::fs::write(&cli, b"stub").unwrap();
+
+        assert_eq!(
+            pick_docker_cli(true, &[cli]),
+            None,
+            "an on-PATH docker must keep resolving by name"
+        );
+    }
+
+    #[test]
+    fn ignores_candidates_that_do_not_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        assert_eq!(pick_docker_cli(false, &[tmp.path().join("nope.exe")]), None);
+        assert_eq!(pick_docker_cli(false, &[]), None);
+    }
+
+    #[test]
+    fn the_first_existing_candidate_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("first.exe");
+        let second = tmp.path().join("second.exe");
+        std::fs::write(&second, b"stub").unwrap();
+
+        assert_eq!(
+            pick_docker_cli(false, &[first, second.clone()]),
+            Some(second),
+            "a missing earlier candidate must not stop the search"
+        );
+    }
+
+    /// The CLI lives under the Docker Desktop install, not beside it.
+    #[test]
+    fn the_cli_is_derived_from_the_desktop_install_path() {
+        let derived = cli_beside_desktop_exe(std::path::Path::new(
+            "C:/Program Files/Docker/Docker/Docker Desktop.exe",
+        ))
+        .expect("a rooted path has a parent");
+
+        assert!(
+            derived.ends_with("resources/bin/docker.exe"),
+            "{derived:?}"
+        );
+        assert!(cli_beside_desktop_exe(std::path::Path::new("")).is_none());
+    }
+}
+
+/// B19 — hard install evidence must outrank a fail-open firmware probe.
+#[cfg(test)]
+mod b19_docker_status_precedence_tests {
+    use super::*;
+
+    #[test]
+    fn install_evidence_outranks_the_firmware_probe_when_the_cli_is_missing() {
+        assert_eq!(
+            resolve_docker_status(DockerProbe::CliMissing, true, false),
+            DockerStatus::DaemonStopped,
+            "a machine with Docker demonstrably installed must not read as \
+             'Docker unavailable' because a CIM query said otherwise"
+        );
+    }
+
+    #[test]
+    fn a_genuinely_absent_install_with_a_negative_probe_is_still_virtualization_disabled() {
+        assert_eq!(
+            resolve_docker_status(DockerProbe::CliMissing, false, false),
+            DockerStatus::VirtualizationDisabled
+        );
+    }
+
+    #[test]
+    fn an_unreachable_daemon_with_a_negative_probe_is_unchanged() {
+        assert_eq!(
+            resolve_docker_status(DockerProbe::DaemonUnreachable, true, false),
+            DockerStatus::VirtualizationDisabled,
+            "the other arm must not have moved"
+        );
+    }
+
+    #[test]
+    fn an_absent_install_with_a_healthy_probe_is_simply_not_installed() {
+        assert_eq!(
+            resolve_docker_status(DockerProbe::CliMissing, false, true),
+            DockerStatus::NotInstalled
+        );
+    }
+}
+
+/// B19 — a probe reading must not be trusted for the life of the process.
+#[cfg(test)]
+mod b19_probe_cache_ttl_tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn a_reading_inside_the_ttl_is_reused() {
+        let now = Instant::now();
+        assert!(cache_is_fresh(
+            Some(now),
+            now + Duration::from_secs(599),
+            VIRT_CACHE_TTL
+        ));
+    }
+
+    #[test]
+    fn a_reading_past_the_ttl_is_re_probed() {
+        let now = Instant::now();
+        assert!(!cache_is_fresh(
+            Some(now),
+            now + Duration::from_secs(601),
+            VIRT_CACHE_TTL
+        ));
+    }
+
+    #[test]
+    fn an_empty_cache_is_never_fresh() {
+        assert!(!cache_is_fresh(None, Instant::now(), VIRT_CACHE_TTL));
+    }
+
+    /// A reading taken before WSL2 had finished coming up must not outlive the
+    /// condition it measured.
+    #[test]
+    fn the_ttl_is_bounded_in_minutes_not_in_process_lifetime() {
+        assert!(VIRT_CACHE_TTL <= Duration::from_secs(900));
+        assert!(VIRT_CACHE_TTL >= Duration::from_secs(60));
     }
 }
