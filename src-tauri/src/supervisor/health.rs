@@ -62,6 +62,14 @@ pub(crate) fn recovery_action(
         HealthStatus::Unhealthy(reason) if crate::integrations::awaits_user_action(reason) => {
             RecoveryAction::None
         }
+        // B16: an upstream network condition is not a fault FEM can restart
+        // its way out of. Killing a live titan-edge over an unreachable
+        // scheduler is what stopped it staying up; the health loop keeps
+        // polling, so recovery is automatic the moment upstream returns.
+        // Placed ABOVE the catch-all, so it can only remove restarts.
+        HealthStatus::Unhealthy(reason) if crate::integrations::upstream_unreachable(reason) => {
+            RecoveryAction::None
+        }
         HealthStatus::Unhealthy(_) => RecoveryAction::Restart,
         HealthStatus::Stopped if enabled => RecoveryAction::Restart,
         HealthStatus::Starting

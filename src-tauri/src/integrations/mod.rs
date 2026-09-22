@@ -129,6 +129,22 @@ pub(crate) fn awaits_user_action(reason: &str) -> bool {
     AWAITING_MARKERS.iter().any(|m| reason.contains(m))
 }
 
+/// B16: does this reason describe an UPSTREAM condition rather than a fault on
+/// this device?
+///
+/// Distinct from `awaits_user_action` on purpose: nothing is being waited on
+/// from the user, and the card still says something is wrong. What must NOT
+/// happen is FEM killing a perfectly live partner process over a network
+/// condition it cannot influence — titan-edge was being TerminateProcess'd
+/// while running, purely because it had logged that it could not reach its
+/// scheduler.
+///
+/// Keyed off the existing user-facing message so the two cannot drift.
+pub(crate) fn upstream_unreachable(reason: &str) -> bool {
+    const UPSTREAM_MARKERS: [&str; 1] = ["cannot reach the Titan scheduler"];
+    UPSTREAM_MARKERS.iter().any(|m| reason.contains(m))
+}
+
 pub(crate) fn tracked_child_probe(slot: &mut Option<std::process::Child>) -> Option<bool> {
     match slot {
         None => None,

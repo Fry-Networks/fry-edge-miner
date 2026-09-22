@@ -264,6 +264,49 @@ pub(crate) fn first_error_line(log: &str) -> Option<&str> {
     log.lines().map(str::trim).find(|l| line_indicates_error(l))
 }
 
+/// How far back a titan-edge log line may be stamped and still count as a
+/// reason the CURRENT tick is failing.
+pub(crate) const ERROR_RECENCY_WINDOW_MINUTES: i64 = 5;
+
+/// PURE: is this log line recent enough to describe the current state?
+///
+/// The tail is a LINE window (last 50), never a time window, and the failure
+/// counter only resets when the whole tail is clean — so on a quiet log one
+/// historical ERROR was re-counted on every tick forever, holding the card
+/// UNHEALTHY (and, before the recovery exemption, restarting a live daemon)
+/// long after the condition had cleared.
+///
+/// titan-edge stamps `2026-09-18T19:56:30.482-0500`: an offset with no colon,
+/// so this is NOT rfc3339 and `parse_from_rfc3339` will not read it.
+///
+/// Fails OPEN: a line with no parseable timestamp counts as recent, which is
+/// exactly today's behaviour for every line that is not titan-shaped.
+pub(crate) fn error_line_is_recent(
+    line: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    window: chrono::Duration,
+) -> bool {
+    let Some(token) = line.split_whitespace().next() else {
+        return true;
+    };
+    let Ok(stamped) = chrono::DateTime::parse_from_str(token, "%Y-%m-%dT%H:%M:%S%.f%z") else {
+        return true;
+    };
+    now.signed_duration_since(stamped.with_timezone(&chrono::Utc)) <= window
+}
+
+/// PURE: the first genuinely-failing line that is also recent enough to be
+/// describing now.
+pub(crate) fn first_recent_error_line<'a>(
+    log: &'a str,
+    now: chrono::DateTime<chrono::Utc>,
+    window: chrono::Duration,
+) -> Option<&'a str> {
+    log.lines()
+        .map(str::trim)
+        .find(|l| line_indicates_error(l) && error_line_is_recent(l, now, window))
+}
+
 /// PURE: the user-facing reason for a daemon that is running but logging
 /// failures. Carries the REAL error through instead of the old fixed
 /// placeholder, and explains the common connectivity case in plain language.
@@ -572,7 +615,13 @@ impl Integration for TitanIntegration {
             "
 ",
         );
-        if first_error_line(&combined).is_some() {
+        if first_recent_error_line(
+            &combined,
+            chrono::Utc::now(),
+            chrono::Duration::minutes(ERROR_RECENCY_WINDOW_MINUTES),
+        )
+        .is_some()
+        {
             let failures = TITAN_CONSECUTIVE_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
             if should_report_unhealthy(failures) {
                 return HealthStatus::Unhealthy(daemon_log_failure_reason(&combined));
@@ -858,3 +907,7 @@ mod bug3_daemon_error_tests {
 #[cfg(test)]
 #[path = "titan_layout_tests.rs"]
 mod titan_layout_tests;
+
+#[cfg(test)]
+#[path = "titan_recency_tests.rs"]
+mod titan_recency_tests;
