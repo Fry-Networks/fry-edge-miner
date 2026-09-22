@@ -159,10 +159,36 @@ async fn probe_health_once() -> HealthStatus {
     }
 }
 
-/// Minimum SPENDABLE balance (microAlgos) fryDVPN needs to register on-chain:
-/// the registry app call plus its fee. 0.1 ALGO is comfortably above the
-/// 1000 microAlgo minimum fee and any box/opt-in cost.
-pub(crate) const REGISTRATION_MIN_MICROALGOS: u64 = 100_000;
+/// The payment frynode makes to fund this node's on-chain registry box —
+/// `defaultMBR` in the node's `registry` package. It is a real transfer out of
+/// the device wallet, not a fee, and leaving it out of the requirement is what
+/// let an underfunded wallet pass the pre-check and then overspend on chain.
+pub(crate) const REGISTRY_BOX_MBR_MICROALGOS: u64 = 200_000;
+
+/// Algorand's network minimum fee.
+pub(crate) const ALGORAND_MIN_FEE_MICROALGOS: u64 = 1_000;
+
+/// The register group is exactly two transactions — the box MBR payment and
+/// the `register_node` app call — and neither overrides `FlatFee`, so both pay
+/// the network minimum.
+pub(crate) const REGISTRATION_GROUP_TXNS: u64 = 2;
+
+/// Documented headroom over the measured cost, so a min-fee change or a
+/// slightly larger box does not strand a wallet that funded exactly what the
+/// card asked for.
+pub(crate) const REGISTRATION_MARGIN_MICROALGOS: u64 = 10_000;
+
+/// Minimum SPENDABLE balance (microAlgos) fryDVPN needs to register on-chain.
+///
+/// Derived from the group frynode actually submits rather than guessed: the
+/// previous value (100_000) counted the fees and forgot the box payment, so it
+/// was less than half the true cost. This is the SPENDABLE requirement — an
+/// account must additionally retain its own base minimum balance, which is why
+/// the card quotes `total_needed` (see `registration_funding_message`) and not
+/// this number.
+pub(crate) const REGISTRATION_MIN_MICROALGOS: u64 = REGISTRY_BOX_MBR_MICROALGOS
+    + REGISTRATION_GROUP_TXNS * ALGORAND_MIN_FEE_MICROALGOS
+    + REGISTRATION_MARGIN_MICROALGOS;
 
 /// PURE: what an account can actually spend — algod reports the TOTAL `amount`
 /// and separately the locked `min-balance`. Saturating, so an account below its
