@@ -230,6 +230,17 @@ fn main() {
             // after init_logging, which is what creates the sink.
             logging::debug_sink::set_enabled(config_store.get().debug_logging_enabled);
 
+            // B15: children INHERIT the process error mode, so this is what
+            // turns a partner's loader failure ("titan-edge.exe - Bad Image …
+            // goworkerd.dll … Error status 0xc0e90002") into an exit code FEM
+            // can put on the card, instead of a system-modal dialog sitting on
+            // the user's desktop with nothing to dismiss it. The per-thread
+            // guard in `spawn_bounded` only ever covered FEM's own
+            // CreateProcess call. After init_logging so the call is logged,
+            // and before anything can start a partner.
+            supervisor::process::suppress_process_hard_errors();
+            tracing::info!("Loader hard-error dialogs suppressed for FEM and its children");
+
             // BUG 10/RC4: finish a half-done registration FIRST. The two hooks
             // below both match on (miner_key, install_id) and return early
             // without an install_id, so on a half-registered device they can
@@ -1126,8 +1137,28 @@ fn main() {
             commands::updates::check_updates,
             commands::updates::install_update,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running FEM")
+        .run(|app, event| {
+            // B4/D-03: the job object is the GUARANTEE — it kills every partner
+            // whenever FEM's last handle to it goes away, including under
+            // TerminateProcess. This is the courtesy path that makes an abrupt
+            // kill happen only when FEM itself dies abnormally: on a normal
+            // quit the partners get their own graceful stop first, so a
+            // Subspace farmer is not hard-killed mid-plot and a browser window
+            // is not yanked out from under the user.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                use tauri::Manager;
+                if let Some(state) = app.try_state::<AppState>() {
+                    match state.supervisor.lock() {
+                        Ok(mut sup) => sup.shutdown(),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Supervisor lock poisoned at exit — partners will be stopped by the job object instead");
+                        }
+                    }
+                }
+            }
+        })
 }
 
 /// Commit 3: proof that the registration reconciler is actually WIRED to the

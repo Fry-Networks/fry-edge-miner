@@ -17,6 +17,186 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     cmd
 }
 
+/// B4/B20: the kill-on-close Job Object every FEM-spawned partner joins.
+///
+/// Rust `Drop` was the ONLY partner-termination path — `ManagedProcess::drop`
+/// and `Supervisor::drop`. Drop cannot run under `TerminateProcess` (Task
+/// Manager's "End task", a crash, the updater killing FEM), and Tauri v2's exit
+/// path calls `std::process::exit`, where managed-state Drop is not guaranteed
+/// either. So any abnormal FEM death orphaned every partner it had spawned —
+/// which is what leaves frynode.exe holding :8088 and makes the next launch
+/// look like a port conflict.
+///
+/// A job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is the only Windows
+/// mechanism that survives that: the handle is deliberately never closed, so
+/// the LAST handle to it goes away exactly when FEM's process object does,
+/// however FEM died, and the kernel terminates the job. It also carries
+/// `JOB_OBJECT_LIMIT_PRIORITY_CLASS` + `BELOW_NORMAL_PRIORITY_CLASS`, which is
+/// B20's "partner processes run at BELOW_NORMAL" as ONE lever rather than a
+/// second mechanism — and unlike a per-child `SetPriorityClass` it applies to
+/// the partner's own children too, which is where Olostep's CPU actually goes.
+#[cfg(windows)]
+mod partner_job {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+
+    use tracing::{info, warn};
+
+    // Same raw-FFI idiom the crate already uses for SetThreadErrorMode
+    // (supervisor/process.rs) — no new dependency.
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateJobObjectW(attributes: *const std::ffi::c_void, name: *const u16) -> isize;
+        fn SetInformationJobObject(
+            job: isize,
+            info_class: i32,
+            info: *const std::ffi::c_void,
+            info_len: u32,
+        ) -> i32;
+        fn AssignProcessToJobObject(job: isize, process: isize) -> i32;
+    }
+
+    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: i32 = 9;
+    const JOB_OBJECT_LIMIT_PRIORITY_CLASS: u32 = 0x0000_0020;
+    const JOB_OBJECT_LIMIT_BREAKAWAY_OK: u32 = 0x0000_0800;
+    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+    const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct IoCounters {
+        read_operation_count: u64,
+        write_operation_count: u64,
+        other_operation_count: u64,
+        read_transfer_count: u64,
+        write_transfer_count: u64,
+        other_transfer_count: u64,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct BasicLimitInformation {
+        per_process_user_time_limit: i64,
+        per_job_user_time_limit: i64,
+        limit_flags: u32,
+        minimum_working_set_size: usize,
+        maximum_working_set_size: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct ExtendedLimitInformation {
+        basic_limit_information: BasicLimitInformation,
+        io_info: IoCounters,
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory_used: usize,
+        peak_job_memory_used: usize,
+    }
+
+    /// The limits FEM asks the kernel for. Pure, so the flag set is testable
+    /// without creating a real job — B20's Done-when is "verified per process",
+    /// and this is the single place the priority class is decided.
+    pub(super) fn partner_limit_flags() -> u32 {
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            | JOB_OBJECT_LIMIT_BREAKAWAY_OK
+            | JOB_OBJECT_LIMIT_PRIORITY_CLASS
+    }
+
+    pub(super) fn partner_priority_class() -> u32 {
+        BELOW_NORMAL_PRIORITY_CLASS
+    }
+
+    /// The job handle, created once and NEVER closed. Closing it is what kills
+    /// the partners, and the only close that should ever happen is the
+    /// process-teardown one.
+    fn job() -> Option<isize> {
+        static JOB: OnceLock<Option<isize>> = OnceLock::new();
+        *JOB.get_or_init(|| {
+            // SAFETY: plain Win32 calls. `CreateJobObjectW` with null
+            // attributes and a null name creates an unnamed job owned by this
+            // process; `SetInformationJobObject` is handed a correctly sized
+            // `#[repr(C)]` struct.
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if handle == 0 {
+                warn!("Could not create the partner job object — partners will not be killed on an abnormal FEM exit");
+                return None;
+            }
+            let info = ExtendedLimitInformation {
+                basic_limit_information: BasicLimitInformation {
+                    limit_flags: partner_limit_flags(),
+                    priority_class: partner_priority_class(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let ok = unsafe {
+                SetInformationJobObject(
+                    handle,
+                    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+                    &info as *const _ as *const std::ffi::c_void,
+                    std::mem::size_of::<ExtendedLimitInformation>() as u32,
+                )
+            };
+            if ok == 0 {
+                warn!("Could not set limits on the partner job object — continuing without them");
+                return None;
+            }
+            info!(
+                limit_flags = partner_limit_flags(),
+                priority_class = partner_priority_class(),
+                "Partner job object created (kill-on-close, below-normal priority)"
+            );
+            Some(handle)
+        })
+    }
+
+    pub(super) fn adopt(child: &std::process::Child) {
+        let Some(job) = job() else { return };
+        // SAFETY: `as_raw_handle` yields a live process handle owned by `child`.
+        let ok = unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as isize) };
+        if ok == 0 {
+            // Never fatal: a partner that could not join the job still runs,
+            // it just is not covered by kill-on-close.
+            warn!(
+                pid = child.id(),
+                "Could not assign a partner to the job object — it will not be killed on an abnormal FEM exit"
+            );
+        }
+    }
+}
+
+/// B4: put a freshly spawned partner into FEM's kill-on-close job object, so no
+/// abnormal FEM exit can leave it running, and B20: give it BELOW_NORMAL
+/// priority through the same job. Best-effort — a failure must never stop an
+/// integration starting.
+pub fn adopt_into_partner_job(child: &std::process::Child) {
+    #[cfg(windows)]
+    partner_job::adopt(child);
+    #[cfg(not(windows))]
+    let _ = child;
+}
+
+/// B20: the PowerShell that lowers every process of `image` to BELOW_NORMAL.
+///
+/// A spawn-site priority cannot reach Olostep in the common case: FEM stages it
+/// to autostart, so FEM usually ADOPTS an instance Windows started rather than
+/// spawning one, and it cannot reach the Chromium renderer/GPU/utility children
+/// where the CPU actually goes. Lowering priority on same-user processes needs
+/// no elevation, which B20's Done-when ("no popups, no elevation") requires.
+/// Pure so the script is testable with no disk and no Windows.
+pub fn below_normal_script(image: &str) -> String {
+    format!(
+        "Get-Process {image} -ErrorAction SilentlyContinue | \
+         Where-Object {{ $_.PriorityClass -ne 'BelowNormal' }} | \
+         ForEach-Object {{ try {{ $_.PriorityClass = 'BelowNormal' }} catch {{}} }}"
+    )
+}
+
 /// Default deadline for a short-lived CLI probe (`docker compose ps`,
 /// `tasklist`, `netsh show`, PowerShell one-liners).
 pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -39,6 +219,13 @@ pub const UAC_ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// slow uplink can run many minutes, and a false timeout here fails a real
 /// install — the point is only that it cannot hang forever.
 pub const LONG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
+
+/// B4/B20: the job object's own guarantees, and the spawn sites that rely on
+/// them. Own file so the source-scan machinery stays out of the way of
+/// platform.rs's behavioural tests.
+#[cfg(test)]
+#[path = "partner_job_tests.rs"]
+mod partner_job_tests;
 
 /// Poll `is_done` (analogous to `Child::try_wait().map(|o| o.is_some())`)
 /// until it reports true, or `budget` elapses — whichever comes first.

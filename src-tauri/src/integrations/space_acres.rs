@@ -809,6 +809,13 @@ impl Integration for SpaceAcresIntegration {
         let child = cmd
             .spawn()
             .map_err(|e| anyhow::anyhow!("Failed to start SpaceAcres: {}", e))?;
+        // B4 (D-03): SpaceAcres joins the kill-on-close job like every other
+        // partner. The trade-off is deliberate and documented: an abrupt kill
+        // can interrupt a plot. FEM's normal quit stops it gracefully first
+        // (main.rs's ExitRequested handler), so the kernel kill only happens
+        // when FEM itself died abnormally — which is precisely the case that
+        // was leaving orphans behind before.
+        crate::supervisor::platform::adopt_into_partner_job(&child);
 
         // BUG 3: track the child so is_running()/stop() can target it
         // directly instead of only an untargeted image-name scan.

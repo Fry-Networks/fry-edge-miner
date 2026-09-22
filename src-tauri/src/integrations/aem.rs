@@ -130,17 +130,27 @@ impl AemIntegration {
     }
 
     /// Summed WorkingSet + CPU-seconds of all OlostepBrowser processes.
+    ///
+    /// B20: the same tick also drops every OlostepBrowser process to
+    /// BELOW_NORMAL. The job object covers what FEM SPAWNS, but FEM's own
+    /// staged config (`"auto-start-enabled": true`) makes Windows start Olostep
+    /// at logon, so FEM usually ADOPTS an instance it never spawned — and the
+    /// 40% CPU the user reported lives in the Chromium renderer/GPU/utility
+    /// children, which FEM holds no handle to either. Folded into the EXISTING
+    /// per-tick PowerShell so the tick starts no extra process, and unelevated,
+    /// which is why B20's "no popups, no elevation" soak still holds:
+    /// lowering priority on same-user processes needs no admin.
     fn resource_sample() -> Option<crate::supervisor::resource_guard::Sample> {
         #[cfg(target_os = "windows")]
         {
+            let script = format!(
+                "{}; $p = Get-Process OlostepBrowser -ErrorAction SilentlyContinue; \
+                 if ($p) {{ $ws = ($p | Measure-Object WorkingSet64 -Sum).Sum; \
+                 $cpu = ($p | Measure-Object CPU -Sum).Sum; Write-Output \"$ws|$cpu\" }}",
+                crate::supervisor::platform::below_normal_script("OlostepBrowser")
+            );
             let out = crate::supervisor::platform::command("powershell")
-                .args([
-                    "-NoProfile",
-                    "-Command",
-                    "$p = Get-Process OlostepBrowser -ErrorAction SilentlyContinue; \
-                     if ($p) { $ws = ($p | Measure-Object WorkingSet64 -Sum).Sum; \
-                     $cpu = ($p | Measure-Object CPU -Sum).Sum; Write-Output \"$ws|$cpu\" }",
-                ])
+                .args(["-NoProfile", "-Command", &script])
                 .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
                 .ok()?;
             let text = String::from_utf8_lossy(&out.stdout);
@@ -382,6 +392,14 @@ impl Integration for AemIntegration {
         }
         info!(binary = ?binary, "Starting OlostepBrowser");
         let child = crate::supervisor::platform::command(&binary).spawn()?;
+        // B4 (D-03): every partner FEM spawns joins the kill-on-close job,
+        // Olostep included, so an abnormal FEM exit cannot leave a browser
+        // running with no owner. FEM's normal quit stops partners gracefully
+        // first (main.rs's ExitRequested handler), so the job's abrupt kill
+        // only happens when FEM itself died abnormally — the orphan case.
+        // B20: the same job carries BELOW_NORMAL, which reaches Olostep's
+        // Chromium renderer/GPU/utility children as well as the parent.
+        crate::supervisor::platform::adopt_into_partner_job(&child);
         // BUG 10: track the child so is_running()/stop() can target it
         // directly instead of only an untargeted image-name scan.
         if let Ok(mut guard) = self.child.lock() {

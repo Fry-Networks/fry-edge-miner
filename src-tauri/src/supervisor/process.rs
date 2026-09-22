@@ -18,14 +18,52 @@ use tracing::{info, warn};
 /// `TOGGLE_STEP_TIMEOUT` so the toggle's own bound stays meaningful.
 pub const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// B15: the error-mode bits FEM asks Windows for, for itself AND for every
+/// child that does not opt out.
+///
+/// `SEM_FAILCRITICALERRORS` (0x0001) stops the loader's "Bad Image" /
+/// "cannot find file" hard-error box; `SEM_NOOPENFILEERRORBOX` (0x8000) stops
+/// the OpenFile one. A partner whose loader fails must come back as an exit
+/// code FEM can show on the card, never as a system-modal dialog on the user's
+/// desktop that nothing in FEM can dismiss.
+///
+/// A plain const so the intent is testable on any platform; whether Windows
+/// then genuinely converts a code-integrity refusal into an exit code is a VM
+/// question, not a unit-test one.
+pub const HARD_ERROR_SUPPRESSION_MODE: u32 = 0x0001 | 0x8000;
+
 #[cfg(windows)]
 mod loader_error_mode {
     #[link(name = "kernel32")]
     extern "system" {
         fn SetThreadErrorMode(new_mode: u32, old_mode: *mut u32) -> i32;
+        fn SetErrorMode(new_mode: u32) -> u32;
     }
     const SEM_FAILCRITICALERRORS: u32 = 0x0001;
     const SEM_NOOPENFILEERRORBOX: u32 = 0x8000;
+
+    /// B15: set the PROCESS error mode, which children INHERIT.
+    ///
+    /// `suppress()` below is thread-scoped, so it only covers FEM's own
+    /// `CreateProcess` call. The dialog B15 reports —
+    /// "titan-edge.exe - Bad Image ... goworkerd.dll ... Error status
+    /// 0xc0e90002" — is raised by the CHILD's loader resolving its own static
+    /// imports, long after CreateProcess returned success to FEM. A
+    /// thread-local override in FEM cannot reach that. The process error mode
+    /// can, because the child inherits it unless its creator passes
+    /// CREATE_DEFAULT_ERROR_MODE.
+    ///
+    /// Idempotent and called once at startup.
+    pub fn suppress_process_hard_errors() {
+        static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        ONCE.get_or_init(|| {
+            // SAFETY: plain Win32 call; affects this process and anything it
+            // spawns that does not opt out.
+            unsafe {
+                SetErrorMode(super::HARD_ERROR_SUPPRESSION_MODE);
+            }
+        });
+    }
 
     /// RAII guard: while alive, the Windows loader reports a bad image to the
     /// caller as an error (`ERROR_BAD_EXE_FORMAT`) instead of raising a modal
@@ -57,7 +95,21 @@ mod loader_error_mode {
     pub fn suppress() -> Suppressed {
         Suppressed
     }
+    pub fn suppress_process_hard_errors() {}
 }
+
+/// B15: suppress the Windows loader's modal hard-error boxes for FEM AND for
+/// everything it spawns. Called once from `main`'s setup, before any partner
+/// can be started — a loader failure in a partner must come back as an exit
+/// code FEM can show on the card, not as a dialog on the user's desktop that
+/// nothing dismisses.
+pub fn suppress_process_hard_errors() {
+    loader_error_mode::suppress_process_hard_errors();
+}
+
+#[cfg(test)]
+#[path = "error_mode_tests.rs"]
+mod error_mode_tests;
 
 /// Run `create` (the actual `Command::spawn`) on its own thread with the
 /// loader's modal error boxes suppressed, and wait at most `bound` for it.
@@ -226,6 +278,12 @@ impl ManagedProcess {
             }
             cmd.spawn()
         })?;
+
+        // B4: the single funnel every supervisor-managed partner comes
+        // through — frynode, titan, mysterium and iagon. Joining the job here
+        // is what makes "TerminateProcess on FEM leaves zero partner processes"
+        // true, because Rust's Drop cannot run on an abnormal exit.
+        super::platform::adopt_into_partner_job(&child);
 
         Ok(Self {
             child,
