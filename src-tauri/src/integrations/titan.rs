@@ -47,7 +47,8 @@ pub(crate) fn vc_redist_missing() -> bool {
 /// redistributable install (`/quiet` still commonly takes well over 20s),
 /// and that budget also has to absorb however long the user takes to notice
 /// and click the UAC prompt. Bounded but materially longer: 10 minutes.
-const VC_REDIST_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+pub(crate) const VC_REDIST_INSTALL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(600);
 
 /// Outcome of one elevated VC++ redist install attempt. A dedicated enum
 /// rather than folding everything into `Result` because `StillInstalling`
@@ -142,6 +143,17 @@ pub(crate) async fn install_vc_redist_elevated() -> Result<VcRedistInstallOutcom
         }
     }
 }
+
+/// Unpacking a partner release is an INSTALL step, not a probe.
+///
+/// This used to be `PROBE_TIMEOUT` — the repo's own 20 s deadline for
+/// short-lived CLI queries, whose doc comment says as much. On a slow disk or
+/// a custom storage root on a second drive, `tar` was KILLED mid-extract and
+/// the `?` aborted install after extraction and before the archive cleanup,
+/// leaving exactly the reported layout: the extracted subdirectory and the
+/// archive still on disk, and no titan-edge.exe at the partner-dir level. The
+/// repo already recorded this same anti-pattern for the VC++ redist.
+const EXTRACT_TIMEOUT: std::time::Duration = crate::supervisor::platform::LONG_TIMEOUT;
 
 const DOWNLOAD_URL: &str = "https://github.com/Titannet-dao/titan-node/releases/download/v0.1.20/titan-edge_v0.1.20_246b9dd_widnows_amd64.tar.gz";
 const EXPECTED_SHA256: &str = "6f37eea5cfcd6f799cd629d6e02a5636fb5c92995f73f0791ec0ff473afb558c";
@@ -305,6 +317,21 @@ impl TitanIntegration {
         Self::partner_dir().join("goworkerd.dll")
     }
 
+    /// PURE: is the partner directory a COMPLETE titan install?
+    ///
+    /// The entry guard used to check only titan-edge.exe, so a half-install —
+    /// the exe moved out of the extracted subdirectory but goworkerd.dll left
+    /// behind — reported "already present", returned Ok(()) and was never
+    /// repaired. titan-edge.exe cannot run without that DLL.
+    pub(crate) fn install_is_complete(partner_dir: &std::path::Path) -> bool {
+        let exe = if cfg!(target_os = "windows") {
+            partner_dir.join("titan-edge.exe")
+        } else {
+            partner_dir.join("titan-edge")
+        };
+        exe.exists() && partner_dir.join("goworkerd.dll").exists()
+    }
+
     fn compute_sha256(path: &PathBuf) -> Result<String> {
         use sha2::{Digest, Sha256};
         use std::io::Read;
@@ -335,17 +362,30 @@ impl Integration for TitanIntegration {
 
     async fn install(&self) -> Result<()> {
         let binary = Self::binary_path();
-        if binary.exists() {
-            info!(path = ?binary, "titan-edge binary already present");
+        let partner_dir = Self::partner_dir();
+        if Self::install_is_complete(&partner_dir) {
+            info!(path = ?binary, "titan-edge is installed and complete");
             return Ok(());
+        }
+        if binary.exists() {
+            // Exe present, DLL missing: a half-install that used to report
+            // "already present" forever. Clear the exe so the reinstall below
+            // is a full one rather than a no-op.
+            warn!(path = ?binary, "titan-edge is present but goworkerd.dll is missing — reinstalling");
+            let _ = tokio::fs::remove_file(&binary).await;
         }
 
         info!("Installing Titan Network from GitHub release");
 
-        let partner_dir = Self::partner_dir();
         tokio::fs::create_dir_all(&partner_dir).await?;
 
         let archive_path = partner_dir.join("titan-edge.tar.gz");
+        let extracted_dir = partner_dir.join("titan-edge_v0.1.20_246b9dd_widnows_amd64");
+
+        // Clear the residue a previously-killed extraction left behind, so a
+        // retry starts from a known state instead of unpacking over it.
+        let _ = tokio::fs::remove_file(&archive_path).await;
+        let _ = tokio::fs::remove_dir_all(&extracted_dir).await;
 
         // Download the archive
         download_file_with_options(DOWNLOAD_URL, &archive_path, USER_AGENT, None).await?;
@@ -371,7 +411,7 @@ impl Integration for TitanIntegration {
                 "-C",
                 &partner_dir.to_string_lossy(),
             ])
-            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
+            .output_bounded(EXTRACT_TIMEOUT)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -382,7 +422,6 @@ impl Integration for TitanIntegration {
 
         // The archive contains titan-edge_v0.1.20_246b9dd_widnows_amd64/ with titan-edge.exe and goworkerd.dll
         // Move both files to the parent directory
-        let extracted_dir = partner_dir.join("titan-edge_v0.1.20_246b9dd_widnows_amd64");
         if extracted_dir.exists() {
             let exe_in_subdir = extracted_dir.join("titan-edge.exe");
             let dll_in_subdir = extracted_dir.join("goworkerd.dll");
@@ -397,8 +436,11 @@ impl Integration for TitanIntegration {
                 info!(path = ?Self::dll_path(), "Moved goworkerd.dll to partner dir");
             }
 
-            // Clean up the extracted subdirectory
-            let _ = tokio::fs::remove_dir(&extracted_dir).await;
+            // Clean up the extracted subdirectory. Recursive: the
+            // non-recursive form fails the moment the archive carries any
+            // third file, and the leftover directory is what users
+            // photographed.
+            let _ = tokio::fs::remove_dir_all(&extracted_dir).await;
         }
 
         // Clean up archive
@@ -431,6 +473,17 @@ impl Integration for TitanIntegration {
                     warn!(error = %e, "VC++ redist install declined or failed — titan-edge may fail to start until it is installed manually");
                 }
             }
+        }
+
+        // Success used to be logged and returned with zero verification, so
+        // an install that moved nothing still reported Ok(()) and the failure
+        // only surfaced one step later, at start(), as "binary not found".
+        if !Self::install_is_complete(&partner_dir) {
+            anyhow::bail!(
+                "Titan install finished but {} / {} are missing",
+                binary.display(),
+                Self::dll_path().display()
+            );
         }
 
         info!(binary = ?binary, "Titan Network installed successfully");
@@ -801,3 +854,7 @@ mod bug3_daemon_error_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "titan_layout_tests.rs"]
+mod titan_layout_tests;

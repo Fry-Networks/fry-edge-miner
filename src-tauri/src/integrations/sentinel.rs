@@ -6,10 +6,17 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 fn deploy_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .expect("no local data dir")
-        .join("FryEdgeMiner")
-        .join("sentinel")
+    // B13: this used to resolve `dirs::data_local_dir()` directly and never
+    // consult the storage root, so a user who moved storage left this
+    // deployment stranded at the old location. An existing legacy directory is
+    // grandfathered, so nothing live moves and no migration is needed.
+    super::download::resolve_deploy_dir(
+        dirs::data_local_dir()
+            .expect("no local data dir")
+            .join("FryEdgeMiner")
+            .join("sentinel"),
+        super::download::partners_base_dir().join("sentinel"),
+    )
 }
 
 fn compose_file() -> PathBuf {

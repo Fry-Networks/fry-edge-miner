@@ -80,6 +80,22 @@ pub fn partners_base_dir() -> PathBuf {
         .unwrap_or_else(default_partners_base_dir)
 }
 
+/// PURE: pick between an integration's legacy deploy directory and the one
+/// under the configured storage root.
+///
+/// Three partner deploy roots resolved `dirs::data_local_dir()` themselves and
+/// never consulted the storage root at all, so moving storage left them behind
+/// — which is half of "Titan broken on a custom storage root". Grandfathering
+/// an existing legacy directory means no live deployment moves and no
+/// migration is needed; only a fresh install lands under the configured root.
+pub fn resolve_deploy_dir(legacy: PathBuf, rooted: PathBuf) -> PathBuf {
+    if legacy.exists() && !rooted.exists() {
+        legacy
+    } else {
+        rooted
+    }
+}
+
 /// Default User-Agent for all partner downloads.
 pub const DEFAULT_USER_AGENT: &str = concat!("FryEdgeMiner/", env!("CARGO_PKG_VERSION"));
 
@@ -288,5 +304,40 @@ mod bug1_storage_root_tests {
             PathBuf::from(r"D:\aem"),
             "force-clean would target the drive root"
         );
+    }
+
+    /// B13: three partner deploy roots never consulted the storage root, so a
+    /// user who moved storage left them stranded. Grandfathering an existing
+    /// legacy directory is what makes the fix migration-free.
+    #[test]
+    fn an_existing_legacy_deploy_dir_is_grandfathered_so_no_live_deployment_moves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("legacy").join("sentinel");
+        let rooted = tmp.path().join("rooted").join("sentinel");
+        std::fs::create_dir_all(&legacy).unwrap();
+
+        assert_eq!(resolve_deploy_dir(legacy.clone(), rooted), legacy);
+    }
+
+    #[test]
+    fn a_fresh_deploy_lands_under_the_configured_storage_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("legacy").join("sentinel");
+        let rooted = tmp.path().join("rooted").join("sentinel");
+
+        assert_eq!(resolve_deploy_dir(legacy, rooted.clone()), rooted);
+    }
+
+    /// Once the rooted directory exists it wins, even if the legacy one is
+    /// still lying around — otherwise a deployment would flip back and forth.
+    #[test]
+    fn a_deployment_already_under_the_root_is_not_dragged_back_to_the_legacy_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("legacy").join("sentinel");
+        let rooted = tmp.path().join("rooted").join("sentinel");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&rooted).unwrap();
+
+        assert_eq!(resolve_deploy_dir(legacy, rooted.clone()), rooted);
     }
 }

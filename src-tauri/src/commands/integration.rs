@@ -20,13 +20,28 @@ const PAWNS_CONSENT_REQUIRED: &str = "PAWNS_CONSENT_REQUIRED";
 /// guard), so this is deliberately a large ceiling, not a tight one.
 const TOGGLE_STEP_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// An INSTALL is not a step of that shape. It downloads a partner release over
+/// whatever link the user has, extracts it, and may run an elevated redist
+/// installer with its own 600 s budget — while the HTTP client it downloads
+/// through allows 300 s per request. Bounding all of that at 60 s meant a slow
+/// link or a slow disk had the install cancelled mid-flight and it could never
+/// complete FROM THE CARD, even though the unbounded boot-time path installed
+/// the very same partner successfully.
+const INSTALL_STEP_TIMEOUT: Duration = crate::supervisor::platform::LONG_TIMEOUT;
+
 /// Turn a `tokio::time::timeout` miss into the same shape of error string the
 /// surrounding code already uses for a normal `Err`, so a stall and a real
 /// failure look identical to the caller and to `last_integration_error`.
 fn timeout_message(step: &str, id: &str) -> String {
+    timeout_message_with(step, id, TOGGLE_STEP_TIMEOUT)
+}
+
+/// The same message against an explicit bound, so a step with its own deadline
+/// reports the deadline it was actually held to.
+fn timeout_message_with(step: &str, id: &str, bound: Duration) -> String {
     format!(
         "{id}: {step} did not finish within {}s and was aborted rather than left to hang. Try again.",
-        TOGGLE_STEP_TIMEOUT.as_secs()
+        bound.as_secs()
     )
 }
 
@@ -224,7 +239,7 @@ pub async fn toggle_integration(
         }
         // Auto-install integrations that have not been deployed yet (e.g., Diiisco).
         if integration.installed_version().is_none() {
-            match tokio::time::timeout(TOGGLE_STEP_TIMEOUT, integration.install()).await {
+            match tokio::time::timeout(INSTALL_STEP_TIMEOUT, integration.install()).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
                     let err_msg = e.to_string();
@@ -234,7 +249,7 @@ pub async fn toggle_integration(
                     return Err(err_msg);
                 }
                 Err(_) => {
-                    let err_msg = timeout_message("install", &id);
+                    let err_msg = timeout_message_with("install", &id, INSTALL_STEP_TIMEOUT);
                     if let Ok(mut errs) = state.last_integration_error.write() {
                         errs.insert(id.clone(), Some(err_msg.clone()));
                     }
@@ -380,6 +395,49 @@ mod bug2_timeout_tests {
         assert!(
             msg.contains(&TOGGLE_STEP_TIMEOUT.as_secs().to_string()),
             "{msg}"
+        );
+    }
+
+    /// B13: the outer bound on an install was ten times SMALLER than budgets
+    /// the install itself contains, so a slow install was cancelled mid-flight
+    /// and could never complete from the card.
+    #[test]
+    fn the_install_step_bound_exceeds_every_budget_install_itself_contains() {
+        assert!(
+            INSTALL_STEP_TIMEOUT > TOGGLE_STEP_TIMEOUT,
+            "an install needs more room than a generic toggle step"
+        );
+        assert!(
+            INSTALL_STEP_TIMEOUT > crate::integrations::titan::VC_REDIST_INSTALL_TIMEOUT,
+            "the outer bound must outlast the elevated redist install it wraps"
+        );
+        assert!(
+            INSTALL_STEP_TIMEOUT >= Duration::from_secs(300),
+            "the outer bound must outlast the HTTP client timeout downloads use"
+        );
+    }
+
+    /// A timeout message that names the wrong number tells the user to wait
+    /// for a deadline that was never applied.
+    #[test]
+    fn the_install_timeout_message_names_the_install_bound_not_the_toggle_bound() {
+        let msg = timeout_message_with("install", "titan", INSTALL_STEP_TIMEOUT);
+        assert!(
+            msg.contains(&INSTALL_STEP_TIMEOUT.as_secs().to_string()),
+            "{msg}"
+        );
+        assert!(
+            !msg.contains(&format!("within {}s", TOGGLE_STEP_TIMEOUT.as_secs())),
+            "{msg}"
+        );
+    }
+
+    /// The delegating wrapper must keep producing exactly what it did before.
+    #[test]
+    fn timeout_message_still_reports_the_toggle_bound() {
+        assert_eq!(
+            timeout_message("start", "pawns"),
+            timeout_message_with("start", "pawns", TOGGLE_STEP_TIMEOUT)
         );
     }
 

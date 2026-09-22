@@ -111,10 +111,17 @@ pub struct DiiiscoIntegration {
 }
 
 fn deploy_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .expect("no local data dir")
-        .join("FryEdgeMiner")
-        .join("diiisco")
+    // B13: this used to resolve `dirs::data_local_dir()` directly and never
+    // consult the storage root, so a user who moved storage left this
+    // deployment stranded at the old location. An existing legacy directory is
+    // grandfathered, so nothing live moves and no migration is needed.
+    super::download::resolve_deploy_dir(
+        dirs::data_local_dir()
+            .expect("no local data dir")
+            .join("FryEdgeMiner")
+            .join("diiisco"),
+        super::download::partners_base_dir().join("diiisco"),
+    )
 }
 
 /// Fetch credentials with exponential-backoff retry on network errors.
@@ -204,10 +211,9 @@ impl Integration for DiiiscoIntegration {
         // Ensure Docker is available, auto-installing if needed
         super::docker_manager::ensure_docker().await?;
 
-        let deploy_dir = dirs::data_local_dir()
-            .ok_or_else(|| anyhow::anyhow!("Cannot resolve local app data dir"))?
-            .join("FryEdgeMiner")
-            .join("diiisco");
+        // Was an inline duplicate of `deploy_dir()`, which meant the two could
+        // disagree about where Diiisco lives.
+        let deploy_dir = deploy_dir();
 
         // Write Docker files from embedded content
         let node_dir = deploy_dir.join("diiisco-node");
