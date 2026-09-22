@@ -8,8 +8,17 @@ import { stakeSubtitle } from './rewardReadiness'
 // stake line but was never applied to Rewards.tsx.
 
 describe('stakeSubtitle', () => {
-  it('documents the pre-fix template output verbatim', () => {
-    expect(`${'No stake'} stake active`).toBe('No stake stake active')
+  // Vacuity audit (runlog/vacuity-audit.md): the previous version of this
+  // case compared two compile-time string literals to each other — a
+  // tautology that referenced no production symbol and would pass with
+  // src/ deleted entirely. Fixed by tying the recorded pre-fix defect to
+  // the function actually under test via `.not.toBe()`, so this case goes
+  // red if stakeSubtitle ever regresses to the naive template.
+  it('reproduces the pre-fix duplication the old inline template produced, and stakeSubtitle avoids it', () => {
+    const preFixTemplate = (l: string) => `${l} stake active`
+    expect(preFixTemplate('No stake')).toBe('No stake stake active') // the reported defect, from the naive template
+    expect(stakeSubtitle('No stake')).not.toBe(preFixTemplate('No stake'))
+    expect(stakeSubtitle('No stake')).toBe('No stake active')
   })
 
   it('does not duplicate "stake" when the label already contains it', () => {
