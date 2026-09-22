@@ -1,6 +1,7 @@
 // These match the Rust types from src-tauri/src/integrations/mod.rs and commands/
 
 import type { IntegrationTier } from './integrationMeta'
+import { reasonAwaitsUserSetup } from './setupRequired'
 
 export interface IntegrationStatus {
   id: string
@@ -176,10 +177,12 @@ export function unhealthyReason(health: HealthStatus): string | null {
 // Some partners report Unhealthy for a state that is really "waiting on a
 // setup step only you can do" — Storj cannot come online until the operator
 // creates a node auth token and completes node identity, which can take
-// hours. Presenting that as a red failure reads as a crash the user should
-// report; it is a to-do item. Matches the reason text storj.rs emits.
+// hours; Iagon and Sentinel have their own such steps. Presenting that as a
+// red failure reads as a crash the user should report; it is a to-do item.
+// Delegates to setupRequired.ts (B17 D2), which also mirrors the Rust
+// supervisor's marker list so the two predicates cannot drift apart again.
 export function awaitsUserSetup(health: HealthStatus): boolean {
-  return !!unhealthyReason(health)?.startsWith('Awaiting Storj setup')
+  return reasonAwaitsUserSetup(unhealthyReason(health))
 }
 
 // The Sentinel node's own `sent1...` funding address, extracted from the

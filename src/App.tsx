@@ -12,6 +12,7 @@ import { useIntegrations } from './hooks/useIntegrations'
 import { sdkActiveLine, sdkActiveCount } from './lib/tierSplit'
 import { countActive } from './lib/rewardModel'
 import { REQUIRED_INTEGRATIONS } from './lib/integrationMeta'
+import { hasFailingIntegration } from './lib/setupRequired'
 import { deriveConnectivity } from './lib/connectivity'
 import { useDevice } from './hooks/useDevice'
 import { makeName } from './lib/names'
@@ -158,7 +159,9 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
   // BUG 13: enabled+healthy ("active"), not merely enabled — see
   // `sdkActiveCount` for why this must not be `sdkCounts(...).activeCount`.
   const sdkLine = sdkActiveLine(sdkActiveCount(integrations))
-  const hasUnhealthy = integrations.some((i) => i.enabled && !i.healthy)
+  // B17 D4: a setup-blocked integration (waiting on the user, not a fault)
+  // is not a fleet failure — see lib/setupRequired.ts.
+  const hasUnhealthy = hasFailingIntegration(integrations)
   // Badge reflects reachability of the Fry backend only. Docker state is a
   // local prerequisite surfaced via the TopBar Docker chip + per-card errors,
   // never via the connectivity badge (users read "Degraded" as "offline").
