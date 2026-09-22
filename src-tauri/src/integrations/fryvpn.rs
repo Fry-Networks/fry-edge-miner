@@ -1550,8 +1550,14 @@ mod b11_identity_dir_tests {
             adopt_identity(&from, &to).is_empty(),
             "an anchored identity already exists; adopting over it would replace a live account"
         );
-        assert_eq!(std::fs::read(to.join("account.txt")).unwrap(), b"ANCHORED");
-        assert_eq!(std::fs::read(from.join("account.txt")).unwrap(), b"OLD");
+        assert_eq!(
+            std::fs::read(to.join("account.txt")).unwrap(),
+            b"ANCHORED".to_vec()
+        );
+        assert_eq!(
+            std::fs::read(from.join("account.txt")).unwrap(),
+            b"OLD".to_vec()
+        );
     }
 
     #[test]
@@ -1575,6 +1581,9 @@ mod b11_identity_dir_tests {
         std::fs::write(dir.join("account.txt"), b"KEEP").unwrap();
 
         assert!(adopt_identity(&dir, &dir).is_empty());
-        assert_eq!(std::fs::read(dir.join("account.txt")).unwrap(), b"KEEP");
+        assert_eq!(
+            std::fs::read(dir.join("account.txt")).unwrap(),
+            b"KEEP".to_vec()
+        );
     }
 }
