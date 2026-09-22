@@ -12,10 +12,19 @@ import { test, expect, nav, assertInAppShell, readStatCard, readBreakdownRow, wr
  * exact FEMQA_VM / FEMQA_CDP_URL selection logic.
  *
  * Anchored to the production server payload captured for this run
- * (GET /versions/FEM?platform=windows): base_reward 59.52, reward_amount
- * 14.88, stake_tiers { unregistered: 0, none: 1, "24h": 1.5, "6mo": 3 },
- * and the backend formula estimated_daily = base_reward *
- * integration_multiplier * stake_multiplier
+ * (GET /versions/FEM?platform=windows): server base_reward 59.52,
+ * reward_amount 14.88, stake_tiers { unregistered: 0, none: 1, "24h": 1.5,
+ * "6mo": 3 }. IMPORTANT: what the UI shows as "Base reward" / "Full Day
+ * Est." is FEM's OWN RewardSummary.base_reward field, which
+ * commands/rewards.rs:172-173 sets to the server payload's `reward_amount`
+ * (14.88) when config is present — NOT the server payload's own
+ * differently-scoped `base_reward` field (59.52). Verified directly
+ * against T2/T3's landed rewards.rs (`let base_reward = if config.is_some()
+ * { reward_amount } else { ... }`) rather than assumed — the anchor below
+ * is 14.88 for exactly this reason, and the arithmetic in B22's own bug
+ * report (14.88 × 1.25 × 3.0 = 55.80, 14.88 × 1.40 × 3.0 = 62.50) only
+ * checks out with 14.88, never with 59.52. estimated_daily = (this)
+ * base_reward * integration_multiplier * stake_multiplier
  * (src-tauri/src/commands/rewards.rs:237, T2/T3-owned, not touched here).
  *
  * UNREGISTERED-DEVICE NOTE: same precondition gap as M4 — AppShell (and
@@ -102,19 +111,20 @@ test.describe('M5 — Rewards vs Dashboard numeric consistency (real backend)', 
       2
     )
 
-    // Anchor to the captured production payload, when it's the live value
-    // (a QA VM's actual server config may differ — record and only assert
-    // equality when it matches the anchor, otherwise record the observed
-    // triple instead of failing on an environment difference the Done-when
-    // doesn't require).
-    if (Math.abs((baseRewardNumeric as number) - 59.52) < 0.005) {
-      test.info().annotations.push({ type: 'note', description: 'base_reward matches the captured production anchor (59.52).' })
-    } else {
-      test.info().annotations.push({
-        type: 'note',
-        description: `base_reward observed as ${baseRewardNumeric}, not the captured anchor 59.52 — recorded, not failed (server config may legitimately differ for this run).`,
-      })
-    }
+    // Hard anchor to the captured production payload's reward_amount
+    // (14.88 — see the file header for why it's this field, not the
+    // server payload's own differently-scoped base_reward 59.52). This is
+    // a real requirement, not a soft note: per the lead's design (T1-owned
+    // guest side), the in-guest stub serves GET /versions/FEM with this
+    // EXACT verbatim payload and production is blackholed via a hosts
+    // entry, so there is no legitimate way for this run's QA VM to observe
+    // a different value. If it does, that is either a stub wiring problem
+    // or a real bug in how FEM reads reward_amount — either way it should
+    // fail loudly, not log a note.
+    expect(
+      baseRewardNumeric,
+      `Base reward (${baseRewardRow}) should equal the guest stub's reward_amount, 14.88 (evidence: ${evidencePath})`
+    ).toBeCloseTo(14.88, 2)
 
     // B22 D4 / arithmetic identity: estimated_daily = base_reward *
     // integration_multiplier * stake_multiplier, reconstructed from
