@@ -340,7 +340,8 @@ mod tests {
             .finish();
         tracing::subscriber::with_default(subscriber, || {
             tracing::info!(
-                command = r"C:\Users\georgep\AppData\Roaming\FryEdgeMiner\partners\fryvpn\frynode.exe",
+                command =
+                    r"C:\Users\georgep\AppData\Roaming\FryEdgeMiner\partners\fryvpn\frynode.exe",
                 "Spawning process"
             );
         });
@@ -359,5 +360,4 @@ mod tests {
             "anti-vacuum: the diagnostic itself must survive: {text:?}"
         );
     }
-
 }

@@ -134,7 +134,12 @@ fn kill_orphans_under(images: &[&str], roots: &[PathBuf], when: &str) {
             .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
         {
             Ok(o) if o.status.success() => info!(when, pid, "Killed orphaned partner process"),
-            Ok(o) => info!(when, pid, code = o.status.code(), "Orphaned partner process was already gone"),
+            Ok(o) => info!(
+                when,
+                pid,
+                code = o.status.code(),
+                "Orphaned partner process was already gone"
+            ),
             Err(e) => warn!(when, pid, error = %e, "Orphan cleanup could not run — continuing"),
         }
     }

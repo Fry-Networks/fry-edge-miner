@@ -240,10 +240,7 @@ impl ConfigStore {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        path.with_file_name(format!(
-            "{name}.tmp.{}.{nanos}.{seq}",
-            std::process::id()
-        ))
+        path.with_file_name(format!("{name}.tmp.{}.{nanos}.{seq}", std::process::id()))
     }
 
     /// Write via tmp-file + flush + rename so a crash mid-write can never

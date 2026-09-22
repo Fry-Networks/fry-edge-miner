@@ -60,7 +60,8 @@ fn an_unrelated_3077_event_is_ignored() {
 
 #[test]
 fn an_event_that_is_not_a_block_is_ignored() {
-    let informational = BLOCKED_GOWORKERD.replace("<EventID>3077</EventID>", "<EventID>3099</EventID>");
+    let informational =
+        BLOCKED_GOWORKERD.replace("<EventID>3077</EventID>", "<EventID>3099</EventID>");
     assert!(
         !event_names_our_image(&informational, &goworkerd()),
         "only the refusal ids count — every other CodeIntegrity event is noise"

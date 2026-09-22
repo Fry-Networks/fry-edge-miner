@@ -23,14 +23,20 @@ fn a_device_name_field_is_redacted() {
     let out = scrub_line(line);
     assert!(!out.contains("GEORGE-RIG-01"), "{out}");
     assert!(!out.contains("fem-george-rig-01"), "{out}");
-    assert!(out.contains("device_name="), "the field must survive: {out}");
+    assert!(
+        out.contains("device_name="),
+        "the field must survive: {out}"
+    );
 }
 
 #[test]
 fn a_wireguard_key_is_redacted() {
     let line = "WG public key: kzisBQWgJeKo5uQN5X457OlzMVirwtIN4gTfe9uy1QA=";
     let out = scrub_line(line);
-    assert!(!out.contains("kzisBQWgJeKo5uQN5X457OlzMVirwtIN4gTfe9uy1QA="), "{out}");
+    assert!(
+        !out.contains("kzisBQWgJeKo5uQN5X457OlzMVirwtIN4gTfe9uy1QA="),
+        "{out}"
+    );
     assert!(out.contains("[WGKEY]"), "{out}");
 }
 
@@ -70,7 +76,10 @@ fn a_node_mnemonic_env_assignment_is_redacted() {
 fn a_comma_separated_mixed_case_mnemonic_is_redacted() {
     // The original rule needs exactly 25 lowercase space-separated words and
     // has no case-insensitivity, so this form walked straight through it.
-    let words: Vec<&str> = std::iter::repeat("Abandon").take(23).chain(["Ability"]).collect();
+    let words: Vec<&str> = std::iter::repeat("Abandon")
+        .take(23)
+        .chain(["Ability"])
+        .collect();
     let line = format!("recovery: {}", words.join(", "));
     let out = scrub_line(&line);
     assert!(out.contains("[MNEMONIC]"), "{out}");
@@ -82,7 +91,10 @@ fn a_bare_computer_name_and_username_are_redacted() {
     let rules = identity_rules(Some("GEORGE-RIG-01"), Some("georgep"));
     assert_eq!(rules.len(), 2, "both values must produce a rule");
 
-    let out = redact_literals("titan-edge failed on GEORGE-RIG-01 for user georgep", &rules);
+    let out = redact_literals(
+        "titan-edge failed on GEORGE-RIG-01 for user georgep",
+        &rules,
+    );
     assert!(!out.contains("GEORGE-RIG-01"), "{out}");
     assert!(!out.contains("georgep"), "{out}");
     assert!(out.contains("<host>") && out.contains("<user>"), "{out}");

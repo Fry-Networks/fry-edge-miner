@@ -77,9 +77,8 @@ const SECRET_NAMES: &str = r"(?:[a-z0-9_]*(?:mnemonic|seed[_-]?phrase|secret|pas
 /// double-quoted `=` assignment or a bare `name:` form).
 fn redact_json_secret(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(&format!(r#"(?i)"({SECRET_NAMES})"\s*:\s*"([^"]*)""#)).unwrap()
-    });
+    let re = RE
+        .get_or_init(|| Regex::new(&format!(r#"(?i)"({SECRET_NAMES})"\s*:\s*"([^"]*)""#)).unwrap());
     re.replace_all(s, |caps: &regex::Captures| {
         if is_redaction_marker(&caps[2]) {
             caps[0].to_string()
@@ -137,7 +136,7 @@ fn redact_named_secret(s: &str) -> String {
 fn redact_identity_fields(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        Regex::new(r"(?i)(device_name|device_id|computer_?name|user_?name|host)\s*=\s*(\S+)")
+        Regex::new(r"(?i)\b(device_name|device_id|computer_?name|user_?name|host)\s*=\s*(\S+)")
             .unwrap()
     });
     re.replace_all(s, |caps: &regex::Captures| {
@@ -166,8 +165,8 @@ fn redact_wireguard_key(s: &str) -> String {
 /// untouched.
 fn redact_loose_mnemonic(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE
-        .get_or_init(|| Regex::new(r"(?i)(?:[a-z]{3,12}[ ,]+){23,24}[a-z]{3,12}").unwrap());
+    let re =
+        RE.get_or_init(|| Regex::new(r"(?i)(?:\b[a-z]{3,12}\b[ ,]+){23,24}[a-z]{3,12}\b").unwrap());
     re.replace_all(s, "[MNEMONIC]").to_string()
 }
 
@@ -188,7 +187,7 @@ pub(crate) fn identity_rules(
         };
         // Word-bounded and case-insensitive: Windows reports the same name in
         // several cases, and a substring match would eat unrelated text.
-        if let Ok(re) = Regex::new(&format!(r"(?i){}", regex::escape(value))) {
+        if let Ok(re) = Regex::new(&format!(r"(?i)\b{}\b", regex::escape(value))) {
             rules.push((re, marker));
         }
     }

@@ -54,7 +54,10 @@ pub(crate) fn user_message(image: &Path) -> String {
 /// device path (`\Device\HarddiskVolume3\Users\...`) rather than the drive
 /// letter FEM knows the file by, so a full-path comparison would never match.
 pub(crate) fn event_names_our_image(event_xml: &str, image: &Path) -> bool {
-    let Some(name) = image.file_name().map(|n| n.to_string_lossy().to_lowercase()) else {
+    let Some(name) = image
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+    else {
         return false;
     };
     if name.is_empty() {

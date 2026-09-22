@@ -93,8 +93,11 @@ pub fn init_storage_root(configured: Option<&str>) -> PathBuf {
                 );
                 // B4: record it for the UI. A log line alone let Settings keep
                 // reporting the configured path as the live one.
-                let _ = STORAGE_ROOT_FALLBACK
-                    .set(storage_fallback_message(&chosen, &e.message(), &default));
+                let _ = STORAGE_ROOT_FALLBACK.set(storage_fallback_message(
+                    &chosen,
+                    &e.message(),
+                    &default,
+                ));
                 default
             }
         }

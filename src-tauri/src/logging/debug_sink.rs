@@ -148,10 +148,7 @@ pub struct ScrubbingMakeWriter {
 
 impl ScrubbingMakeWriter {
     pub fn new(inner: NonBlocking) -> Self {
-        Self {
-            inner,
-            gated: true,
-        }
+        Self { inner, gated: true }
     }
 
     /// B23: the main sink's writer — scrubs, and is never gated by the
@@ -308,11 +305,7 @@ mod tests {
         let _guard = ToggleGuard::acquire(false);
         let sink = Sink::default();
         write_through(&sink, "this line must not be written\n");
-        assert_eq!(
-            sink.text(),
-            "",
-            "the opt-in sink must stay opt-in"
-        );
+        assert_eq!(sink.text(), "", "the opt-in sink must stay opt-in");
     }
 
     /// These logs are written so a user can hand the folder to support. A raw

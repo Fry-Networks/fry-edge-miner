@@ -34,7 +34,11 @@ fn an_automatic_trigger_never_elevates() {
         assert_eq!(outcome, Err(ElevationSkipped::NeedsApproval));
         skipped += 1;
     }
-    assert_eq!(ran.load(Ordering::SeqCst), 0, "no automatic tick may elevate");
+    assert_eq!(
+        ran.load(Ordering::SeqCst),
+        0,
+        "no automatic tick may elevate"
+    );
     assert_eq!(skipped, 200);
 }
 
@@ -44,17 +48,27 @@ fn a_user_click_elevates_exactly_once_per_attempt_key() {
     let ran = AtomicUsize::new(0);
     let key = "once-per-key|C:\\FEM\\resources\\frynode.exe";
 
-    let first = run_elevated("test-once-per-key", key, ElevationTrigger::UserClick, || {
-        ran.fetch_add(1, Ordering::SeqCst);
-        Ok(7u32)
-    });
+    let first = run_elevated(
+        "test-once-per-key",
+        key,
+        ElevationTrigger::UserClick,
+        || {
+            ran.fetch_add(1, Ordering::SeqCst);
+            Ok(7u32)
+        },
+    );
     assert_eq!(first, Ok(7));
     assert_eq!(ran.load(Ordering::SeqCst), 1);
 
-    let second = run_elevated("test-once-per-key", key, ElevationTrigger::UserClick, || {
-        ran.fetch_add(1, Ordering::SeqCst);
-        Ok(7u32)
-    });
+    let second = run_elevated(
+        "test-once-per-key",
+        key,
+        ElevationTrigger::UserClick,
+        || {
+            ran.fetch_add(1, Ordering::SeqCst);
+            Ok(7u32)
+        },
+    );
     assert_eq!(second, Err(ElevationSkipped::AlreadyAttempted));
     assert_eq!(
         ran.load(Ordering::SeqCst),
@@ -104,19 +118,14 @@ fn elevations_are_serialised_never_concurrent() {
             let ran = Arc::clone(&ran);
             std::thread::spawn(move || {
                 let key = format!("serialised|{i}");
-                let _ = run_elevated(
-                    "test-serialised",
-                    &key,
-                    ElevationTrigger::UserClick,
-                    || {
-                        let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-                        max_seen.fetch_max(now, Ordering::SeqCst);
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                        in_flight.fetch_sub(1, Ordering::SeqCst);
-                        ran.fetch_add(1, Ordering::SeqCst);
-                        Ok(())
-                    },
-                );
+                let _ = run_elevated("test-serialised", &key, ElevationTrigger::UserClick, || {
+                    let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_seen.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    ran.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                });
             })
         })
         .collect();
@@ -220,9 +229,12 @@ fn a_success_and_an_explicit_clear_both_drop_the_block() {
     );
     assert!(reason("test-clears").is_some());
 
-    let ok = run_elevated("test-clears", "clears|second", ElevationTrigger::UserClick, || {
-        Ok(())
-    });
+    let ok = run_elevated(
+        "test-clears",
+        "clears|second",
+        ElevationTrigger::UserClick,
+        || Ok(()),
+    );
     assert_eq!(ok, Ok(()));
     assert_eq!(reason("test-clears"), None);
 
