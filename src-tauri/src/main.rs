@@ -43,6 +43,13 @@ pub struct AppState {
     pub cached_verified_status: Arc<RwLock<Option<crate::api::types::VerifiedStatus>>>,
     pub reporting_status: Arc<RwLock<crate::api::types::ReportingStatus>>,
     pub last_token_recovery: Arc<RwLock<Option<std::time::Instant>>>,
+    /// B14: integrations whose enable is in flight — the toggle has been
+    /// accepted but install/start has not finished or failed yet.
+    ///
+    /// Without it, a card that is mid-install is indistinguishable from one
+    /// that was never enabled, which is what makes a failed enable look like a
+    /// silent revert: the switch snaps back with no error anywhere.
+    pub pending_enable: Arc<RwLock<std::collections::HashSet<String>>>,
 }
 
 /// BUG 12: apply one forwarded health-loop event to the shared `last_health`
@@ -1103,6 +1110,7 @@ fn main() {
                 cached_stake_tiers,
                 cached_verified_status,
                 last_token_recovery,
+                pending_enable: Arc::new(RwLock::new(std::collections::HashSet::new())),
             });
 
             tracing::info!("FEM initialized — {integration_count} integrations registered");

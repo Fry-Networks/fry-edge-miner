@@ -37,15 +37,15 @@ fn next_bounded_argument(code: &str, from: usize) -> Option<String> {
     Some(code[start..end].to_string())
 }
 
-#[test]
-fn a_human_answer_budget_is_materially_longer_than_a_cli_probe() {
-    assert!(
-        UAC_ANSWER_TIMEOUT > PROBE_TIMEOUT,
-        "UAC_ANSWER_TIMEOUT ({UAC_ANSWER_TIMEOUT:?}) must be materially longer than the \
-         generic probe timeout ({PROBE_TIMEOUT:?}) — it has to absorb however long a human \
-         takes to notice and answer the consent dialog"
-    );
-}
+/// Both operands are compile-time constants, so a `#[test]` asserting this
+/// could never fail at RUN time — it would only ever restate the source. As a
+/// `const` assertion it fails the BUILD instead, which is what a relationship
+/// between two constants deserves.
+const _: () = assert!(
+    UAC_ANSWER_TIMEOUT.as_secs() > PROBE_TIMEOUT.as_secs(),
+    "UAC_ANSWER_TIMEOUT must be materially longer than the generic probe timeout — it has to \
+     absorb however long a human takes to notice and answer the consent dialog"
+);
 
 #[test]
 fn every_uac_bearing_wrapper_gets_a_human_answer_budget() {

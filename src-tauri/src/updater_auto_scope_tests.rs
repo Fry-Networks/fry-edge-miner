@@ -39,7 +39,12 @@ fn fem_roots() -> Vec<PathBuf> {
 
 #[test]
 fn the_installer_hook_never_kills_by_bare_image_name() {
-    let hook = nsis_code_only(include_str!("../nsis-hooks.nsh"));
+    // RAW source for the negative half: a comment stripper can only ever
+    // REMOVE text, so checking "does not contain" over stripped text can pass
+    // on a line that was merely truncated. Erring towards counting a mention
+    // in a comment is the safe direction here.
+    let raw = include_str!("../nsis-hooks.nsh");
+    let hook = nsis_code_only(raw);
     for image in [
         "frynode.exe",
         "titan-edge.exe",
@@ -48,7 +53,7 @@ fn the_installer_hook_never_kills_by_bare_image_name() {
     ] {
         let bare = format!("/IM {image}");
         assert!(
-            !hook.contains(&bare),
+            !raw.contains(&bare),
             "nsis-hooks.nsh still stops {image} by bare image name — that kills \
              a user's own unrelated install of it"
         );
@@ -65,9 +70,11 @@ fn the_installer_hook_never_kills_by_bare_image_name() {
 
 #[test]
 fn neither_orphan_sweep_still_kills_by_bare_image_name() {
-    let code = rust_code_only(include_str!("updater_auto.rs"));
+    let raw = include_str!("updater_auto.rs");
+    let code = rust_code_only(raw);
+    // Negative assertion over RAW source — see the note above.
     assert!(
-        !code.contains("\"/IM\""),
+        !raw.contains("\"/IM\""),
         "the orphan sweeps must select by path, not by image name across the \
          whole session"
     );
