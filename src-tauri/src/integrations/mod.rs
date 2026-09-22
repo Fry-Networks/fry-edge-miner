@@ -113,7 +113,15 @@ pub(crate) fn stderr_tail(stderr: &str, n: usize) -> String {
 /// because `HealthStatus` has no dedicated variant and adding one would ripple
 /// into the TypeScript union and the LifecycleState mapping.
 pub(crate) fn awaits_user_action(reason: &str) -> bool {
-    const AWAITING_MARKERS: [&str; 2] = ["Awaiting Storj setup", "needs your consent"];
+    const AWAITING_MARKERS: [&str; 3] = [
+        "Awaiting Storj setup",
+        "needs your consent",
+        // B7/B8: an underfunded device wallet is the owner's to fix, and
+        // frynode is not even running while it is parked — restarting it every
+        // 30 s achieves nothing and is what produced the reported restart
+        // storm. Kept in sync with `fryvpn::FUNDING_MARKER`.
+        "Awaiting fryDVPN funding",
+    ];
     AWAITING_MARKERS.iter().any(|m| reason.contains(m))
 }
 

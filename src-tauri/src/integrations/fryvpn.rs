@@ -82,6 +82,41 @@ impl FryVpnIntegration {
             .unwrap_or(100)
     }
 
+    /// The algod endpoint FEM reads the device wallet from, and the one it
+    /// hands frynode. Defaults to the shipped mainnet endpoint, so nothing
+    /// changes for existing users; the override exists so the registration
+    /// path can be exercised against AlgoKit LocalNet, and so a throttled or
+    /// blocked public endpoint can be redirected without a rebuild. Same shape
+    /// as `region()`/`capacity_mbps()`/`binary_path()`.
+    fn algod_server() -> String {
+        std::env::var("FRYNODE_ALGOD_SERVER")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| ALGOD_SERVER.to_string())
+    }
+
+    fn algod_port() -> String {
+        std::env::var("FRYNODE_ALGOD_PORT")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "443".to_string())
+    }
+
+    /// Empty by default — algonode is tokenless. LocalNet is not.
+    fn algod_token() -> String {
+        std::env::var("FRYNODE_ALGOD_TOKEN").unwrap_or_default()
+    }
+
+    fn registry_app_id() -> String {
+        std::env::var("FRYNODE_REGISTRY_APP_ID")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "3636586918".to_string())
+    }
+
     /// Resolve the frynode binary: `FRYNODE_BIN` → the bundled resource next to
     /// the executable → the bare name on PATH.
     ///
@@ -220,6 +255,74 @@ pub(crate) fn registration_affordability(
     ))
 }
 
+/// B7/B8: the funding instruction `start()` parks when the device wallet
+/// cannot afford registration yet.
+///
+/// Process-global rather than a field on `FryVpnIntegration`: the struct is
+/// built once in `main.rs` and in two existing tests, and a new required field
+/// would have forced an edit to all three — including test code this run is
+/// not permitted to touch. There is exactly one fryDVPN integration per
+/// process, so a module-level slot is the same state with a smaller diff.
+static PARKED_FUNDING_REASON: Mutex<Option<String>> = Mutex::new(None);
+
+/// The prefix every fryDVPN funding message starts with.
+///
+/// Load-bearing, not decoration: `integrations::awaits_user_action` matches it,
+/// which is what makes the supervisor treat "this wallet needs money" as a
+/// setup state (RecoveryAction::None) instead of a fault it restarts frynode
+/// over every 30 s, and what makes the card render amber "Setup required"
+/// instead of a red UNHEALTHY badge.
+pub(crate) const FUNDING_MARKER: &str = "Awaiting fryDVPN funding";
+
+/// PURE: the funding instruction the card shows while the device wallet cannot
+/// afford registration.
+///
+/// Reports TOTAL NEEDED against the on-chain `amount` — the number the owner
+/// sees in their wallet app. The message this replaces was built from SPENDABLE
+/// on both sides, so a user who sent exactly the 0.1 ALGO it asked for was then
+/// told he held "0.000 ALGO" (mainnet: amount 100_014, min-balance 100_000,
+/// spendable 14). Total needed is the spendable requirement plus the account's
+/// own locked minimum, because that minimum has to stay behind after the group
+/// settles.
+///
+/// The gate itself is still `registration_affordability`, so that function and
+/// its tests remain the authority on WHETHER to proceed; only the DISPLAY
+/// changed.
+pub(crate) fn registration_funding_message(
+    amount: u64,
+    min_balance: u64,
+    required_spendable: u64,
+    address: &str,
+) -> Result<(), String> {
+    if registration_affordability(
+        spendable_microalgos(amount, min_balance),
+        required_spendable,
+        address,
+    )
+    .is_ok()
+    {
+        return Ok(());
+    }
+    let total_needed = required_spendable.saturating_add(min_balance);
+    let short = total_needed.saturating_sub(amount);
+    Err(format!(
+        "{FUNDING_MARKER} — send {:.3} ALGO to {} (this device's wallet needs {:.3} ALGO total to register on-chain and holds {:.3} ALGO). fryDVPN registers automatically on the next check.",
+        short as f64 / 1_000_000.0,
+        address,
+        total_needed as f64 / 1_000_000.0,
+        amount as f64 / 1_000_000.0
+    ))
+}
+
+/// What the card says when algod could not be read at all.
+///
+/// Deliberately quotes NO figure: an unreachable endpoint or an HTML error page
+/// must never be rendered as "0.000 ALGO", which would tell a funded owner to
+/// send money they have already sent.
+pub(crate) fn balance_unreadable_message(detail: &str) -> String {
+    format!("{FUNDING_MARKER} — could not read this device's wallet balance ({detail}); retrying on the next check.")
+}
+
 /// PURE: pull `amount` and `min-balance` out of an algod account response.
 /// `None` on anything unparseable — an HTML error page must NEVER read as a
 /// zero balance, or the pre-check would block a perfectly funded wallet.
@@ -254,25 +357,63 @@ pub(crate) fn identity_plan(address: Option<&str>, mnemonic: Option<&str>) -> Id
     }
 }
 
+/// What a read of the device wallet concluded (B7/B8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FundingState {
+    /// Measured, and the wallet can afford the registration group.
+    Affordable,
+    /// Measured, and it cannot yet. The string is the card's funding
+    /// instruction, already carrying `FUNDING_MARKER`.
+    Underfunded(String),
+    /// Not measurable right now — algod unreachable, or an error page where
+    /// JSON was expected. Never a reason to refuse to run a node that would
+    /// otherwise serve traffic: frynode's own preflight is what stops an
+    /// underfunded submission reaching the chain.
+    Unmeasurable(String),
+}
+
 impl FryVpnIntegration {
-    /// Fetch the device's provisioned Algorand identity and confirm it can
-    /// actually afford the on-chain registration (BUG 6).
+    /// One algod account read.
     ///
-    /// Returns the mnemonic to hand frynode. Any failure is a user-facing
-    /// sentence, never a raw chain error.
-    async fn resolve_funded_identity(&self) -> Result<Option<String>, String> {
-        let Some(miner_key) = self.config.get().miner_key else {
-            // Not registered yet: nothing to look up, and frynode starting
-            // without an identity is exactly the pre-change behaviour.
-            return Ok(None);
-        };
+    /// `Err` carries a short reason for the card and never a balance — an HTML
+    /// error page or a rate-limit body read as "0" would tell an owner who has
+    /// already funded the wallet to send more.
+    async fn read_wallet_balance(address: &str) -> Result<(u64, u64), String> {
+        let url = format!("{}/v2/accounts/{}", Self::algod_server(), address);
+        let resp = reqwest::Client::new()
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| format!("algod unreachable: {e}"))?;
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("algod response unreadable: {e}"))?;
+        parse_account_balance(&body).ok_or_else(|| format!("algod returned HTTP {status}"))
+    }
+
+    /// The device's provisioned Algorand identity together with what its wallet
+    /// can currently afford (BUG 6, B7, B8).
+    ///
+    /// `None` when we hold no usable key: frynode then starts exactly as it did
+    /// before BUG 6, because refusing to run a node over a wallet we cannot
+    /// even identify would remove a node that works.
+    ///
+    /// Split out from `resolve_funded_identity` because the health loop needs
+    /// the funding state on its own, to clear a parked funding card the moment
+    /// the wallet is funded — without that, the figure on the card froze at
+    /// whatever the one failed toggle measured.
+    async fn device_identity_and_funding(&self) -> Option<(String, FundingState)> {
+        let miner_key = self.config.get().miner_key?;
 
         let creds = match crate::api::credentials::lookup(&self.api_client, &miner_key).await {
             Ok(c) => c,
             Err(e) => {
                 // A lookup failure must not remove a node that would run.
                 warn!(error = %e, "Could not fetch device wallet - starting fryDVPN without it");
-                return Ok(None);
+                return None;
             }
         };
 
@@ -282,40 +423,44 @@ impl FryVpnIntegration {
         ) {
             IdentityPlan::StartWithoutIdentity => {
                 info!("No device wallet key available - starting fryDVPN without a node identity");
-                Ok(None)
+                None
             }
             IdentityPlan::UseIdentity { address, mnemonic } => {
                 // We hold this key, so the balance we measure IS the account
                 // frynode will spend from - only now is refusing justified.
-                let url = format!("{}/v2/accounts/{}", ALGOD_SERVER, address);
-                match reqwest::Client::new()
-                    .get(&url)
-                    .timeout(std::time::Duration::from_secs(10))
-                    .send()
-                    .await
-                {
-                    Ok(resp) => {
-                        match resp.text().await.ok().and_then(|b| parse_account_balance(&b)) {
-                            Some((amount, min_balance)) => {
-                                let spendable = spendable_microalgos(amount, min_balance);
-                                registration_affordability(
-                                    spendable,
-                                    REGISTRATION_MIN_MICROALGOS,
-                                    &address,
-                                )?;
-                            }
-                            None => warn!(
-                                "Could not read the fryDVPN wallet balance - starting without a pre-check"
-                            ),
-                        }
+                let state = match Self::read_wallet_balance(&address).await {
+                    Ok((amount, min_balance)) => match registration_funding_message(
+                        amount,
+                        min_balance,
+                        REGISTRATION_MIN_MICROALGOS,
+                        &address,
+                    ) {
+                        Ok(()) => FundingState::Affordable,
+                        Err(msg) => FundingState::Underfunded(msg),
+                    },
+                    Err(detail) => {
+                        warn!(
+                            detail = %detail,
+                            "Could not read the fryDVPN wallet balance - starting without a pre-check"
+                        );
+                        FundingState::Unmeasurable(detail)
                     }
-                    Err(e) => warn!(
-                        error = %e,
-                        "Could not reach algod for the fryDVPN balance pre-check - continuing"
-                    ),
-                }
-                Ok(Some(mnemonic))
+                };
+                Some((mnemonic, state))
             }
+        }
+    }
+
+    /// Fetch the device's provisioned Algorand identity and confirm it can
+    /// actually afford the on-chain registration (BUG 6).
+    ///
+    /// Returns the mnemonic to hand frynode. Any failure is a user-facing
+    /// sentence, never a raw chain error.
+    async fn resolve_funded_identity(&self) -> Result<Option<String>, String> {
+        match self.device_identity_and_funding().await {
+            None => Ok(None),
+            Some((_, FundingState::Underfunded(msg))) => Err(msg),
+            Some((mnemonic, _)) => Ok(Some(mnemonic)),
         }
     }
 }
@@ -361,15 +506,15 @@ impl Integration for FryVpnIntegration {
         // Build CLI flags for frynode
         let args = vec![
             "-registry-app-id".to_string(),
-            "3636586918".to_string(),
+            Self::registry_app_id(),
             "-fvpn-asa-id".to_string(),
             "2485198745".to_string(),
             "-algod-server".to_string(),
-            "https://mainnet-api.algonode.cloud".to_string(),
+            Self::algod_server(),
             "-algod-port".to_string(),
-            "443".to_string(),
+            Self::algod_port(),
             "-algod-token".to_string(),
-            "".to_string(), // algonode is tokenless
+            Self::algod_token(),
             "-api-port".to_string(),
             "8088".to_string(),
             "-wg-port".to_string(),
@@ -384,8 +529,27 @@ impl Integration for FryVpnIntegration {
         // generated a fresh 0-ALGO identity and RegisterNode failed with an
         // overspend the user could do nothing about.
         let mnemonic = match self.resolve_funded_identity().await {
-            Ok(m) => m,
-            Err(reason) => anyhow::bail!("{reason}"),
+            Ok(m) => {
+                *PARKED_FUNDING_REASON.lock().unwrap() = None;
+                m
+            }
+            // B7/B8: an unaffordable wallet is a SETUP state, not a start
+            // failure. Bailing here returned from `toggle_integration` BEFORE
+            // `set_enabled`, so the toggle flipped itself back off, the health
+            // loop short-circuited to Stopped while disabled, and the balance
+            // was never read again — the funding figure froze at whatever that
+            // one failed toggle measured and the owner had to keep toggling.
+            // Park the instruction and succeed WITHOUT spawning frynode:
+            // nothing is submitted on chain, the integration stays enabled, and
+            // `health_check` re-reads the wallet every tick until it is funded.
+            Err(reason) => {
+                warn!(
+                    reason = %reason,
+                    "fryDVPN registration deferred until the device wallet is funded"
+                );
+                *PARKED_FUNDING_REASON.lock().unwrap() = Some(reason);
+                return Ok(());
+            }
         };
 
         {
@@ -406,6 +570,10 @@ impl Integration for FryVpnIntegration {
     }
 
     async fn stop(&self) -> Result<()> {
+        // A parked funding instruction describes a start that never happened;
+        // drop it so re-enabling measures the wallet again rather than showing
+        // a stale figure.
+        *PARKED_FUNDING_REASON.lock().unwrap() = None;
         {
             let mut sup = self.supervisor.lock().unwrap();
             sup.stop_integration("fryvpn")
@@ -416,6 +584,29 @@ impl Integration for FryVpnIntegration {
     }
 
     async fn health_check(&self) -> HealthStatus {
+        // B7/B8: while a funding instruction is parked, frynode was never
+        // spawned, so re-read the wallet instead of reporting a dead process.
+        // This is what makes "registers automatically on the next check" true:
+        // the moment the wallet is funded the park clears, the not-running
+        // branch below arms the supervisor's existing restart, and `start()`
+        // re-runs against a wallet that can pay — with no user toggling.
+        let parked = PARKED_FUNDING_REASON.lock().unwrap().is_some();
+        if parked {
+            match self.device_identity_and_funding().await {
+                Some((_, FundingState::Underfunded(msg))) => {
+                    *PARKED_FUNDING_REASON.lock().unwrap() = Some(msg.clone());
+                    return HealthStatus::Unhealthy(msg);
+                }
+                // Keep the park rather than churning frynode while algod is
+                // unreadable, and never quote a balance we could not measure.
+                Some((_, FundingState::Unmeasurable(detail))) => {
+                    return HealthStatus::Unhealthy(balance_unreadable_message(&detail));
+                }
+                // Affordable now, or we no longer hold a key to measure.
+                _ => *PARKED_FUNDING_REASON.lock().unwrap() = None,
+            }
+        }
+
         // Check process alive first
         let process_alive = {
             let mut sup = self.supervisor.lock().unwrap();
@@ -735,6 +926,48 @@ mod tests {
             "must not collide with Olostep's rule"
         );
     }
+
+    /// B8: the registration path was pinned to mainnet in two independent
+    /// literals, so it could not be exercised against LocalNet at all and a
+    /// throttled endpoint could not be redirected without a rebuild. These
+    /// live in `mod tests` rather than a module of their own because they
+    /// mutate process-global environment and must share `ENV_LOCK` with the
+    /// other env tests.
+    #[test]
+    fn the_algod_endpoint_defaults_to_mainnet_and_honours_the_override() {
+        let g = EnvGuard::acquire("FRYNODE_ALGOD_SERVER");
+        g.unset();
+        assert_eq!(
+            FryVpnIntegration::algod_server(),
+            "https://mainnet-api.algonode.cloud"
+        );
+        g.set("http://127.0.0.1:4001");
+        assert_eq!(FryVpnIntegration::algod_server(), "http://127.0.0.1:4001");
+        g.set("   ");
+        assert_eq!(
+            FryVpnIntegration::algod_server(),
+            "https://mainnet-api.algonode.cloud",
+            "a blank override must fall back, never produce an empty URL"
+        );
+    }
+
+    #[test]
+    fn the_registry_app_id_defaults_to_mainnet_and_honours_the_override() {
+        let g = EnvGuard::acquire("FRYNODE_REGISTRY_APP_ID");
+        g.unset();
+        assert_eq!(FryVpnIntegration::registry_app_id(), "3636586918");
+        g.set("1011");
+        assert_eq!(FryVpnIntegration::registry_app_id(), "1011");
+    }
+
+    #[test]
+    fn the_algod_port_defaults_to_https_and_honours_the_override() {
+        let g = EnvGuard::acquire("FRYNODE_ALGOD_PORT");
+        g.unset();
+        assert_eq!(FryVpnIntegration::algod_port(), "443");
+        g.set("4001");
+        assert_eq!(FryVpnIntegration::algod_port(), "4001");
+    }
 }
 
 /// BUG 6 (minerman): fryDVPN on-chain registration fails — wallet Z2HCY…GTMKI
@@ -912,5 +1145,148 @@ mod b7_registration_cost_tests {
         assert!(registration_affordability(req - 1, req, "ADDR").is_err());
         assert!(registration_affordability(req, req, "ADDR").is_ok());
         assert!(registration_affordability(req + 1, req, "ADDR").is_ok());
+    }
+}
+
+/// B8: "I sent 0.1 Algo to the address in the error message, but it still says
+/// 0.000 ALGO after a few hours."
+///
+/// The card was built from SPENDABLE on both sides — required and held — so a
+/// wallet holding exactly the 0.1 ALGO the card asked for displayed as 0.000:
+/// on mainnet that account reads amount=100_014 / min-balance=100_000, and
+/// 100_014 - 100_000 = 14 µALGO formats as "0.000". These pin the display to
+/// TOTAL NEEDED vs the on-chain `amount`, which is the number the owner sees in
+/// their wallet.
+#[cfg(test)]
+mod b8_funding_display_tests {
+    use super::*;
+
+    const MIN_BAL: u64 = 100_000;
+
+    #[test]
+    fn a_wallet_holding_0_1_algo_is_never_reported_as_holding_nothing() {
+        let msg =
+            registration_funding_message(100_014, MIN_BAL, REGISTRATION_MIN_MICROALGOS, "ADDR")
+                .expect_err("14 µALGO spendable cannot afford registration");
+        assert!(
+            !msg.contains("0.000"),
+            "a wallet holding 0.100 ALGO on chain must never be displayed as 0.000: {msg}"
+        );
+        assert!(
+            msg.contains("0.100"),
+            "the card must quote the on-chain amount the owner can see: {msg}"
+        );
+        assert!(
+            msg.contains("0.312"),
+            "the card must quote TOTAL needed, not the spendable requirement: {msg}"
+        );
+        assert!(
+            msg.contains("0.212"),
+            "the card must name exactly how much more to send: {msg}"
+        );
+        assert!(msg.contains("ADDR"), "and where to send it: {msg}");
+    }
+
+    #[test]
+    fn an_empty_wallet_is_asked_for_the_whole_total() {
+        let msg = registration_funding_message(0, MIN_BAL, REGISTRATION_MIN_MICROALGOS, "ADDR")
+            .unwrap_err();
+        assert!(
+            msg.contains("send 0.312 ALGO"),
+            "an empty wallet must be told the account minimum too: {msg}"
+        );
+    }
+
+    /// §6 B8 Done-when: boundaries at 0, requirement-1, requirement,
+    /// requirement+1 — expressed in on-chain `amount`, which is what the user
+    /// actually sends.
+    #[test]
+    fn the_displayed_total_is_exact_at_its_boundaries() {
+        let total = REGISTRATION_MIN_MICROALGOS + MIN_BAL;
+        assert_eq!(total, 312_000);
+        assert!(registration_funding_message(0, MIN_BAL, REGISTRATION_MIN_MICROALGOS, "A").is_err());
+        assert!(
+            registration_funding_message(total - 1, MIN_BAL, REGISTRATION_MIN_MICROALGOS, "A")
+                .is_err()
+        );
+        assert!(
+            registration_funding_message(total, MIN_BAL, REGISTRATION_MIN_MICROALGOS, "A").is_ok()
+        );
+        assert!(
+            registration_funding_message(total + 1, MIN_BAL, REGISTRATION_MIN_MICROALGOS, "A")
+                .is_ok()
+        );
+    }
+
+    /// The message the users quoted contained two runs of ten spaces, from the
+    /// Rust source being line-wrapped inside a string literal.
+    #[test]
+    fn the_funding_message_has_no_run_on_whitespace() {
+        let msg = registration_funding_message(0, MIN_BAL, REGISTRATION_MIN_MICROALGOS, "ADDR")
+            .unwrap_err();
+        assert!(!msg.contains("  "), "double space rendered verbatim: {msg}");
+    }
+
+    /// An unreachable or rate-limited endpoint must never be rendered as a
+    /// balance — telling an owner who has already funded the wallet that it
+    /// holds 0.000 is exactly the bug this run is fixing.
+    #[test]
+    fn an_unreadable_balance_quotes_no_figure_at_all() {
+        let msg = balance_unreadable_message("algod returned HTTP 403 Forbidden");
+        assert!(!msg.contains("0.000"), "{msg}");
+        assert!(!msg.contains("ALGO)"), "{msg}");
+        assert!(msg.contains("could not read"), "{msg}");
+        assert!(crate::integrations::awaits_user_action(&msg));
+    }
+}
+
+/// B7/B8: an unfunded device wallet is a SETUP state, not a red failure and
+/// not something to restart frynode over.
+///
+/// Before this, the funding message matched neither awaiting-marker, so
+/// `recovery_action` returned `Restart` and the card rendered as a red
+/// UNHEALTHY badge instead of the amber "Setup required" the frontend already
+/// has for exactly this case.
+#[cfg(test)]
+mod b7_funding_state_tests {
+    use super::*;
+    use crate::supervisor::health::{recovery_action, RecoveryAction};
+
+    #[test]
+    fn an_unfunded_wallet_is_a_setup_state_not_a_red_failure() {
+        let msg = registration_funding_message(0, 100_000, REGISTRATION_MIN_MICROALGOS, "ADDR")
+            .unwrap_err();
+        assert!(
+            msg.starts_with(FUNDING_MARKER),
+            "the marker must be a PREFIX — the frontend matches it with startsWith: {msg}"
+        );
+        assert!(
+            crate::integrations::awaits_user_action(&msg),
+            "must be recognised as awaiting the user: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_funding_reason_is_never_restarted() {
+        let msg = registration_funding_message(0, 100_000, REGISTRATION_MIN_MICROALGOS, "ADDR")
+            .unwrap_err();
+        assert_eq!(
+            recovery_action(&HealthStatus::Unhealthy(msg), true, 0, 6),
+            RecoveryAction::None,
+            "restarting frynode cannot make a wallet richer, and doing it every 30 s is the \
+             restart storm users reported"
+        );
+    }
+
+    /// Guard on the marker set itself: widening it must not swallow a real
+    /// fault that the supervisor SHOULD recover from.
+    #[test]
+    fn the_new_marker_does_not_swallow_real_frynode_faults() {
+        assert!(!crate::integrations::awaits_user_action(
+            &process_not_running_reason("failed to load config: REGION is required")
+        ));
+        assert!(!crate::integrations::awaits_user_action(
+            "frynode process is not running"
+        ));
     }
 }
