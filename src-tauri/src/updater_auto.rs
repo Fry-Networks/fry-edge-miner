@@ -569,8 +569,17 @@ pub(crate) async fn prepare_for_update_install(
             let frynode = frynode_path
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| install_dir.join("resources").join("frynode.exe"));
+            // B3: an update is not a user action either. `to_version` is the
+            // attempt key, so the new version is a new request and still gets
+            // its one attempt once the user asks for it.
             match tokio::task::block_in_place(|| {
-                security_setup::run_hardening_elevated(install_dir, &exe_names, &frynode)
+                security_setup::run_hardening_elevated(
+                    install_dir,
+                    &exe_names,
+                    &frynode,
+                    to_version,
+                    crate::elevation_gate::ElevationTrigger::Automatic,
+                )
             }) {
                 Ok(()) => {
                     if let Err(e) = config.update(|c| {
@@ -580,7 +589,16 @@ pub(crate) async fn prepare_for_update_install(
                     }
                 }
                 Err(e) => {
-                    warn!(error = %e, "Pre-update hardening declined or failed — continuing update anyway")
+                    warn!(error = %e, "Pre-update hardening declined or failed — continuing update anyway");
+                    // B3 defect 4: same reason as the boot path — a warn! alone
+                    // never reaches the user.
+                    crate::events::emit(
+                        "elevation-required",
+                        serde_json::json!({
+                            "purpose": "hardening",
+                            "reason": e.to_string(),
+                        }),
+                    );
                 }
             }
         }

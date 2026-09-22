@@ -110,9 +110,16 @@ fn blocked_map() -> &'static Mutex<HashMap<String, String>> {
 /// `security_setup::hardening_outcome`), 1223 is Windows' `ERROR_CANCELLED`,
 /// and a `TimedOut` io error means `output_bounded` gave up because nobody
 /// answered the prompt inside the budget.
+///
+/// `PermissionDenied` is how a call site that already read its own exit code
+/// tells the gate "this was a decline" — the closure only hands back an
+/// `anyhow::Error`, so the exit code itself never reaches `run_elevated`.
 pub fn is_declined(exit_code: Option<i32>, io_kind: Option<std::io::ErrorKind>) -> bool {
     matches!(exit_code, Some(2) | Some(3) | Some(1223))
-        || io_kind == Some(std::io::ErrorKind::TimedOut)
+        || matches!(
+            io_kind,
+            Some(std::io::ErrorKind::TimedOut) | Some(std::io::ErrorKind::PermissionDenied)
+        )
 }
 
 /// The io error kind anywhere in an `anyhow` chain, if there is one.
@@ -125,7 +132,7 @@ fn io_kind_of(err: &anyhow::Error) -> Option<std::io::ErrorKind> {
 /// Run `f` — which is expected to raise a UAC prompt — under the gate.
 ///
 /// `purpose` is the integration id when the elevation belongs to one
-/// integration (`"fryvpn"`, `"aem"`, `"titan"`), so `blocked_reason` can be
+/// integration (`"fryvpn"`, `"aem"`, `"titan"`), so `blocked_reasons` can be
 /// merged straight into that card's error slot; otherwise it is a stable name
 /// that is not an integration id (`"hardening"`, `"docker-desktop"`).
 ///

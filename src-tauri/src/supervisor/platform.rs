@@ -21,6 +21,19 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
 /// `tasklist`, `netsh show`, PowerShell one-liners).
 pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// B3: deadline for an elevation a HUMAN has to answer on the secure desktop.
+///
+/// `PROBE_TIMEOUT` is the generic short-lived-CLI-probe budget and was never a
+/// human-answer budget, but `firewall::ensure_program_rules`,
+/// `firewall::delete_rules` and `security_setup::run_hardening_elevated` all
+/// wrapped their `Start-Process -Verb RunAs` in it. At 20s `output_bounded`
+/// kills the requesting (unelevated) PowerShell while the consent dialog is
+/// still on screen — the dialog itself belongs to the AppInfo service and
+/// survives, so anyone who takes longer than 20s to answer can never grant the
+/// rule. `titan.rs` already made exactly this argument for its own elevation
+/// (`VC_REDIST_INSTALL_TIMEOUT`); this is the same treatment for the other two.
+pub const UAC_ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
 /// Deadline for commands that legitimately take a while (`docker compose up`,
 /// image pulls, installers). Generous on purpose: a multi-layer pull over a
 /// slow uplink can run many minutes, and a false timeout here fails a real
@@ -137,6 +150,14 @@ pub fn graceful_stop(child: &mut Child) -> io::Result<()> {
 pub fn force_kill(child: &mut Child) -> io::Result<()> {
     child.kill()
 }
+
+/// B3 defect 5: the UAC-answer budget is enforced against the real source of
+/// every elevation wrapper, so a future edit cannot quietly put one back on
+/// the 20s probe budget. Own file so the source-scan machinery stays out of
+/// the way of platform.rs's behavioural tests.
+#[cfg(test)]
+#[path = "uac_budget_tests.rs"]
+mod uac_budget_tests;
 
 #[cfg(test)]
 mod tests {

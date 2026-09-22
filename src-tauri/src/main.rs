@@ -329,7 +329,19 @@ fn main() {
                         let Some(install_dir) = exe_path.parent() else { return };
                         let frynode_path = install_dir.join("resources").join("frynode.exe");
                         let exe_names = ["fry-edge-miner.exe", "frynode.exe"];
-                        match security_setup::run_hardening_elevated(install_dir, &exe_names, &frynode_path) {
+                        // B3: boot is not a user action, so this is
+                        // `Automatic` — the gate suppresses it and FEM raises
+                        // no UAC prompt at startup. The path was already
+                        // best-effort with a non-fatal decline branch, so
+                        // nothing new can break here; FEM simply ships
+                        // unhardened until the user asks for it.
+                        match security_setup::run_hardening_elevated(
+                            install_dir,
+                            &exe_names,
+                            &frynode_path,
+                            current,
+                            crate::elevation_gate::ElevationTrigger::Automatic,
+                        ) {
                             Ok(()) => {
                                 if let Err(e) = hardening_config.update(|c| {
                                     c.hardening_applied_version = Some(current.to_string());
@@ -343,6 +355,17 @@ fn main() {
                                     error = %e,
                                     manual_command = %manual,
                                     "Elevated hardening setup declined or failed — run the manual command as Administrator to apply it yourself"
+                                );
+                                // B3 defect 4: the log line was the ONLY record
+                                // of this. Surface it so the user can see that
+                                // hardening is waiting on them.
+                                crate::events::emit(
+                                    "elevation-required",
+                                    serde_json::json!({
+                                        "purpose": "hardening",
+                                        "reason": e.to_string(),
+                                        "manualCommand": manual,
+                                    }),
                                 );
                             }
                         }
