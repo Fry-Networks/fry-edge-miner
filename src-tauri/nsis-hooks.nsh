@@ -51,23 +51,32 @@
   ; from a version that predates those sweeps) can still hit a locked file
   ; here. Best-effort, same "non-zero = nothing matched" contract.
   ;
-  ; KNOWN LIMITATION (G4 finding 21, MINOR, deliberately NOT fixed here).
-  ; NSIS expands $INSTDIR/$APPDATA/$LOCALAPPDATA into this string verbatim with
-  ; no escaping, so a profile folder containing an apostrophe — O'Brien,
-  ; D'Angelo — closes the single-quoted PowerShell pattern early, the whole
-  ; -Command fails to parse, Pop $1 is discarded, and the installer walks into
-  ; the "Error opening file for writing" failure this hook exists to prevent.
-  ; That is a regression against the old bare `taskkill /IM`, which had no
-  ; quoting to break.
+  ; QUOTING: the paths are passed through the ENVIRONMENT, never interpolated
+  ; into the script.
   ;
-  ; Switching these to double quotes does NOT work: the outer -Command is
-  ; already double-quoted, so inner double quotes terminate the argument early
-  ; and it breaks for EVERY user rather than for apostrophe accounts. The
-  ; correct fix is to stop interpolating paths into the script at all — set
-  ; them as environment variables via System::Call SetEnvironmentVariable and
-  ; read $env:... in PowerShell, which is safe for both ' and $. That needs an
-  ; installer build to verify and is not something the Linux CI leg can test,
-  ; so it is left for someone who can run the NSIS build.
+  ; NSIS expands $INSTDIR/$APPDATA/$LOCALAPPDATA into a -Command string
+  ; verbatim with no escaping. A profile folder containing an apostrophe —
+  ; O'Brien, D'Angelo, which is what a Microsoft account with that surname
+  ; produces — closed the single-quoted pattern early, the whole command failed
+  ; to parse, Pop $1 discarded the failure, and the installer walked into the
+  ; "Error opening file for writing" failure this hook exists to prevent. That
+  ; was a regression this repo introduced: the bare `taskkill /F /T /IM` calls
+  ; it replaced had no quoting to break.
+  ;
+  ; Double quotes are NOT the fix: the outer -Command is already double-quoted,
+  ; so inner double quotes terminate the argument early and it breaks for EVERY
+  ; user instead of only apostrophe accounts.
+  ;
+  ; A path that never appears in the script text cannot break its quoting,
+  ; whatever the path contains — so SetEnvironmentVariable puts each one in the
+  ; installer's own environment block, the child inherits that block (nsExec
+  ; creates the process with a NULL lpEnvironment, which means "inherit"), and
+  ; PowerShell reads it into a variable with no quote character around it. Note
+  ; the `-like $$i` below: assigning to $$i and comparing against the VARIABLE
+  ; is the point. Re-quoting the $$env: read would reintroduce the defect.
+  ;
+  ; $$ is the NSIS escape for a literal $, so PowerShell sees $env: and $_.
+  ; The System plugin is already bundled in the installer ($PLUGINSDIR\System.dll).
   ;
   ; B4: this used to be four `taskkill /F /T /IM <image>` calls. `/IM` matches
   ; by image name across the WHOLE session with no path filter, so installing
@@ -77,8 +86,18 @@
   ; copies whose ExecutablePath is inside FEM's own install tree or partner
   ; root — which is exactly the set that can hold this install folder open.
   DetailPrint "Stopping partner processes that hold the install folder..."
-  nsExec::Exec `powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $$_.ExecutablePath -and $$_.Name -in 'frynode.exe','titan-edge.exe','sdk_client.exe','space-acres.exe' -and ($$_.ExecutablePath -like '$INSTDIR\*' -or $$_.ExecutablePath -like '$APPDATA\FryEdgeMiner\partners\*' -or $$_.ExecutablePath -like '$LOCALAPPDATA\FryEdgeMiner\partners\*') } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }"`
+  ; $0 is saved and restored: this macro runs inside the generated installer's
+  ; Section, and the surrounding template makes no promise about its registers.
+  Push $0
+  System::Call 'kernel32::SetEnvironmentVariable(t "FEM_INSTDIR", t "$INSTDIR")i.r0'
+  System::Call 'kernel32::SetEnvironmentVariable(t "FEM_PARTNERS_APPDATA", t "$APPDATA\FryEdgeMiner\partners")i.r0'
+  System::Call 'kernel32::SetEnvironmentVariable(t "FEM_PARTNERS_LOCALAPPDATA", t "$LOCALAPPDATA\FryEdgeMiner\partners")i.r0'
+  Pop $0
+  nsExec::Exec `powershell -NoProfile -ExecutionPolicy Bypass -Command "$$i = $$env:FEM_INSTDIR + '\*'; $$a = $$env:FEM_PARTNERS_APPDATA + '\*'; $$l = $$env:FEM_PARTNERS_LOCALAPPDATA + '\*'; Get-CimInstance Win32_Process | Where-Object { $$_.ExecutablePath -and $$_.Name -in 'frynode.exe','titan-edge.exe','sdk_client.exe','space-acres.exe' -and ($$_.ExecutablePath -like $$i -or $$_.ExecutablePath -like $$a -or $$_.ExecutablePath -like $$l) } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }"`
   Pop $1
+  ; Surfaced rather than discarded, so an installer log shows whether this ran.
+  ; Non-zero still means "nothing matched", which is the normal case.
+  DetailPrint "Partner stop returned: $1"
   Sleep 2000
 
   !if "${WEBVIEW2BOOTSTRAPPERPATH}" != ""

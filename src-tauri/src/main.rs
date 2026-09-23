@@ -10,6 +10,9 @@ mod events;
 mod integrations;
 mod logging;
 mod migration;
+#[cfg(test)]
+#[path = "nsis_hook_quoting_tests.rs"]
+mod nsis_hook_quoting_tests;
 mod poc;
 mod security_setup;
 mod storage_location;

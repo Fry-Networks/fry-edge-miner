@@ -15,10 +15,18 @@
 use super::{process_is_under, process_listing_script, select_orphan_pids};
 use std::path::PathBuf;
 
-/// NSIS comments start at `;`.
+/// Drops whole NSIS comment LINES.
+///
+/// It used to truncate every line at its first `;`, which is the same defect
+/// class as a `//` stripper cutting inside a string literal: the hook's
+/// PowerShell now uses `;` as a statement separator, so truncating there hid
+/// `ExecutablePath` from the positive assertion below and failed it. A stripper
+/// can only ever REMOVE text, which makes a positive assertion fail for the
+/// wrong reason and — far worse — lets a negative assertion pass on text that
+/// was merely cut away. The negatives here scan RAW source for that reason.
 fn nsis_code_only(src: &str) -> String {
     src.lines()
-        .map(|l| l.split(';').next().unwrap_or(""))
+        .filter(|l| !l.trim_start().starts_with(';'))
         .collect::<Vec<_>>()
         .join("\n")
 }
