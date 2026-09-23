@@ -34,7 +34,7 @@ fn a_month_old_block_no_longer_suppresses_recovery() {
     let listing = event("goworkerd.dll", "3033", now - chrono::Duration::days(30));
 
     assert!(
-        first_block_for(&listing, &titan_dll()).is_some(),
+        first_block_for_ignoring_recency(&listing, &titan_dll()).is_some(),
         "characterization: the name-only matcher still finds the stale event"
     );
     assert!(

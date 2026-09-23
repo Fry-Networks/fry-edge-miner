@@ -198,11 +198,19 @@ pub(crate) fn first_block_for_at(
     None
 }
 
-/// The name-only form the existing tests pin. Kept so those tests stay
-/// byte-identical; production goes through `first_block_for_at`, which also
-/// requires the event to be recent.
+/// The name-only match, WITHOUT the recency filter. Not the production path —
+/// `first_block_for_at` is.
+///
+/// Kept deliberately, and renamed so the name says what it skips. T2 tried to
+/// delete it as a leftover and found it is not one: it is the characterization
+/// half of a pair in `code_integrity_recency_tests`, where "the name-only
+/// matcher still finds the stale event" sits beside "a month-old block must not
+/// describe the current state" over the SAME input. Together those two lines
+/// are the executable statement of the defect, which is worth more than the
+/// tidiness of removing the function — but the old name read like the
+/// production entry point, which is a trap for the next reader.
 #[allow(dead_code)]
-pub(crate) fn first_block_for(listing: &str, image: &Path) -> Option<String> {
+pub(crate) fn first_block_for_ignoring_recency(listing: &str, image: &Path) -> Option<String> {
     listing
         .split("\n\n")
         .map(str::trim)
