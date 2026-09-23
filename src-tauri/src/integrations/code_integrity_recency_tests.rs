@@ -72,18 +72,25 @@ fn the_window_boundary_is_inclusive_and_bounded() {
     assert!(!event_is_recent(&outside, now, BLOCK_RECENCY));
 }
 
-/// Fails CLOSED, unlike titan's log-line recency. An unreadable timestamp here
-/// would SUPPRESS recovery, and suppression is the dangerous direction.
+/// FAILS OPEN on an unreadable timestamp.
+///
+/// This is a deliberate reversal of my first version. T2 pointed out that the
+/// fixture this parser was written against is SYNTHETIC — never replaced by a
+/// capture from a machine that actually refused a DLL. Failing closed would
+/// therefore have silently disabled code-integrity detection ENTIRELY on any
+/// host whose XML we read wrongly, restoring the respawn loop B15 defect 5
+/// exists to stop. The query is already bounded by StartTime, so this check
+/// only ever EXCLUDES an event it can positively prove is too old.
 #[test]
-fn an_unreadable_timestamp_is_not_treated_as_recent() {
+fn an_unreadable_timestamp_does_not_disable_detection() {
     let now = chrono::Utc::now();
 
-    assert!(!event_is_recent(
+    assert!(event_is_recent(
         "<Event><System></System></Event>",
         now,
         BLOCK_RECENCY
     ));
-    assert!(!event_is_recent(
+    assert!(event_is_recent(
         "<Event><TimeCreated SystemTime='not-a-date'/></Event>",
         now,
         BLOCK_RECENCY
@@ -91,14 +98,40 @@ fn an_unreadable_timestamp_is_not_treated_as_recent() {
     assert_eq!(event_time("<Event/>"), None);
 }
 
-/// A clock skew that puts an event in the future must not count as recent
-/// either — that is the other way to accidentally suppress recovery forever.
+/// A block with no readable stamp must still reach the user, or the feature is
+/// silently off.
 #[test]
-fn an_event_from_the_future_is_not_recent() {
+fn a_block_with_no_readable_stamp_is_still_detected() {
     let now = chrono::Utc::now();
-    let listing = event("goworkerd.dll", "3033", now + chrono::Duration::days(1));
+    let listing = concat!(
+        "<Event><System><EventID>3033</EventID></System>",
+        "<EventData><Data>goworkerd.dll</Data></EventData></Event>"
+    );
 
-    assert!(!event_is_recent(&listing, now, BLOCK_RECENCY));
+    assert!(
+        first_block_for_at(listing, &titan_dll(), now, BLOCK_RECENCY).is_some(),
+        "an unparseable stamp must not hide a real block"
+    );
+}
+
+/// The one case the query cannot protect against: StartTime is a lower bound,
+/// so a future-dated event is returned forever and would suppress recovery
+/// forever. Ordinary jitter is tolerated; an absurd stamp is not.
+#[test]
+fn an_implausibly_future_event_is_not_recent_but_jitter_is_tolerated() {
+    let now = chrono::Utc::now();
+
+    let jitter = event("goworkerd.dll", "3033", now + chrono::Duration::seconds(30));
+    assert!(
+        event_is_recent(&jitter, now, BLOCK_RECENCY),
+        "half a minute of clock jitter must not hide a real block"
+    );
+
+    let absurd = event("goworkerd.dll", "3033", now + chrono::Duration::days(1));
+    assert!(
+        !event_is_recent(&absurd, now, BLOCK_RECENCY),
+        "a day in the future would suppress recovery forever"
+    );
 }
 
 #[test]
@@ -130,4 +163,25 @@ fn another_images_block_is_not_ours() {
     let listing = event("some-other-thing.dll", "3033", now);
 
     assert!(first_block_for_at(&listing, &titan_dll(), now, BLOCK_RECENCY).is_none());
+}
+
+#[test]
+fn the_parser_reads_the_timestamp_shapes_windows_actually_emits() {
+    let mut bad = Vec::new();
+    for shape in [
+        "2026-09-22T18:30:45.1234567Z",
+        "2026-09-22T18:30:45.123456700Z",
+        "2026-09-22T18:30:45Z",
+        "2026-09-22T18:30:45.123+00:00",
+        "2026-09-22T18:30:45.1234567-05:00",
+    ] {
+        let xml = format!("<TimeCreated SystemTime='{shape}'/>");
+        if event_time(&xml).is_none() {
+            bad.push(shape);
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "these real-world shapes do not parse: {bad:?}"
+    );
 }

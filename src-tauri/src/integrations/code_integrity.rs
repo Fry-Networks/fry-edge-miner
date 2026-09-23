@@ -97,11 +97,8 @@ pub(crate) const BLOCK_RECENCY: std::time::Duration = std::time::Duration::from_
 
 /// PURE: the `SystemTime` attribute of an event's `<TimeCreated>` element.
 ///
-/// `None` when absent or unparseable, which the caller treats as NOT recent —
-/// failing CLOSED here, unlike titan's log-line recency which fails open. The
-/// asymmetry is deliberate: an unreadable timestamp on a log line should still
-/// surface a diagnosis, whereas an unreadable timestamp here would suppress
-/// recovery, and suppression is the dangerous direction.
+/// `None` when absent or unparseable. See `event_is_recent` for why that is
+/// treated as recent rather than as stale.
 pub(crate) fn event_time(event_xml: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let at = event_xml.find("SystemTime=")?;
     let rest = &event_xml[at + "SystemTime=".len()..];
@@ -112,17 +109,44 @@ pub(crate) fn event_time(event_xml: &str) -> Option<chrono::DateTime<chrono::Utc
         .map(|t| t.with_timezone(&chrono::Utc))
 }
 
+/// An event stamped slightly ahead of us is ordinary clock jitter between the
+/// event-log writer and this process, not evidence of anything.
+const CLOCK_SKEW_TOLERANCE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 /// PURE: is this event recent enough to describe the current state?
+///
+/// FAILS OPEN on an unreadable timestamp, and that is a deliberate reversal of
+/// my first version. T2 pointed out that the fixture this parser was written
+/// against is SYNTHETIC — built to the documented event shape and never
+/// replaced by a capture from a machine that actually refused a DLL. Failing
+/// closed on an unparseable stamp would therefore have silently disabled
+/// code-integrity detection ENTIRELY on any host whose XML we read wrongly,
+/// which restores the respawn loop B15 defect 5 exists to stop. That is a worse
+/// failure than the staleness this filter is for, and a more likely one.
+///
+/// It is also unnecessary: `recent_blocks_script` bounds the query with
+/// `StartTime`, so the OS has already excluded old events before we see them.
+/// This check is defence in depth — it excludes an event only when it can
+/// POSITIVELY prove the event is too old.
+///
+/// The one case the query cannot protect against is an event stamped in the
+/// FUTURE: `StartTime` is a lower bound, so such an event is returned forever
+/// and would suppress recovery forever. Beyond a tolerance for ordinary jitter,
+/// that is rejected.
 pub(crate) fn event_is_recent(
     event_xml: &str,
     now: chrono::DateTime<chrono::Utc>,
     window: std::time::Duration,
 ) -> bool {
     let Some(stamped) = event_time(event_xml) else {
-        return false;
+        return true;
     };
     let age = now.signed_duration_since(stamped);
-    age >= chrono::Duration::zero() && age <= chrono::Duration::from_std(window).unwrap_or_default()
+    let skew = chrono::Duration::from_std(CLOCK_SKEW_TOLERANCE).unwrap_or_default();
+    if age < -skew {
+        return false;
+    }
+    age <= chrono::Duration::from_std(window).unwrap_or_default()
 }
 
 /// PURE: the first RECENT block in `listing` that names `image`, if any. The
