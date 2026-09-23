@@ -267,3 +267,110 @@ fn the_docker_installer_never_runs_on_an_automatic_trigger() {
     assert_eq!(ran.load(Ordering::SeqCst), 0);
     clear_blocked("docker-desktop");
 }
+
+/// THE RETRY GESTURE, end to end. Before this, `clear_blocked` wiped only the
+/// card message while the spent attempt key stayed in the gate, so the user's
+/// toggle produced no prompt, no rule, and an empty card — the B14
+/// silent-revert shape, caused by the B3 fix. D-02 ships no Retry button
+/// precisely because the toggle IS the gesture, so this path has to work.
+#[test]
+fn the_retry_gesture_re_arms_the_one_allowed_attempt() {
+    let ran = AtomicUsize::new(0);
+    let key = "retry-gesture|C:\\FEM\\resources\\frynode.exe";
+    let declined = || -> anyhow::Result<()> {
+        ran.fetch_add(1, Ordering::SeqCst);
+        Err(anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the user cancelled the consent prompt",
+        )))
+    };
+
+    // The user clicks, and declines the prompt.
+    let first = run_elevated(
+        "test-retry-gesture",
+        key,
+        ElevationTrigger::UserClick,
+        declined,
+    );
+    assert_eq!(
+        first,
+        Err(ElevationSkipped::Failed(NEEDS_APPROVAL_MESSAGE.to_string()))
+    );
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        reason("test-retry-gesture").as_deref(),
+        Some(NEEDS_APPROVAL_MESSAGE)
+    );
+
+    // Clicking again WITHOUT a gesture must not re-raise it — that is the
+    // anti-loop guarantee, and the card must not fall silent either.
+    let again = run_elevated(
+        "test-retry-gesture",
+        key,
+        ElevationTrigger::UserClick,
+        declined,
+    );
+    assert_eq!(again, Err(ElevationSkipped::AlreadyAttempted));
+    assert_eq!(ran.load(Ordering::SeqCst), 1, "no prompt without a gesture");
+    assert_eq!(
+        reason("test-retry-gesture").as_deref(),
+        Some(NEEDS_APPROVAL_MESSAGE),
+        "the card must keep saying what is wrong, not go blank"
+    );
+
+    // Now the gesture: toggle off/on calls clear_blocked.
+    clear_blocked("test-retry-gesture");
+    assert_eq!(reason("test-retry-gesture"), None);
+
+    let retried = run_elevated(
+        "test-retry-gesture",
+        key,
+        ElevationTrigger::UserClick,
+        || {
+            ran.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        },
+    );
+    assert_eq!(retried, Ok(()), "the gesture must re-arm the one attempt");
+    assert_eq!(
+        ran.load(Ordering::SeqCst),
+        2,
+        "the retry must actually raise the prompt again"
+    );
+}
+
+/// …and the gesture re-arms ONLY the purpose it names.
+#[test]
+fn the_retry_gesture_does_not_re_arm_another_integrations_attempt() {
+    let ran = AtomicUsize::new(0);
+    let spend = |purpose: &'static str| -> Result<(), ElevationSkipped> {
+        run_elevated(
+            purpose,
+            "shared-key-shape",
+            ElevationTrigger::UserClick,
+            || {
+                ran.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("declined")
+            },
+        )
+    };
+    let _ = spend("test-retry-scope-a");
+    let _ = spend("test-retry-scope-b");
+    assert_eq!(ran.load(Ordering::SeqCst), 2);
+
+    clear_blocked("test-retry-scope-a");
+
+    assert!(
+        matches!(
+            spend("test-retry-scope-a"),
+            Err(ElevationSkipped::Failed(_))
+        ),
+        "the cleared purpose must re-arm"
+    );
+    assert_eq!(
+        spend("test-retry-scope-b"),
+        Err(ElevationSkipped::AlreadyAttempted),
+        "clearing one card must not re-arm another's elevation"
+    );
+    assert_eq!(ran.load(Ordering::SeqCst), 3);
+}

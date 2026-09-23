@@ -124,7 +124,17 @@ fn is_redaction_marker(value: &str) -> bool {
 
 /// Secret NAMES, not secret SHAPES. A value is unguessable by definition; the
 /// key next to it is not.
-const SECRET_NAMES: &str = r"(?:[a-z0-9_]*(?:mnemonic|seed[_-]?phrase|secret|passwd|password|private[_-]?key|access[_-]?key|api[_-]?key|auth[_-]?token|node[_-]?token|token))";
+/// Secret NAMES, not secret SHAPES. A value is unguessable by definition; the
+/// key next to it is not.
+///
+/// The prefix class includes `.` and `-` because a real leak needed it:
+/// MystNodes is started with `--user.token=<device token>` (mysterium.rs), and
+/// sdk_client echoes its own invocation on an ERR/FTL line. With a `[a-z0-9_]*`
+/// prefix the alternation could not span the `.` in `user.token`, so the flag
+/// arm died right after `--` and the token reached the card, fem.log, the
+/// partner log and the exported bundle verbatim — under a comment in
+/// mysterium.rs asserting it was scrubbed.
+const SECRET_NAMES: &str = r"(?:[a-z0-9_.-]*(?:mnemonic|seed[_-]?phrase|secret|passwd|password|private[_-]?key|access[_-]?key|api[_-]?key|auth[_-]?token|node[_-]?token|token))";
 
 /// B23: `{"node_token": "<key>"}` — the exact file format `iagon.rs` tells the
 /// user to create, and a shape none of the existing rules match (they need a
@@ -174,13 +184,37 @@ fn redact_named_secret(s: &str) -> String {
         ))
         .unwrap()
     });
-    bare.replace_all(&out, |caps: &regex::Captures| {
+    let out = bare.replace_all(&out, |caps: &regex::Captures| {
         if is_redaction_marker(&caps[3]) {
             return caps[0].to_string();
         }
         format!("{}{}=<redacted>", &caps[1], &caps[2])
-    })
-    .to_string()
+    });
+
+    // A COLON form. Only `token:` and `api[_-]key:` had a colon rule, so
+    // `password: hunter2`, `secret: x`, `private_key: x` and `user.token: x`
+    // all came back unredacted. Requires a space or quote after the colon so a
+    // Windows path (`C:\Users\x`) and a URL scheme cannot match.
+    static COLON: OnceLock<Regex> = OnceLock::new();
+    let colon = COLON.get_or_init(|| {
+        Regex::new(&format!(
+            r#"(?i)(^|[\s,;(\[{{])(--?)?({SECRET_NAMES})\s*:\s+("[^"]*"|\S+)"#
+        ))
+        .unwrap()
+    });
+    colon
+        .replace_all(&out, |caps: &regex::Captures| {
+            if is_redaction_marker(&caps[4]) {
+                return caps[0].to_string();
+            }
+            format!(
+                "{}{}{}=<redacted>",
+                &caps[1],
+                caps.get(2).map_or("", |m| m.as_str()),
+                &caps[3]
+            )
+        })
+        .to_string()
 }
 
 /// B23: `device_name=GEORGE-RIG-01 device_id=fem-george-rig-01` — the exact

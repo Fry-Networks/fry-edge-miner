@@ -3,6 +3,7 @@ pub mod debug;
 pub mod device;
 pub mod integration;
 pub mod migration;
+pub mod partner_secret;
 pub mod rewards;
 pub mod settings;
 pub mod system;
