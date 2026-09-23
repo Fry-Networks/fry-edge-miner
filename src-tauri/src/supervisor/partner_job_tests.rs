@@ -67,19 +67,28 @@ fn the_partner_job_is_kill_on_close_and_below_normal() {
     }
 }
 
-/// D-03's required mitigation. The job's kill is abrupt by design, so a normal
-/// quit has to stop the partners itself first — otherwise every ordinary exit
-/// hard-kills a Subspace farmer mid-plot.
+/// D-03's required mitigation, and the reason it takes more than one
+/// assertion.
+///
+/// My first version of this test asserted only that the exit handler contains
+/// `shutdown()`. That was vacuous for the property it is named after:
+/// `Supervisor::shutdown` iterates `Supervisor.processes`, which ONLY
+/// `start_integration` populates, while OlostepBrowser (aem.rs) and SpaceAcres
+/// (space_acres.rs) are spawned with a bare `Command::spawn()` and adopted
+/// straight into the kill-on-close job. They are never in that map, so the
+/// handler could contain `shutdown()` and still have the kernel
+/// TerminateProcess a farmer mid-plot on every ordinary quit — a regression
+/// against master, where both survived FEM's exit.
+///
+/// So the guard has to pin the SOURCE OF TRUTH, not the presence of a call.
 #[test]
 fn a_normal_quit_stops_partners_gracefully_before_the_job_kills_them() {
     let code = code_only(include_str!("../main.rs"));
+
     let at = code.find("RunEvent::ExitRequested").expect(
         "main() must handle the exit event, or a normal quit is indistinguishable \
          from FEM being killed",
     );
-    // Bounded to the handler, not run to EOF: an unscoped slice would accept a
-    // `shutdown()` anywhere later in the file. It happens to catch the targeted
-    // revert today, but by luck rather than by design.
     let end = code[at..]
         .find("\n        })")
         .map(|e| at + e)
@@ -88,13 +97,77 @@ fn a_normal_quit_stops_partners_gracefully_before_the_job_kills_them() {
     assert!(
         handler.len() < 1200,
         "the exit-handler slice has widened to {} bytes — bound it, or anything \
-         later in main.rs can satisfy the assertion below",
+         later in main.rs can satisfy the assertions below",
         handler.len()
     );
+
+    let graceful = format!("stop{}partners{}gracefully(", "_", "_");
     assert!(
-        handler.contains("shutdown()"),
-        "the exit handler must run the supervisor's graceful shutdown:\n{handler}"
+        handler.contains(&graceful),
+        "the exit handler must run the graceful stop D-03 requires:\n{handler}"
     );
+    let shutdown = "shutdown()";
+    let graceful_at = handler.find(&graceful).expect("graceful stop present");
+    let shutdown_at = handler
+        .find(shutdown)
+        .expect("the supervisor backstop must still run");
+    assert!(
+        graceful_at < shutdown_at,
+        "the graceful stop must come BEFORE the supervisor backstop:\n{handler}"
+    );
+
+    // And the graceful stop must select from the REGISTRY, which is the only
+    // source that includes partners the supervisor never tracked.
+    let helper_at = code
+        .find(&format!("fn stop{}partners{}gracefully", "_", "_"))
+        .expect("the helper must exist");
+    let helper_end = code[helper_at..]
+        .find("\nfn main(")
+        .map(|e| helper_at + e)
+        .unwrap_or(code.len());
+    let helper = &code[helper_at..helper_end];
+    assert!(
+        helper.contains("state.registry"),
+        "the graceful stop must enumerate the REGISTRY; Supervisor.processes \
+         cannot see a partner spawned outside start_integration:\n{helper}"
+    );
+    assert!(
+        helper.contains("integration.stop()"),
+        "it must stop each integration through the trait, which is what reaches \
+         the bare-spawn partners:\n{helper}"
+    );
+    assert!(
+        !helper.contains("processes"),
+        "it must not go back through Supervisor.processes — that is the map that \
+         cannot see them:\n{helper}"
+    );
+}
+
+/// The fact that makes the test above meaningful: these two really are outside
+/// the supervisor's map, so the registry path is the ONLY one that reaches them.
+/// If either ever starts going through `start_integration`, the reasoning above
+/// changes and this should be revisited rather than silently still passing.
+#[test]
+fn the_two_bare_spawn_partners_are_not_supervisor_tracked() {
+    let tracked = format!("start{}integration", "_");
+    for (name, src) in [
+        ("aem.rs", include_str!("../integrations/aem.rs")),
+        (
+            "space_acres.rs",
+            include_str!("../integrations/space_acres.rs"),
+        ),
+    ] {
+        let code = code_only(src);
+        assert!(
+            !code.contains(&tracked),
+            "{name} now registers with the supervisor — D-03's mitigation \
+             reasoning assumed it does not, so re-check the exit path"
+        );
+        assert!(
+            code.contains(".spawn()"),
+            "{name} is expected to spawn its partner directly"
+        );
+    }
 }
 
 /// The mechanism itself, on the only platform where it exists. Builds a

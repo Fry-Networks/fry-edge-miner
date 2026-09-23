@@ -296,3 +296,81 @@ fn each_sink_uses_the_rule_set_it_is_supposed_to() {
         "the bundle must NOT be collected with the narrow write-time rule set"
     );
 }
+
+// ---------------------------------------------------------------------------
+// G4 findings 17 and 19: the corpus had no MystNodes case, which is exactly
+// where a shipped secret lives. mysterium.rs starts sdk_client with
+// `--user.token=<device token>` in argv and carries a comment asserting the
+// line is scrubbed before it is surfaced. It was not: SECRET_NAMES' prefix
+// class could not span the `.` in `user.token`, so the flag arm died right
+// after `--`.
+// ---------------------------------------------------------------------------
+
+/// The exact shape mysterium.rs builds, in both sinks.
+#[test]
+fn a_mystnodes_user_token_is_redacted_in_both_sinks() {
+    for line in [
+        "2026-09-22T10:00:00Z ERR sdk_client --user.token=mystSECRET123",
+        "FTL failed to start args=[--user.token=mystSECRET123 --log.level=info]",
+        "launching sdk_client --user.token=mystSECRET123",
+    ] {
+        let full = scrub_line(line);
+        assert!(
+            !full.contains("mystSECRET123"),
+            "the device token reached the bundle: {full}"
+        );
+        let partner = scrub_partner_line(line);
+        assert!(
+            !partner.contains("mystSECRET123"),
+            "the device token reached the partner log: {partner}"
+        );
+    }
+}
+
+/// A hex-shaped token must not depend on `redact_serial` to be caught, because
+/// `scrub_partner_line` deliberately omits that rule (it rewrites paths). The
+/// NAME is what makes it a secret.
+#[test]
+fn a_hex_shaped_token_is_caught_by_its_name_not_its_shape() {
+    let line = "ERR sdk_client --user.token=deadbeefdeadbeef";
+    let partner = scrub_partner_line(line);
+    assert!(
+        !partner.contains("deadbeefdeadbeef"),
+        "must be caught by the name, since redact_serial is not in this rule \
+         set: {partner}"
+    );
+}
+
+/// The colon form. Only `token:` and `api-key:` had a colon rule.
+#[test]
+fn the_colon_form_of_a_named_secret_is_redacted() {
+    for (line, secret) in [
+        ("config password: hunter2-not-real", "hunter2-not-real"),
+        ("loaded secret: abc123xyz", "abc123xyz"),
+        ("private_key: MIIEvQIBADAN", "MIIEvQIBADAN"),
+        ("sdk_client user.token: mystSECRET456", "mystSECRET456"),
+    ] {
+        let out = scrub_line(line);
+        assert!(!out.contains(secret), "{secret} survived: {out}");
+        let partner = scrub_partner_line(line);
+        assert!(!partner.contains(secret), "{secret} survived: {partner}");
+    }
+}
+
+/// …without eating a Windows path or a URL, which is why the colon arm requires
+/// whitespace after the colon.
+#[test]
+fn the_colon_arm_does_not_eat_paths_or_urls() {
+    for line in [
+        r"Install dir: C:\Program Files\Fry Edge Miner",
+        r"C:\Users\georgep\AppData\Roaming\FryEdgeMiner\partners\titan",
+        "endpoint https://hardwareapi.frynetworks.com/v1/installations",
+        "starting API server on :8088",
+    ] {
+        assert_eq!(
+            scrub_partner_line(line),
+            line,
+            "the write-time set must leave this byte-identical: {line}"
+        );
+    }
+}
