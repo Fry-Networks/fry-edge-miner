@@ -81,18 +81,18 @@ From the `fry-edge-miner` worktree root (this file's `../../`):
 
 ```bash
 # Target w11 (default) or w10:
-FEMQA_VM=w11 PLAYWRIGHT_BROWSERS_PATH=/home/fry/.cache/ms-playwright \
+FEMQA_VM=w11 PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" \
   npx playwright test --config=qa/vm/playwright.vm.config.ts qa/vm/card-tile-parity.spec.ts
 
-FEMQA_VM=w11 PLAYWRIGHT_BROWSERS_PATH=/home/fry/.cache/ms-playwright \
+FEMQA_VM=w11 PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" \
   npx playwright test --config=qa/vm/playwright.vm.config.ts qa/vm/rewards-consistency.spec.ts
 
 # Or both:
-FEMQA_VM=w11 PLAYWRIGHT_BROWSERS_PATH=/home/fry/.cache/ms-playwright \
+FEMQA_VM=w11 PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" \
   npx playwright test --config=qa/vm/playwright.vm.config.ts qa/vm/
 
 # w10 instead:
-FEMQA_VM=w10 PLAYWRIGHT_BROWSERS_PATH=/home/fry/.cache/ms-playwright \
+FEMQA_VM=w10 PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright" \
   npx playwright test --config=qa/vm/playwright.vm.config.ts qa/vm/
 ```
 
