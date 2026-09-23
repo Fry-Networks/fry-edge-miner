@@ -289,6 +289,52 @@ mod tests {
         let (_writer, _guard) = build_file_writer(&nested).expect("writer");
         assert!(nested.is_dir(), "build_file_writer must create the log dir");
     }
+    /// B23 defect 3, THE WIRING. The behavioural test below builds its own
+    /// scrubbing writer, so it proves `ScrubbingWriter::always` scrubs — and
+    /// nothing at all about `init_logging` using it. Reverting the one
+    /// production call site back to `.with_writer(non_blocking)` left that test,
+    /// and every other test on the branch, green.
+    ///
+    /// That matters more here than almost anywhere else: B23 is the item where
+    /// Settings tells users the bundle is safe to post publicly. An unpinned
+    /// redaction wiring is a promise with nothing behind it.
+    ///
+    /// Asserted against source because `init_logging` installs a global
+    /// subscriber and can only run once per process. The needle is assembled at
+    /// runtime so this test cannot be satisfied by its own text.
+    #[test]
+    fn the_release_sink_is_wired_through_the_scrubbing_writer() {
+        let src = include_str!("mod.rs");
+        let code: String = src
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Only the release arm writes fem.log; the dev arm goes to stdout.
+        let arm = code
+            .find("#[cfg(not(debug_assertions))]")
+            .expect("init_logging must still have a release arm");
+        let end = code[arm..]
+            .find("tracing_subscriber::registry()")
+            .map(|e| arm + e)
+            .expect("the layers must still be composed into a registry");
+        let release_arm = &code[arm..end];
+
+        let scrubbing = format!("Scrubbing{}::always(", "MakeWriter");
+        assert!(
+            release_arm.contains(&scrubbing),
+            "the release sink must wrap its writer in the always-on scrubbing \
+             writer, or fem.log holds raw tracing output and a Windows username \
+             reaches the log folder through every partner path FEM logs:\n{release_arm}"
+        );
+        let bare = format!(".with_writer(non{}blocking)", "_");
+        assert!(
+            !release_arm.contains(&bare),
+            "the release sink still writes the raw non-blocking writer directly:\n{release_arm}"
+        );
+    }
+
     /// B23 defect 3. `fem.log` was written with no scrubber at all: the
     /// release layer took `non_blocking` directly, and only the opt-in debug
     /// layer wrapped it in `ScrubbingMakeWriter`. A Windows username reached

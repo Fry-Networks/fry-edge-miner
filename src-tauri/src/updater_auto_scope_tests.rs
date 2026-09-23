@@ -148,6 +148,18 @@ fn only_the_in_root_pids_are_selected_from_a_listing() {
 #[test]
 fn the_listing_script_asks_only_for_the_images_we_own() {
     let script = process_listing_script(&["frynode.exe", "titan-edge.exe"]);
+    // The per-image needles below only restate the `format!` this function was
+    // just handed, so they carry little on their own. What is real logic — and
+    // what a CIM filter is silently wrong without — is that several images are
+    // joined with `or` rather than concatenated into one unmatchable name.
+    assert!(
+        script.contains("Name='frynode.exe' or Name='titan-edge.exe'"),
+        "several images must be joined into a valid CIM disjunction: {script}"
+    );
+    assert!(
+        !process_listing_script(&["frynode.exe"]).contains(" or "),
+        "a single image must not emit a dangling disjunction"
+    );
     assert!(script.contains("Name='frynode.exe'"));
     assert!(script.contains("Name='titan-edge.exe'"));
     assert!(

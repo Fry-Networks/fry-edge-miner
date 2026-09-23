@@ -77,10 +77,23 @@ fn a_normal_quit_stops_partners_gracefully_before_the_job_kills_them() {
         "main() must handle the exit event, or a normal quit is indistinguishable \
          from FEM being killed",
     );
-    let handler = &code[at..];
+    // Bounded to the handler, not run to EOF: an unscoped slice would accept a
+    // `shutdown()` anywhere later in the file. It happens to catch the targeted
+    // revert today, but by luck rather than by design.
+    let end = code[at..]
+        .find("\n        })")
+        .map(|e| at + e)
+        .unwrap_or(code.len());
+    let handler = &code[at..end];
+    assert!(
+        handler.len() < 1200,
+        "the exit-handler slice has widened to {} bytes — bound it, or anything \
+         later in main.rs can satisfy the assertion below",
+        handler.len()
+    );
     assert!(
         handler.contains("shutdown()"),
-        "the exit handler must run the supervisor's graceful shutdown"
+        "the exit handler must run the supervisor's graceful shutdown:\n{handler}"
     );
 }
 

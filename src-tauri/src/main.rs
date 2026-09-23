@@ -1301,16 +1301,44 @@ mod b1_crt_linkage_tests {
         );
     }
 
+    /// The one workflow step the gate command lives in.
+    ///
+    /// Slicing to EOF instead made the bundle assertion below VACUOUS: the
+    /// needle `target/release/bundle` also occurs in the NSIS upload globs
+    /// further down the file, so the gate could stop scanning the bundle
+    /// entirely and the test stayed green. The bundle is where the installer
+    /// lives — the exact artifact that reproduces VCRUNTIME140_1.dll for a user
+    /// — so that was the one argument it could least afford not to pin.
+    fn crt_gate_step() -> &'static str {
+        let at = BUILD_WORKFLOW
+            .find("check_crt_imports.py")
+            .expect("build.yml must run the CRT-import gate");
+        let end = BUILD_WORKFLOW[at..]
+            .find("\n      - name:")
+            .map(|e| at + e)
+            .unwrap_or(BUILD_WORKFLOW.len());
+        let step = &BUILD_WORKFLOW[at..end];
+        // Self-check: if a future edit lets this slice swallow the following
+        // steps again, fail HERE rather than quietly weakening every assertion
+        // that reads it.
+        assert!(
+            step.len() < 1000,
+            "the gate-step slice has widened to {} bytes — it must cover ONE step, \
+             or the assertions over it can be satisfied by an unrelated step",
+            step.len()
+        );
+        assert!(
+            !step.contains("upload-artifact"),
+            "the gate-step slice has run into the upload steps: {step}"
+        );
+        step
+    }
+
     /// The gate is only worth anything if it covers the binary that actually
     /// failed on users' machines, not just the installer wrapper around it.
     #[test]
     fn the_gate_covers_the_app_binary_the_bundle_and_the_bundled_resources() {
-        let step = {
-            let at = BUILD_WORKFLOW
-                .find("check_crt_imports.py")
-                .expect("build.yml must run the CRT-import gate");
-            &BUILD_WORKFLOW[at..]
-        };
+        let step = crt_gate_step();
         for target in [
             "target/release/fry-edge-miner.exe",
             "target/release/bundle",
@@ -1328,14 +1356,21 @@ mod b1_crt_linkage_tests {
     /// release build alone.
     #[test]
     fn the_test_pass_does_not_share_the_release_target_directory() {
+        // Scoped to the step that runs the gates. File-wide anchors would let a
+        // second `cd src-tauri` / export pair somewhere else in the workflow
+        // satisfy this by accident — the same defect that made the bundle
+        // assertion above vacuous.
         let at = BUILD_WORKFLOW
             .find("cargo test --release")
             .expect("build.yml must still run the Rust tests");
-        let before = &BUILD_WORKFLOW[..at];
-        let export = before
+        let step_start = BUILD_WORKFLOW[..at]
+            .rfind("      - name:")
+            .expect("the tests must run inside a named step");
+        let step = &BUILD_WORKFLOW[step_start..at];
+        let export = step
             .rfind("CARGO_TARGET_DIR")
             .expect("the gates must run in their own target directory");
-        let cd = before
+        let cd = step
             .rfind("cd src-tauri")
             .expect("the gates still run from src-tauri");
         assert!(
