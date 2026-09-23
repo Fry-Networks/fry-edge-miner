@@ -210,6 +210,117 @@ const _: () = assert!(
     "the extraction deadline must outlast the generic probe deadline"
 );
 
+/// Per-file sha256 pins for the v0.1.20 release.
+///
+/// Measured from the published archive, which itself verifies against
+/// `EXPECTED_SHA256` — so these are derived from the same artifact the install
+/// already trusts, not from a separate download.
+///
+/// B15's Done-when asks for partner files to be verified against a pinned
+/// manifest BEFORE EVERY SPAWN, with automatic repair on mismatch. The archive
+/// hash alone cannot do that: it is checked once at install time and says
+/// nothing about what is on disk at spawn time, which is exactly the window in
+/// which an antivirus quarantine or a partial update corrupts a file.
+const PINNED_FILES: [(&str, &str, u64); 2] = [
+    (
+        "titan-edge.exe",
+        "a9e4a521343a1ce6800ba15178d7da403cd48ccf15e3df4adc464969dcf95e8b",
+        162_912_779,
+    ),
+    (
+        "goworkerd.dll",
+        "997cd9439ed79ea22c311dcca7308604755517e15c2c3ee17ce96f41412609e6",
+        177_544_704,
+    ),
+];
+
+/// Files already verified in this process run, keyed by path, with the size and
+/// mtime they had when they passed.
+///
+/// Hashing 340 MB on every spawn would make a restart cycle expensive, and the
+/// supervisor can restart several times in a row. A file whose size AND mtime
+/// are unchanged since it last verified has not been swapped, so re-hashing it
+/// buys nothing; anything that touches the file invalidates the entry.
+static VERIFIED_FILES: std::sync::Mutex<
+    Option<std::collections::HashMap<PathBuf, (u64, std::time::SystemTime)>>,
+> = std::sync::Mutex::new(None);
+
+/// PURE: does this file's metadata match what it had when it last verified?
+pub(crate) fn metadata_unchanged(
+    recorded: Option<(u64, std::time::SystemTime)>,
+    now: (u64, std::time::SystemTime),
+) -> bool {
+    recorded == Some(now)
+}
+
+/// Verify the pinned partner files, returning the names that are missing or do
+/// not match. Empty means the tree is trustworthy.
+fn unverified_pinned_files(partner_dir: &std::path::Path) -> Vec<String> {
+    let mut bad = Vec::new();
+    for (name, expected, expected_len) in PINNED_FILES {
+        let path = partner_dir.join(name);
+        let Ok(meta) = std::fs::metadata(&path) else {
+            bad.push(format!("{name} is missing"));
+            continue;
+        };
+        if meta.len() != expected_len {
+            bad.push(format!(
+                "{name} is {} bytes, expected {expected_len}",
+                meta.len()
+            ));
+            continue;
+        }
+        let stamp = match meta.modified() {
+            Ok(m) => Some((meta.len(), m)),
+            Err(_) => None,
+        };
+        let cached = stamp.and_then(|s| {
+            VERIFIED_FILES
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|m| m.get(&path).copied()))
+                .filter(|recorded| metadata_unchanged(Some(*recorded), s))
+        });
+        if cached.is_some() {
+            continue;
+        }
+        match TitanIntegration::compute_sha256(&path) {
+            Ok(actual) if actual.eq_ignore_ascii_case(expected) => {
+                if let (Some(s), Ok(mut guard)) = (stamp, VERIFIED_FILES.lock()) {
+                    guard.get_or_insert_with(Default::default).insert(path, s);
+                }
+            }
+            Ok(actual) => bad.push(format!("{name} hashes to {actual}, expected {expected}")),
+            Err(e) => bad.push(format!("{name} could not be read: {e}")),
+        }
+    }
+    bad
+}
+
+/// Move a partner file that does not match its pin out of the way.
+///
+/// Renamed, never deleted: the displaced file is the only evidence of what was
+/// actually on disk, and a quarantined-then-restored antivirus artefact is
+/// exactly the thing worth keeping.
+fn quarantine_unverified(partner_dir: &std::path::Path) {
+    for (name, _, _) in PINNED_FILES {
+        let path = partner_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let dest = partner_dir.join(format!("{name}.untrusted"));
+        match std::fs::rename(&path, &dest) {
+            Ok(()) => warn!(moved_to = ?dest, "Quarantined a Titan file that failed verification"),
+            Err(e) => warn!(error = %e, file = name, "Could not quarantine a Titan file"),
+        }
+    }
+    if let Ok(mut guard) = VERIFIED_FILES.lock() {
+        if let Some(map) = guard.as_mut() {
+            map.clear();
+        }
+    }
+}
+
 /// Remove an extracted release directory and everything inside it.
 ///
 /// Recursive on purpose: `remove_dir` fails the moment the archive carries any
@@ -616,6 +727,35 @@ impl Integration for TitanIntegration {
             anyhow::bail!("titan-edge binary not found at {}", binary.display());
         }
 
+        // B15: verify the pinned files BEFORE handing anything to the loader.
+        // Offloaded, because hashing is blocking work and the bound around
+        // start() has to be able to fire. One repair attempt, then refuse
+        // rather than spawn an image we know is wrong.
+        let partner_dir = Self::partner_dir();
+        let check_dir = partner_dir.clone();
+        let bad = tokio::task::spawn_blocking(move || unverified_pinned_files(&check_dir))
+            .await
+            .map_err(|e| anyhow::anyhow!("Titan verification task panicked: {e}"))?;
+        if !bad.is_empty() {
+            warn!(problems = ?bad, "Titan partner files failed verification — repairing");
+            let repair_dir = partner_dir.clone();
+            tokio::task::spawn_blocking(move || quarantine_unverified(&repair_dir))
+                .await
+                .map_err(|e| anyhow::anyhow!("Titan quarantine task panicked: {e}"))?;
+            self.install().await?;
+            let recheck_dir = partner_dir.clone();
+            let still_bad =
+                tokio::task::spawn_blocking(move || unverified_pinned_files(&recheck_dir))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Titan verification task panicked: {e}"))?;
+            if !still_bad.is_empty() {
+                anyhow::bail!(
+                    "Titan Network files could not be restored to their pinned versions: {}",
+                    still_bad.join("; ")
+                );
+            }
+        }
+
         let binary_str = binary.to_string_lossy().to_string();
         let args = [
             "daemon",
@@ -740,7 +880,19 @@ impl Integration for TitanIntegration {
     }
 
     fn installed_version(&self) -> Option<String> {
-        if Self::binary_path().exists() {
+        // G4 finding 7: this checked ONLY titan-edge.exe, and every production
+        // caller of install() gates on it — the toggle, the boot recovery pass
+        // and the Docker watcher. So the half-install repair added for B13 was
+        // unreachable: with the exe present and goworkerd.dll missing or
+        // quarantined (the reported "Bad Image … goworkerd.dll" case) this
+        // returned Some, install() was skipped, start() spawned anyway, the
+        // loader failed, and the health loop restarted the same broken tree
+        // forever with no in-app repair.
+        //
+        // Existence checks only, deliberately: this runs inside the registry
+        // snapshot on a 30 s poll, so it must stay cheap. The sha256 work lives
+        // in start(), once per spawn.
+        if Self::install_is_complete(&Self::partner_dir()) {
             Some("v0.1.20".into())
         } else {
             None
