@@ -77,8 +77,77 @@ pub(crate) fn event_names_our_image(event_xml: &str, image: &Path) -> bool {
         .any(|id| haystack.contains(&format!(">{id}<")) || haystack.contains(&format!("'{id}'")))
 }
 
-/// PURE: the first block in `listing` that names `image`, if any. The listing
-/// is one event's XML per chunk, separated by blank lines.
+/// How recent a block event has to be to describe the CURRENT state.
+///
+/// G4 findings 6 and 16: nothing here filtered by time, and the
+/// CodeIntegrity/Operational channel is near-silent on a normal machine — so
+/// ONE historical block survived in the last 20 events indefinitely. A user who
+/// followed FEM's own instruction, allowed the file and ran for weeks would, on
+/// the next ordinary death (disk full, upstream crash, ended task), have that
+/// months-old event re-read, the "Awaiting administrator action" marker
+/// returned, and `recovery_action` suppressed FOREVER. A one-off historical
+/// event permanently converted a restartable failure into an un-restartable one
+/// with instructions for a problem the user had already fixed.
+///
+/// The window can be short because a genuinely blocked image writes a NEW event
+/// on every load attempt: if the block is real, the next spawn re-proves it. And
+/// because suppression stops the spawns, the window expiring is what lets FEM
+/// try again — a fixed machine self-heals instead of needing a toggle.
+pub(crate) const BLOCK_RECENCY: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// PURE: the `SystemTime` attribute of an event's `<TimeCreated>` element.
+///
+/// `None` when absent or unparseable, which the caller treats as NOT recent —
+/// failing CLOSED here, unlike titan's log-line recency which fails open. The
+/// asymmetry is deliberate: an unreadable timestamp on a log line should still
+/// surface a diagnosis, whereas an unreadable timestamp here would suppress
+/// recovery, and suppression is the dangerous direction.
+pub(crate) fn event_time(event_xml: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let at = event_xml.find("SystemTime=")?;
+    let rest = &event_xml[at + "SystemTime=".len()..];
+    let quote = rest.chars().next()?;
+    let value = rest[1..].split(quote).next()?;
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc))
+}
+
+/// PURE: is this event recent enough to describe the current state?
+pub(crate) fn event_is_recent(
+    event_xml: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    window: std::time::Duration,
+) -> bool {
+    let Some(stamped) = event_time(event_xml) else {
+        return false;
+    };
+    let age = now.signed_duration_since(stamped);
+    age >= chrono::Duration::zero() && age <= chrono::Duration::from_std(window).unwrap_or_default()
+}
+
+/// PURE: the first RECENT block in `listing` that names `image`, if any. The
+/// listing is one event's XML per chunk, separated by blank lines.
+pub(crate) fn first_block_for_at(
+    listing: &str,
+    image: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+    window: std::time::Duration,
+) -> Option<String> {
+    listing
+        .split("\n\n")
+        .map(str::trim)
+        .find(|chunk| {
+            !chunk.is_empty()
+                && event_names_our_image(chunk, image)
+                && event_is_recent(chunk, now, window)
+        })
+        .map(|chunk| chunk.to_string())
+}
+
+/// The name-only form the existing tests pin. Kept so those tests stay
+/// byte-identical; production goes through `first_block_for_at`, which also
+/// requires the event to be recent.
+#[allow(dead_code)]
 pub(crate) fn first_block_for(listing: &str, image: &Path) -> Option<String> {
     listing
         .split("\n\n")
@@ -91,11 +160,16 @@ pub(crate) fn first_block_for(listing: &str, image: &Path) -> Option<String> {
 /// `-ErrorAction SilentlyContinue` because the channel is disabled on some
 /// installs, which is not an error condition for FEM.
 pub(crate) fn recent_blocks_script() -> String {
+    // StartTime bounds the query at the source, so a near-silent channel cannot
+    // hand back a months-old event. The Rust side filters again on the parsed
+    // TimeCreated, because this string is only as good as the host's clock and
+    // the Rust check is the one that is unit-testable.
     format!(
         "Get-WinEvent -FilterHashtable @{{LogName='Microsoft-Windows-CodeIntegrity/Operational'; \
-         Id={}}} -MaxEvents 20 -ErrorAction SilentlyContinue | \
+         Id={}; StartTime=(Get-Date).AddSeconds(-{})}} -MaxEvents 20 -ErrorAction SilentlyContinue | \
          ForEach-Object {{ $_.ToXml(); '' }}",
-        BLOCK_EVENT_IDS.join(",")
+        BLOCK_EVENT_IDS.join(","),
+        BLOCK_RECENCY.as_secs()
     )
 }
 
@@ -106,14 +180,49 @@ pub(crate) fn recent_block(image: &Path) -> Option<String> {
     if !cfg!(target_os = "windows") {
         return None;
     }
+    // Findings 6/16 secondary cost: this is consulted on EVERY health tick while
+    // the process is down, so without a memo it spawns one or two 20 s-bounded
+    // PowerShell probes every 30 s indefinitely. A block does not appear and
+    // disappear within seconds, so a short memo costs nothing in accuracy.
+    if let Some(cached) = cached_listing() {
+        return first_block_for_at(&cached, image, chrono::Utc::now(), BLOCK_RECENCY)
+            .map(|_| user_message(image));
+    }
     let out = crate::supervisor::platform::command("powershell")
         .args(["-NoProfile", "-Command", &recent_blocks_script()])
         .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
         .ok()?;
-    let listing = String::from_utf8_lossy(&out.stdout);
-    first_block_for(&listing, image).map(|_| user_message(image))
+    let listing = String::from_utf8_lossy(&out.stdout).to_string();
+    remember_listing(&listing);
+    first_block_for_at(&listing, image, chrono::Utc::now(), BLOCK_RECENCY)
+        .map(|_| user_message(image))
+}
+
+/// How long a listing is reused before the channel is queried again.
+const LISTING_MEMO: std::time::Duration = std::time::Duration::from_secs(60);
+
+static LISTING_CACHE: std::sync::Mutex<Option<(String, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+fn cached_listing() -> Option<String> {
+    let guard = LISTING_CACHE.lock().ok()?;
+    let (listing, at) = guard.as_ref()?;
+    (at.elapsed() < LISTING_MEMO).then(|| listing.clone())
+}
+
+fn remember_listing(listing: &str) {
+    if let Ok(mut guard) = LISTING_CACHE.lock() {
+        *guard = Some((listing.to_string(), std::time::Instant::now()));
+    }
 }
 
 #[cfg(test)]
 #[path = "code_integrity_tests.rs"]
 mod code_integrity_tests;
+
+/// G4 findings 6 and 16: the recency filter that stops a historical block
+/// permanently disabling recovery. Separate file so `code_integrity_tests.rs`
+/// stays byte-identical.
+#[cfg(test)]
+#[path = "code_integrity_recency_tests.rs"]
+mod code_integrity_recency_tests;
