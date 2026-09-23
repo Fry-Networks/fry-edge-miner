@@ -44,13 +44,24 @@ impl AemIntegration {
         // never shows the firewall prompt (the path changes on every Olostep
         // Squirrel self-update, which re-triggered the prompt each time).
         // Non-fatal: a declined UAC just means Windows prompts as before.
-        if let Err(e) = super::firewall::ensure_program_rules(
-            super::firewall::OLOSTEP_RULE_NAME,
-            &binary,
-            "aem",
-            trigger,
-        ) {
-            warn!(error = %e, "Olostep firewall rule setup failed — continuing");
+        // Offloaded for the same reason titan.rs offloads its redist install:
+        // at UAC_ANSWER_TIMEOUT this waits up to three minutes on a human, and
+        // on the async task that pins a tokio worker and voids the 60 s toggle
+        // bound, which cannot fire while the worker is blocked.
+        let rule_path = binary.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            super::firewall::ensure_program_rules(
+                super::firewall::OLOSTEP_RULE_NAME,
+                &rule_path,
+                "aem",
+                trigger,
+            )
+        })
+        .await;
+        match outcome {
+            Ok(Err(e)) => warn!(error = %e, "Olostep firewall rule setup failed — continuing"),
+            Err(e) => warn!(error = %e, "Olostep firewall rule task panicked — continuing"),
+            Ok(Ok(())) => {}
         }
         info!(binary = ?binary, "Starting OlostepBrowser");
         let child = crate::supervisor::platform::command(&binary).spawn()?;

@@ -439,6 +439,11 @@ pub(crate) fn should_report_unhealthy(consecutive_failures: u32) -> bool {
 /// PURE: the first genuinely-failing line in a log tail, or None.
 /// Reuses the existing `line_indicates_error` contract so benign lines that
 /// merely contain "error" (errors=0, error=<nil>, a docs URL) stay benign.
+/// Kept, not deleted: `mod bug3_daemon_error_tests` pins this and must stay
+/// byte-identical, and it remains the correct whole-log entry point. Production
+/// now selects its line with `first_recent_error_line` instead, so this is
+/// reachable only from tests.
+#[allow(dead_code)]
 pub(crate) fn first_error_line(log: &str) -> Option<&str> {
     log.lines().map(str::trim).find(|l| line_indicates_error(l))
 }
@@ -489,10 +494,34 @@ pub(crate) fn first_recent_error_line(
 /// PURE: the user-facing reason for a daemon that is running but logging
 /// failures. Carries the REAL error through instead of the old fixed
 /// placeholder, and explains the common connectivity case in plain language.
+/// Kept for the same reason as `first_error_line`: the existing
+/// `bug3_daemon_error_tests` exercise this whole-log entry point, and those
+/// tests must not be edited. Production calls
+/// `daemon_log_failure_reason_for_line` with the line the gate selected.
+#[allow(dead_code)]
 pub(crate) fn daemon_log_failure_reason(log: &str) -> String {
-    let Some(line) = first_error_line(log) else {
-        return "Titan Network: the daemon reported a problem".to_string();
-    };
+    match first_error_line(log) {
+        Some(line) => daemon_log_failure_reason_for_line(line),
+        None => "Titan Network: the daemon reported a problem".to_string(),
+    }
+}
+
+/// PURE: the user-facing reason for ONE specific failing line.
+///
+/// Split out because the health check selects its line with a recency filter
+/// (`first_recent_error_line`) while this used to re-scan with
+/// `first_error_line`, which ignores recency — two different predicates over
+/// the same text, free to pick different lines. Reproduced against the real
+/// functions: a fresh local `{"level":"fatal","msg":"cannot open datastore"}`
+/// fired the gate while an hour-old connectivity line became the REASON, which
+/// `upstream_unreachable` then matched, so `recovery_action` returned None and
+/// a genuine device-side fault was never restarted and was painted as a
+/// network problem.
+///
+/// D-14 chose None on the premise that the reason really describes an upstream
+/// condition. Building the reason from the line that actually fired the gate is
+/// what makes that premise true; it does not weaken the exemption.
+pub(crate) fn daemon_log_failure_reason_for_line(line: &str) -> String {
     let lower = line.to_lowercase();
     let is_connectivity = lower.contains("timeout")
         || lower.contains("i/o timeout")
@@ -844,16 +873,17 @@ impl Integration for TitanIntegration {
             "
 ",
         );
-        if first_recent_error_line(
+        // Bind the line the gate selected, so the REASON describes the same
+        // failure that fired it. Re-scanning here with a different predicate is
+        // what let a stale network error be reported for a fresh local fatal.
+        if let Some(recent) = first_recent_error_line(
             &combined,
             chrono::Utc::now(),
             chrono::Duration::minutes(ERROR_RECENCY_WINDOW_MINUTES),
-        )
-        .is_some()
-        {
+        ) {
             let failures = TITAN_CONSECUTIVE_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
             if should_report_unhealthy(failures) {
-                return HealthStatus::Unhealthy(daemon_log_failure_reason(&combined));
+                return HealthStatus::Unhealthy(daemon_log_failure_reason_for_line(recent));
             }
             // Not yet persistent: report the transient state honestly rather
             // than claiming health we cannot demonstrate.
