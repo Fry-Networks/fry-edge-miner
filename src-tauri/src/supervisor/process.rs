@@ -111,6 +111,14 @@ pub fn suppress_process_hard_errors() {
 #[path = "error_mode_tests.rs"]
 mod error_mode_tests;
 
+/// B23: that write-time scrubbing does not rewrite a partner's own paths,
+/// proven end to end through a real spawn. Own file, and a child module of this
+/// one so it can reach the private `child` field the same way
+/// `bug9_working_dir_tests` does.
+#[cfg(test)]
+#[path = "partner_log_scrub_tests.rs"]
+mod partner_log_scrub_tests;
+
 /// Run `create` (the actual `Command::spawn`) on its own thread with the
 /// loader's modal error boxes suppressed, and wait at most `bound` for it.
 /// A creation that completes after the caller gave up is killed and logged —
@@ -203,7 +211,13 @@ fn pump_scrubbed(
                 Ok(_) => {
                     let text = String::from_utf8_lossy(&buf);
                     let body = text.trim_end_matches('\n').trim_end_matches('\r');
-                    if writeln!(file, "{}", crate::logging::scrubber::scrub_line(body)).is_err() {
+                    // `scrub_partner_line`, NOT `scrub_line`: a partner's output
+                    // is full of paths FEM and its own tests read back, and the
+                    // folder this file sits in already carries the username in
+                    // its own absolute path. See that function's docs for the
+                    // full layering argument.
+                    let scrubbed = crate::logging::scrubber::scrub_partner_line(body);
+                    if writeln!(file, "{scrubbed}").is_err() {
                         break;
                     }
                 }
