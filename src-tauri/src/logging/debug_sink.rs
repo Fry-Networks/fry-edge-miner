@@ -299,7 +299,10 @@ mod tests {
         );
     }
 
-    /// …while the DEBUG sink's gate is unchanged.
+    /// …while the DEBUG sink's gate is unchanged. BEHAVIOUR PIN, not a
+    /// RED->GREEN proof: gating was the only behaviour pre-fix, so this passes
+    /// there too. It exists so adding the always-on variant cannot quietly turn
+    /// the opt-in sink into an always-on one.
     #[test]
     fn a_gated_scrubbing_writer_still_discards_while_the_toggle_is_off() {
         let _guard = ToggleGuard::acquire(false);
