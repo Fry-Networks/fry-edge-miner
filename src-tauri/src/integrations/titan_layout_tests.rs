@@ -131,3 +131,115 @@ async fn clearing_an_absent_directory_is_not_an_error() {
 
     assert!(!absent.exists());
 }
+
+/// G4 finding 7 — the B13 half-install repair was unreachable from every
+/// production path.
+///
+/// Every caller of `install()` gates on `installed_version()`, which checked
+/// ONLY titan-edge.exe. With the exe present and goworkerd.dll missing — the
+/// reported "Bad Image … goworkerd.dll" case — it returned Some, install() was
+/// skipped, start() spawned anyway, and the health loop restarted the same
+/// broken tree forever with no in-app repair.
+#[test]
+fn installed_version_reports_a_half_install_as_not_installed() {
+    let src = include_str!("titan.rs");
+    let at = src
+        .find(&format!("fn installed{}(&self)", "_version"))
+        .expect("installed_version must exist");
+    let end = src[at..]
+        .find("\n    fn ")
+        .map(|e| at + e)
+        .unwrap_or(src.len());
+    // Comments stripped: the body deliberately EXPLAINS that hashing belongs in
+    // start(), and a guard that trips over its own explanation is worse than no
+    // guard. (This is the second time that trap has caught me — the first was a
+    // doc comment naming the OnceLock it replaced.)
+    let body: String = src[at..end]
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        body.contains(&format!("install_is{}(", "_complete")),
+        "installed_version does not consult the completeness predicate, so the gated \
+         install() callers can never repair a half-install:\n{body}"
+    );
+    assert!(
+        !body.contains("sha256") && !body.contains("compute_sha"),
+        "installed_version must not hash — it runs on the poll path:\n{body}"
+    );
+}
+
+/// B15 Done-when: verified against a pinned manifest BEFORE EVERY SPAWN.
+#[test]
+fn start_verifies_the_pinned_files_before_spawning() {
+    let src = include_str!("titan.rs");
+    let at = src
+        .find("    async fn start(&self) -> Result<()> {")
+        .expect("start must exist");
+    let end = src[at..]
+        .find("\n    async fn ")
+        .map(|e| at + e)
+        .unwrap_or(src.len());
+    let body = &src[at..end];
+
+    let verify = format!("unverified_pinned{}(", "_files");
+    let spawn = format!("start_integration{}(", "_with_env");
+    let v = body
+        .find(&verify)
+        .expect("start must verify the pinned files");
+    if let Some(s) = body.find(&spawn) {
+        assert!(v < s, "the spawn happens before verification:\n{body}");
+    }
+}
+
+#[test]
+fn the_pins_are_full_sha256_digests_and_real_sizes() {
+    for (name, digest, size) in PINNED_FILES {
+        assert_eq!(digest.len(), 64, "{name}: {digest}");
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
+        assert!(
+            digest.chars().any(|c| c != '0'),
+            "{name}: an all-zero pin is a placeholder"
+        );
+        assert!(size > 1_000_000, "{name}: {size} is not a partner binary");
+    }
+}
+
+#[test]
+fn a_missing_pinned_file_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let bad = unverified_pinned_files(dir.path());
+    assert_eq!(bad.len(), PINNED_FILES.len(), "{bad:?}");
+    assert!(bad.iter().all(|b| b.contains("is missing")), "{bad:?}");
+}
+
+/// A truncated or substituted file is caught on size before anything is
+/// hashed — which is also what keeps the common case cheap.
+#[test]
+fn a_file_of_the_wrong_size_is_reported_without_hashing() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, _, _) in PINNED_FILES {
+        std::fs::write(dir.path().join(name), b"not the real partner binary").unwrap();
+    }
+
+    let bad = unverified_pinned_files(dir.path());
+    assert_eq!(bad.len(), PINNED_FILES.len(), "{bad:?}");
+    assert!(
+        bad.iter().all(|b| b.contains("bytes, expected")),
+        "a wrong-sized file must be rejected on size: {bad:?}"
+    );
+}
+
+#[test]
+fn an_unchanged_file_is_not_re_verified() {
+    let now = std::time::SystemTime::now();
+    assert!(metadata_unchanged(Some((10, now)), (10, now)));
+    assert!(!metadata_unchanged(Some((10, now)), (11, now)));
+    assert!(!metadata_unchanged(
+        Some((10, now)),
+        (10, now + std::time::Duration::from_secs(1))
+    ));
+    assert!(!metadata_unchanged(None, (10, now)));
+}
