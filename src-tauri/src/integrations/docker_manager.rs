@@ -643,7 +643,10 @@ async fn download_docker_installer() -> Result<PathBuf> {
 }
 
 /// Run Docker Desktop installer with elevation and silent flags.
-async fn run_docker_installer(installer_path: &std::path::Path) -> Result<()> {
+async fn run_docker_installer(
+    installer_path: &std::path::Path,
+    trigger: crate::elevation_gate::ElevationTrigger,
+) -> Result<()> {
     info!(path = ?installer_path, "Running Docker Desktop installer with elevation");
     emit_progress(
         "installing",
@@ -664,11 +667,32 @@ Exit $LASTEXITCODE
         installer_path.display()
     );
 
-    let output = crate::supervisor::platform::command("powershell")
-        .arg("-NoProfile")
-        .arg("-Command")
-        .arg(&ps_script)
-        .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
+    // B3 / G4: this raised `Start-Process -Verb RunAs` directly, exactly like
+    // titan's redist installer did, and referenced the elevation gate nowhere —
+    // while the gate's own module doc listed this function as one of the five
+    // sites it covered. `ensure_docker()` reaches it whenever Docker Desktop is
+    // absent, and both the boot recovery pass and the Docker watcher call into
+    // install()/start(), so a UAC dialog could appear with no user gesture.
+    let attempt_key = format!(
+        "docker-desktop|{}",
+        installer_path.to_string_lossy().to_lowercase()
+    );
+    let gated =
+        crate::elevation_gate::run_elevated("docker-desktop", &attempt_key, trigger, move || {
+            crate::supervisor::platform::command("powershell")
+                .arg("-NoProfile")
+                .arg("-Command")
+                .arg(&ps_script)
+                .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)
+                .map_err(anyhow::Error::new)
+        });
+    let output = match gated {
+        Ok(out) => out,
+        Err(skipped) => {
+            warn!(reason = %skipped, "Docker Desktop install skipped by the elevation gate");
+            anyhow::bail!("{skipped}")
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -702,6 +726,19 @@ Exit $LASTEXITCODE
 ///
 /// Only call on an explicit user action (toggle/install) — never at app boot.
 pub async fn ensure_docker() -> Result<()> {
+    // Automatic by default: every existing caller is reachable from the boot
+    // recovery pass, a health tick or the Docker watcher, none of which is a
+    // user gesture. A user-initiated enable calls `ensure_docker_with` first.
+    ensure_docker_with(crate::elevation_gate::ElevationTrigger::Automatic).await
+}
+
+/// `ensure_docker`, with the elevation authority of whatever asked for it.
+///
+/// Idempotent: once Docker Desktop is installed and its engine is running this
+/// returns immediately, which is what lets a user-initiated install satisfy
+/// Docker with `UserClick` authority and then run the ordinary install path
+/// unchanged.
+pub async fn ensure_docker_with(trigger: crate::elevation_gate::ElevationTrigger) -> Result<()> {
     match docker_status() {
         DockerStatus::Ready => {
             info!("Docker is already available");
@@ -732,7 +769,7 @@ pub async fn ensure_docker() -> Result<()> {
         DockerStatus::NotInstalled => {
             info!("Docker Desktop not installed — downloading installer");
             let installer_path = download_docker_installer().await?;
-            run_docker_installer(&installer_path).await?;
+            run_docker_installer(&installer_path, trigger).await?;
             std::fs::remove_file(&installer_path).ok();
 
             // Fresh installs may need a first-run engine bootstrap; some

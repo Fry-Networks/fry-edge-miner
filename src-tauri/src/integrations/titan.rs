@@ -98,7 +98,33 @@ fn vc_redist_install_outcome(
 /// unexpected failures (download failed, task panicked); a completed-but-declined
 /// install and a still-in-progress one are both `Ok` with a distinguishing
 /// `VcRedistInstallOutcome` — see that type's docs for why timeout ≠ failure.
-pub(crate) async fn install_vc_redist_elevated() -> Result<VcRedistInstallOutcome> {
+pub(crate) async fn install_vc_redist_elevated(
+    trigger: crate::elevation_gate::ElevationTrigger,
+) -> Result<VcRedistInstallOutcome> {
+    // B3 / G4 BLOCKER: this raised `Start-Process -Verb RunAs` directly, with
+    // no reference to the elevation gate at all — while the gate's own module
+    // doc listed this function as one of the five sites it covered. The boot
+    // recovery pass calls `install()` for every enabled-but-not-installed
+    // integration, `installed_version()` is None whenever titan-edge.exe is
+    // absent (the B4 wiped-partner-files population), and `vc_redist_missing()`
+    // is true on a redist-free machine (the B1 population) — so a UAC dialog
+    // appeared at app start, unprompted, for exactly the users who filed those
+    // two bugs. Refusing an Automatic trigger is the whole point of B3.
+    if trigger == crate::elevation_gate::ElevationTrigger::Automatic {
+        // Asked BEFORE downloading 25 MB we are not going to be allowed to run.
+        // The gate refuses every Automatic trigger and publishes the
+        // needs-approval reason against this integration's card.
+        let skipped = crate::elevation_gate::run_elevated(
+            "titan",
+            "vc-redist|needs-approval",
+            trigger,
+            || Ok::<(), anyhow::Error>(()),
+        )
+        .expect_err("the gate always refuses an Automatic trigger");
+        warn!(reason = %skipped, "VC++ redist install needs administrator approval");
+        anyhow::bail!("{skipped}");
+    }
+
     let installer_path = std::env::temp_dir().join("vc_redist.x64.exe");
     download_file_with_options(VC_REDIST_DOWNLOAD_URL, &installer_path, USER_AGENT, None).await?;
 
@@ -108,13 +134,34 @@ pub(crate) async fn install_vc_redist_elevated() -> Result<VcRedistInstallOutcom
         installer_str.replace('\'', "''")
     );
 
-    let result = tokio::task::spawn_blocking(move || {
+    // Identity-bearing, so a different redist build re-arms the one allowed
+    // attempt instead of being silently suppressed.
+    let attempt_key = format!("vc-redist|{}", installer_str.to_lowercase());
+    let gated = crate::elevation_gate::run_elevated("titan", &attempt_key, trigger, move || {
         crate::supervisor::platform::command("powershell")
             .args(["-NoProfile", "-Command", &outer])
             .output_bounded(VC_REDIST_INSTALL_TIMEOUT)
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("VC++ redist installer task panicked: {e}"))?;
+            .map_err(anyhow::Error::new)
+    });
+
+    let result: std::io::Result<std::process::Output> = match gated {
+        Ok(out) => Ok(out),
+        Err(crate::elevation_gate::ElevationSkipped::Failed(reason)) => {
+            // The gate ran the closure and it failed. A TimedOut here is the
+            // "still installing in the background" case below, not a failure,
+            // so it has to survive the round trip through the gate.
+            if reason.contains("timed out") || reason.contains("TimedOut") {
+                Err(std::io::Error::new(std::io::ErrorKind::TimedOut, reason))
+            } else {
+                warn!(reason = %reason, "VC++ redist install did not complete");
+                return Ok(vc_redist_install_outcome(false, false, None));
+            }
+        }
+        Err(skipped) => {
+            warn!(reason = %skipped, "VC++ redist install skipped by the elevation gate");
+            anyhow::bail!("{skipped}")
+        }
+    };
 
     let outcome = match &result {
         Ok(out) => vc_redist_install_outcome(false, out.status.success(), out.status.code()),
@@ -366,65 +413,9 @@ fn process_not_running_reason(vc_redist_missing: bool, stderr_tail: &str) -> Str
 }
 
 impl TitanIntegration {
-    fn partner_dir() -> PathBuf {
-        partners_base_dir().join("titan")
-    }
-
-    fn binary_path() -> PathBuf {
-        #[cfg(target_os = "windows")]
-        return Self::partner_dir().join("titan-edge.exe");
-        #[cfg(not(target_os = "windows"))]
-        return Self::partner_dir().join("titan-edge");
-    }
-
-    fn dll_path() -> PathBuf {
-        Self::partner_dir().join("goworkerd.dll")
-    }
-
-    /// PURE: is the partner directory a COMPLETE titan install?
-    ///
-    /// The entry guard used to check only titan-edge.exe, so a half-install —
-    /// the exe moved out of the extracted subdirectory but goworkerd.dll left
-    /// behind — reported "already present", returned Ok(()) and was never
-    /// repaired. titan-edge.exe cannot run without that DLL.
-    pub(crate) fn install_is_complete(partner_dir: &std::path::Path) -> bool {
-        let exe = if cfg!(target_os = "windows") {
-            partner_dir.join("titan-edge.exe")
-        } else {
-            partner_dir.join("titan-edge")
-        };
-        exe.exists() && partner_dir.join("goworkerd.dll").exists()
-    }
-
-    fn compute_sha256(path: &PathBuf) -> Result<String> {
-        use sha2::{Digest, Sha256};
-        use std::io::Read;
-
-        let mut file = std::fs::File::open(path)?;
-        let mut hasher = Sha256::new();
-        let mut buffer = [0u8; 8192];
-        loop {
-            let n = file.read(&mut buffer)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buffer[..n]);
-        }
-        Ok(format!("{:x}", hasher.finalize()))
-    }
-}
-
-#[async_trait]
-impl Integration for TitanIntegration {
-    fn id(&self) -> &str {
-        "titan"
-    }
-
-    fn display_name(&self) -> &str {
-        "Titan Network"
-    }
-
-    async fn install(&self) -> Result<()> {
+    /// The real install. `trigger` decides whether the VC++ redistributable
+    /// installer may raise a UAC prompt: only a user gesture ever may (B3).
+    async fn install_inner(&self, trigger: crate::elevation_gate::ElevationTrigger) -> Result<()> {
         let binary = Self::binary_path();
         let partner_dir = Self::partner_dir();
         if Self::install_is_complete(&partner_dir) {
@@ -513,7 +504,7 @@ impl Integration for TitanIntegration {
         // since `health_check()` still reports the concrete reason if it
         // turns out to be missing at start time.
         if vc_redist_missing() {
-            match install_vc_redist_elevated().await {
+            match install_vc_redist_elevated(trigger).await {
                 Ok(VcRedistInstallOutcome::Installed) => {}
                 Ok(VcRedistInstallOutcome::StillInstalling) => {
                     // H2 review fix: not a failure — health_check() re-checks
@@ -548,6 +539,75 @@ impl Integration for TitanIntegration {
 
         info!(binary = ?binary, "Titan Network installed successfully");
         Ok(())
+    }
+
+    fn partner_dir() -> PathBuf {
+        partners_base_dir().join("titan")
+    }
+
+    fn binary_path() -> PathBuf {
+        #[cfg(target_os = "windows")]
+        return Self::partner_dir().join("titan-edge.exe");
+        #[cfg(not(target_os = "windows"))]
+        return Self::partner_dir().join("titan-edge");
+    }
+
+    fn dll_path() -> PathBuf {
+        Self::partner_dir().join("goworkerd.dll")
+    }
+
+    /// PURE: is the partner directory a COMPLETE titan install?
+    ///
+    /// The entry guard used to check only titan-edge.exe, so a half-install —
+    /// the exe moved out of the extracted subdirectory but goworkerd.dll left
+    /// behind — reported "already present", returned Ok(()) and was never
+    /// repaired. titan-edge.exe cannot run without that DLL.
+    pub(crate) fn install_is_complete(partner_dir: &std::path::Path) -> bool {
+        let exe = if cfg!(target_os = "windows") {
+            partner_dir.join("titan-edge.exe")
+        } else {
+            partner_dir.join("titan-edge")
+        };
+        exe.exists() && partner_dir.join("goworkerd.dll").exists()
+    }
+
+    fn compute_sha256(path: &PathBuf) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+
+        let mut file = std::fs::File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            let n = file.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+}
+
+#[async_trait]
+impl Integration for TitanIntegration {
+    fn id(&self) -> &str {
+        "titan"
+    }
+
+    fn display_name(&self) -> &str {
+        "Titan Network"
+    }
+
+    async fn install(&self) -> Result<()> {
+        self.install_inner(crate::elevation_gate::ElevationTrigger::Automatic)
+            .await
+    }
+
+    /// B3: only a real click may raise UAC.
+    async fn install_for_user(&self) -> Result<()> {
+        self.install_inner(crate::elevation_gate::ElevationTrigger::UserClick)
+            .await
     }
 
     async fn start(&self) -> Result<()> {
