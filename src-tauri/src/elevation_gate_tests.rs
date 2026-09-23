@@ -249,24 +249,21 @@ fn a_success_and_an_explicit_clear_both_drop_the_block() {
     assert_eq!(reason("test-clears"), None);
 }
 
-/// B3 defect 3: `ensure_docker`'s documented "never at app boot" contract,
-/// enforced at the gate rather than only at the call sites.
-#[test]
-fn the_docker_installer_never_runs_on_an_automatic_trigger() {
-    let ran = AtomicUsize::new(0);
-    let outcome = run_elevated(
-        "docker-desktop",
-        "docker|installer",
-        ElevationTrigger::Automatic,
-        || {
-            ran.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        },
-    );
-    assert_eq!(outcome, Err(ElevationSkipped::NeedsApproval));
-    assert_eq!(ran.load(Ordering::SeqCst), 0);
-    clear_blocked("docker-desktop");
-}
+// B3 defect 3 (`ensure_docker`'s "never at app boot" contract) used to have a
+// test here called the_docker_installer_never_runs_on_an_automatic_trigger.
+// DELETED as vacuous: it passed "docker-desktop" and Automatic to the gate and
+// asserted the closure did not run — but the gate treats those strings like any
+// others, so it was a duplicate of an_automatic_trigger_never_elevates wearing
+// Docker-flavoured labels. It could not fail for any Docker-specific reason; if
+// ensure_docker stopped passing Automatic it would still have passed, while its
+// name told a reader the contract was pinned here.
+//
+// The real property is which trigger the CALL SITES pass, which is not visible
+// from inside this module. integrations::docker_boot_contract_tests reads them
+// directly (the_default_ensure_docker_uses_an_automatic_trigger,
+// the_docker_installer_takes_the_callers_trigger,
+// no_start_impl_asks_docker_for_a_user_click), so the property is pinned where
+// it can actually be observed.
 
 /// THE RETRY GESTURE, end to end. Before this, `clear_blocked` wiped only the
 /// card message while the spent attempt key stayed in the gate, so the user's
