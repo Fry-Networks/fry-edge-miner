@@ -68,12 +68,32 @@ fn an_event_that_is_not_a_block_is_ignored() {
     );
 }
 
+/// Calls the PRODUCTION entry point, `first_block_for_at`. It used to call a
+/// name-only `first_block_for`, which survived solely so this test did not have
+/// to move — under an `#[allow(dead_code)]`, with a name that read like the
+/// production path while skipping the recency check. That is a footgun, and the
+/// reason it existed was this file, so this file is the right place to remove
+/// the need for it.
+///
+/// `now` is fixed rather than `Utc::now()` so nothing here depends on the wall
+/// clock. The fixtures in this file carry no `<TimeCreated>` on purpose: these
+/// tests pin NAME matching, and an undated event is treated as recent, so the
+/// `now` and window values below cannot change the outcome. Recency itself is
+/// pinned in `code_integrity_recency_tests`, against fixtures that do carry
+/// timestamps.
 #[test]
 fn the_first_block_for_our_image_is_picked_out_of_a_listing() {
     let listing = format!("{BLOCKED_SOMETHING_ELSE}\n\n{BLOCKED_GOWORKERD}\n\n");
-    let found = first_block_for(&listing, &goworkerd()).expect("our block must be found");
+    let now = chrono::DateTime::parse_from_rfc3339("2026-09-22T18:30:45Z")
+        .expect("fixed clock")
+        .with_timezone(&chrono::Utc);
+
+    let found = first_block_for_at(&listing, &goworkerd(), now, BLOCK_RECENCY)
+        .expect("our block must be found");
     assert!(found.contains("goworkerd.dll"));
-    assert!(first_block_for(&listing, Path::new("nothing-here.dll")).is_none());
+    assert!(
+        first_block_for_at(&listing, Path::new("nothing-here.dll"), now, BLOCK_RECENCY).is_none()
+    );
 }
 
 #[test]
