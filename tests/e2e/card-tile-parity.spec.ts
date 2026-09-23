@@ -68,4 +68,24 @@ test.describe('card-tile-parity', () => {
       expect(tileText, `tile label for ${id} (${state})`).toBe(cardLabels[id])
     }
   })
+
+  // G4 review finding 15: the eight states above never set dockerBlocked
+  // (integrationBadge.ts's `!inst && dockerBlocked` arm), so a docker-
+  // requiring, uninstalled, disabled integration could read 'Unavailable'
+  // on the card and 'Not installed' on the tile — the parity spec's own
+  // blind spot the review found. Combines the `?intg=` hint with the
+  // existing `?docker=<kind>` hint (mirrors badge-docker-split.spec.ts,
+  // not edited) to actually exercise it.
+  test('a docker-blocked integration reads Unavailable on the card and the tile alike', async ({ page }) => {
+    await page.goto('/?docker=daemon_stopped&intg=diiisco:notInstalled', { waitUntil: 'domcontentloaded' })
+    await expect(page.getByText('EDGE MINER', { exact: true })).toBeVisible({ timeout: 15_000 })
+
+    await nav(page, 'Integrations')
+    const cardLabel = ((await page.getByTestId('status-diiisco').textContent()) ?? '').trim()
+    expect(cardLabel, 'card label for diiisco under a docker-blocked, uninstalled, disabled state').toBe('Unavailable')
+
+    await nav(page, 'Dashboard')
+    const tileLabel = ((await page.getByTestId('tile-status-diiisco').textContent()) ?? '').trim()
+    expect(tileLabel, 'tile label for diiisco under the same state').toBe(cardLabel)
+  })
 })

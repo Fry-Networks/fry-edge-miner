@@ -187,7 +187,7 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
         <TopBar page={page} connectivity={connectivity} docker={dockerChip} />
         {error && <ErrorBanner error={error} />}
         <div style={{ flex: 1, overflow: 'hidden' }}>
-          {page === 'dashboard' && <Dashboard intgs={integrations} />}
+          {page === 'dashboard' && <Dashboard intgs={integrations} system={system} />}
           {page === 'integrations' &&
             (integrations.length === 0 && error ? (
               <IntegrationsErrorCard error={error} onRetry={refetch} />

@@ -83,17 +83,27 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
   const [secretValue, setSecretValue] = useState('')
   const [secretSaving, setSecretSaving] = useState(false)
   const [secretError, setSecretError] = useState<string | null>(null)
+  const [secretSaved, setSecretSaved] = useState(false)
   const canSetSecret = id === 'iagon'
   const handleSaveSecret = async () => {
     if (!secretValue.trim()) return
     setSecretSaving(true)
     setSecretError(null)
+    setSecretSaved(false)
     try {
       await safeInvoke('set_partner_secret', { id, value: secretValue })
       setSecretValue('')
-      // Re-run the toggle so the backend picks up the fresh token without a
-      // full app restart (iagon.rs reads it fresh on every start() call).
-      onToggle(id)
+      setSecretSaved(true)
+      // G4 review finding 9: deliberately no call back into the enable/
+      // disable switch here. This input only renders while stLbl ===
+      // 'Setup required', and integrationBadge's setupRequired arm is only
+      // reachable past the !enabled arm — so enabled is always true on the
+      // one path that reaches this line, and flipping that switch would
+      // DISABLE the integration instead of restarting it. iagon.rs's
+      // node_token() is read fresh on every call (its own doc comment: "so
+      // a user can paste their key ... without restarting the whole app"),
+      // so the existing 30s poll's next health_check() picks up the saved
+      // token on its own — no toggle or restart needed.
     } catch (e) {
       setSecretError(extractErrorMessage(e))
     } finally {
@@ -393,6 +403,18 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                     }}
                   >
                     {condenseError(secretError)}
+                  </span>
+                )}
+                {secretSaved && (
+                  <span
+                    data-testid={`secret-saved-${id}`}
+                    style={{
+                      fontFamily: 'var(--fb)',
+                      fontSize: 11,
+                      color: 'var(--teal)'
+                    }}
+                  >
+                    Saved — should take effect on the next check.
                   </span>
                 )}
               </div>

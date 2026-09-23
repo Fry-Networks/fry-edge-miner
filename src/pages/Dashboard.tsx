@@ -17,7 +17,7 @@ import { rewardBreakdown } from '../lib/rewardBreakdown'
 import { SDK_REPORT_LINE } from '../lib/support'
 import { sdkActiveLine, sdkCounts, splitByRewardRole, splitByTier, tierCounts } from '../lib/tierSplit'
 import { deriveRewardDisplay } from '../lib/rewardReadiness'
-import type { HealthStatus, LifecycleState } from '../lib/types'
+import type { HealthStatus, LifecycleState, SystemStatus } from '../lib/types'
 
 interface DashboardIntegration {
   id: string
@@ -31,10 +31,18 @@ interface DashboardIntegration {
   version: string | null
   tier: IntegrationTier
   unavailable_reason?: string | null
+  /** G4 review finding 15: needed to compute dockerBlocked the same way
+   *  Integrations.tsx does, so a docker-requiring, uninstalled, disabled
+   *  integration reads 'Unavailable' here too, not 'Not installed'. */
+  requires_docker: boolean
 }
 
 interface DashboardProps {
   intgs: DashboardIntegration[]
+  /** G4 review finding 15: without this the tile could never know docker
+   *  wasn't ready, so it could never agree with the card's 'Unavailable'
+   *  state — the one input B14's original fix didn't thread through. */
+  system?: SystemStatus | null
 }
 
 /**
@@ -42,11 +50,24 @@ interface DashboardProps {
  * hierarchy between the two tiers is carried by density, not by a second
  * accent colour, so the official partners stay the thing you read first.
  */
-function MiniCard({ intg, compact }: { intg: DashboardIntegration; compact: boolean }) {
+function MiniCard({
+  intg,
+  compact,
+  dockerNotReady
+}: {
+  intg: DashboardIntegration
+  compact: boolean
+  dockerNotReady: boolean
+}) {
   const { id, name, Icon, col, enabled } = intg
+  // G4 review finding 15: same input Integrations.tsx computes
+  // (dockerNote={intg.requires_docker && dockerNotReady ? ... : null},
+  // dockerBlocked = !!dockerNote) — without it this tile could read 'Not
+  // installed' while the card reads 'Unavailable' for the same integration.
+  const dockerBlocked = intg.requires_docker && dockerNotReady
   // B14 D2: same shared ladder the Integrations card uses — see
   // ../lib/integrationBadge.ts — so the two pages can never disagree.
-  const badge = integrationBadge(intg)
+  const badge = integrationBadge({ ...intg, dockerBlocked })
   // Dot only knows 4 statuses (no 'info'); the badge's 'info' states
   // (Installing/Starting/Setup required) read as attention-amber here, same
   // as the sidebar's convention for "needs a look, not a failure".
@@ -103,9 +124,13 @@ function MiniCard({ intg, compact }: { intg: DashboardIntegration; compact: bool
   )
 }
 
-export default function Dashboard({ intgs }: DashboardProps) {
+export default function Dashboard({ intgs, system }: DashboardProps) {
   const { rewards } = useRewards()
   const reporting = useReporting()
+  // G4 review finding 15: same formula as Integrations.tsx's dockerNotReady,
+  // so a tile can agree with the card on whether a docker-requiring
+  // integration is 'Unavailable' rather than merely 'Not installed'.
+  const dockerNotReady = !!system && system.docker !== 'ready'
   // B2: truthful reporting banner — red when PoC/lease is persistently
   // failing, amber during transient retries.
   const notReporting =
@@ -224,7 +249,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(185px,1fr))', gap: 8 }}>
               {requiredIntgs.map((i) => (
-                <MiniCard key={i.id} intg={i} compact={false} />
+                <MiniCard key={i.id} intg={i} compact={false} dockerNotReady={dockerNotReady} />
               ))}
             </div>
           </div>
@@ -239,7 +264,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(185px,1fr))', gap: 8 }}>
               {partnerIntgs.map((i) => (
-                <MiniCard key={i.id} intg={i} compact={false} />
+                <MiniCard key={i.id} intg={i} compact={false} dockerNotReady={dockerNotReady} />
               ))}
             </div>
           </div>
@@ -268,7 +293,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(160px,1fr))', gap: 7 }}>
                 {sdkIntgs.map((i) => (
-                  <MiniCard key={i.id} intg={i} compact />
+                  <MiniCard key={i.id} intg={i} compact dockerNotReady={dockerNotReady} />
                 ))}
               </div>
             </div>

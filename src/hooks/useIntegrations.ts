@@ -247,7 +247,13 @@ export function useIntegrations() {
       if (hint) {
         setSystem({
           docker: hint as SystemStatus['docker'],
-          docker_message: '',
+          // G4 review finding 15: an empty string here is falsy, so
+          // Integrations.tsx's dockerNote (and therefore dockerBlocked)
+          // could never be exercised under this hint even when `docker`
+          // itself was a non-ready kind — the not-ready badge state was
+          // structurally unreachable from browser preview. A real message
+          // makes the hint actually simulate what it claims to.
+          docker_message: `Docker ${hint.replace(/_/g, ' ')}`,
           virtualization_supported: true
         })
       }
