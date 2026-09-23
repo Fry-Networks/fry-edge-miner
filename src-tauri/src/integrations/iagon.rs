@@ -101,6 +101,19 @@ impl IagonIntegration {
 
     /// Verify SHA256 of downloaded binary if sha2 is available.
     /// On other platforms, verify file size > 50MB as a basic sanity check.
+    /// Move a binary that does not match its pin out of the way.
+    ///
+    /// Renamed, never deleted: the displaced file is the only evidence of what
+    /// was actually served, which is exactly what matters when a pin rejects a
+    /// download. Same shape as the Mysterium and Titan quarantines.
+    fn quarantine_untrusted(binary: &std::path::Path) {
+        let dest = binary.with_extension("untrusted");
+        match std::fs::rename(binary, &dest) {
+            Ok(()) => warn!(moved_to = ?dest, "Quarantined an Iagon binary that failed its pin"),
+            Err(e) => warn!(error = %e, "Could not quarantine the untrusted Iagon binary"),
+        }
+    }
+
     async fn verify_binary(path: &PathBuf) -> Result<()> {
         use sha2::{Digest, Sha256};
         use std::fs::File;
@@ -152,8 +165,19 @@ impl Integration for IagonIntegration {
     async fn install(&self) -> Result<()> {
         let binary = Self::binary_path();
         if binary.exists() {
-            info!(path = ?binary, "Iagon CLI binary already present");
-            return Ok(());
+            // G4 finding 20: this trusted mere existence, so once a wrong file
+            // was on disk it was trusted forever — install() never re-downloaded
+            // and nothing else ever re-hashed it.
+            match Self::verify_binary(&binary).await {
+                Ok(()) => {
+                    info!(path = ?binary, "Iagon CLI binary already present and verified");
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!(error = %e, "Installed Iagon binary does not match its pin — replacing it");
+                    Self::quarantine_untrusted(&binary);
+                }
+            }
         }
 
         info!("Installing Iagon CLI from release");
@@ -164,26 +188,21 @@ impl Integration for IagonIntegration {
         // Download binary
         download_file_with_options(IAGON_RELEASE_URL, &binary, USER_AGENT, None).await?;
 
-        // Verify SHA256
-        match Self::verify_binary(&binary).await {
-            Ok(_) => {
-                info!(binary = ?binary, "Iagon binary installed and verified");
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to verify Iagon binary SHA256 — file may be corrupted");
-                // Don't fail hard — the file size > 50MB is a basic sanity check
-                let metadata = tokio::fs::metadata(&binary).await?;
-                if metadata.len() < 50_000_000 {
-                    anyhow::bail!(
-                        "Downloaded Iagon binary is suspiciously small ({} bytes)",
-                        metadata.len()
-                    );
-                }
-                warn!(
-                    "Iagon binary size acceptable despite hash mismatch; proceeding with caution"
-                );
-            }
+        // Verify SHA256. This FAILS CLOSED.
+        //
+        // It used to downgrade a mismatch to a warning and accept any file over
+        // 50 MB — so a CDN-cached wrong asset, a partially-mirrored release or a
+        // substituted binary was chmod'd executable and then spawned on every
+        // launch forever. A size check is not a substitute for a digest: it is
+        // satisfied by exactly the artifacts a pin exists to reject.
+        if let Err(e) = Self::verify_binary(&binary).await {
+            Self::quarantine_untrusted(&binary);
+            anyhow::bail!(
+                "the downloaded Iagon binary does not match its pinned digest ({e}) — \
+                 it was quarantined and not installed"
+            );
         }
+        info!(binary = ?binary, "Iagon binary installed and verified");
 
         #[cfg(not(target_os = "windows"))]
         {
@@ -202,6 +221,18 @@ impl Integration for IagonIntegration {
                 "Iagon CLI binary not found at {}; run install() first",
                 binary.display()
             );
+        }
+
+        // B15 Done-when: verified against its pin BEFORE EVERY SPAWN, with an
+        // automatic repair on mismatch. Nothing re-hashed this after install,
+        // so a file corrupted or replaced later was executed unchecked.
+        if let Err(e) = Self::verify_binary(&binary).await {
+            warn!(error = %e, "Iagon binary failed verification before start — repairing");
+            Self::quarantine_untrusted(&binary);
+            self.install().await?;
+            if let Err(e) = Self::verify_binary(&binary).await {
+                anyhow::bail!("Iagon binary could not be restored to its pinned version: {e}");
+            }
         }
 
         // Check for provisioned Iagon node token (fail-closed if missing)
@@ -390,3 +421,7 @@ mod tests {
         assert!(IagonIntegration::evaluate_requirements(None, Some(16.0)).is_ok());
     }
 }
+
+#[cfg(test)]
+#[path = "iagon_pin_tests.rs"]
+mod iagon_pin_tests;

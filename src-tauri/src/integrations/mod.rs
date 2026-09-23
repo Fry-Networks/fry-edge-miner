@@ -838,3 +838,8 @@ mod b3_elevation_routing_tests {
         }
     }
 }
+
+/// B3 / G4 finding 22: the Docker boot contract, enforced rather than described.
+#[cfg(test)]
+#[path = "docker_boot_contract_tests.rs"]
+mod docker_boot_contract_tests;
