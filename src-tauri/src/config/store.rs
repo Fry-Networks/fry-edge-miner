@@ -485,6 +485,11 @@ mod atomic_write_tests {
         );
     }
 
+    /// INVARIANT PIN, not a RED->GREEN proof: v0.4.33's `write_atomic` also
+    /// left no `.tmp` behind on its SUCCESS path, so this passes pre-fix. It
+    /// guards the new error paths, which remove the temp on every failure. The
+    /// deterministic REDs for B2 defect 2 are `the_temp_file_name_is_unique_per_call`
+    /// and `the_atomic_write_flushes_before_it_renames`.
     #[test]
     fn no_temp_files_survive_a_successful_save() {
         let dir = unique_dir("atomic_no_orphans");

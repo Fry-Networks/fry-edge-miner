@@ -285,8 +285,11 @@ fn quarantining_a_corrupt_primary_and_backup_keeps_both_artifacts() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The primary's artifact name must not change: support has been telling users
-/// to look for exactly this file since before this fix.
+/// NAMING PIN, not a RED->GREEN proof: v0.4.33 already wrote
+/// `fem_config.corrupt.<ts>.json` for a lone corrupt primary, so this passes
+/// pre-fix. Its job is to stop the D4 fix from changing the one name support
+/// has been telling users to look for. The real D4 RED is
+/// `quarantining_a_corrupt_primary_and_backup_keeps_both_artifacts`.
 #[test]
 fn the_primary_quarantine_keeps_the_name_support_already_documents() {
     let dir = unique_dir("b5_quarantine_name");

@@ -162,6 +162,92 @@ mod bug12_health_persistence_tests {
     }
 }
 
+/// D-03's REQUIRED MITIGATION. Total budget for stopping every enabled
+/// integration on an ordinary quit, before the process exits and the kernel
+/// kills whatever is left in the job object.
+///
+/// Bounded on purpose, and bounded in TOTAL rather than per integration: a
+/// partner that will not stop must not be able to hold the whole app open, and
+/// with a dozen integrations a per-partner bound would multiply.
+const EXIT_GRACE_BUDGET: Duration = Duration::from_secs(10);
+
+/// Stop every ENABLED integration through its own `stop()` before exit.
+///
+/// `Supervisor::shutdown` is not sufficient and never was: it iterates
+/// `Supervisor.processes`, which only `start_integration` populates, and both
+/// OlostepBrowser (aem.rs) and SpaceAcres (space_acres.rs) are spawned with a
+/// bare `Command::spawn()` and adopted straight into the kill-on-close job. They
+/// are therefore NEVER in that map, so before this existed every ordinary quit
+/// closed the job handle and had the kernel TerminateProcess them — SpaceAcres
+/// potentially mid-plot. That is a regression against master, where both simply
+/// survived FEM's exit, and D-03 authorised putting them in the job ONLY with
+/// this graceful-stop-first mitigation in the same diff.
+///
+/// Going through the trait rather than naming the two integrations keeps it
+/// correct as partners are added: any integration that spawns outside the
+/// supervisor is covered for free.
+fn stop_partners_gracefully(state: &AppState) {
+    let enabled: Vec<std::sync::Arc<dyn integrations::Integration>> = match state.registry.lock() {
+        Ok(reg) => reg
+            .list()
+            .into_iter()
+            .filter(|i| reg.is_enabled(i.id()))
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "Registry lock poisoned at exit — falling back to the job object");
+            return;
+        }
+    };
+    if enabled.is_empty() {
+        return;
+    }
+
+    // Driven on a worker thread and waited for with a bounded `recv_timeout`,
+    // so a partner whose stop path hangs delays the quit by the budget and no
+    // more. The job object is still the guarantee; this is the courtesy path.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let count = enabled.len();
+    std::thread::Builder::new()
+        .name("exit-stop-partners".to_string())
+        .spawn(move || {
+            tauri::async_runtime::block_on(async move {
+                let deadline = std::time::Instant::now() + EXIT_GRACE_BUDGET;
+                for integration in enabled {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        tracing::warn!(
+                            "Exit grace budget spent — remaining partners will be stopped by the job object"
+                        );
+                        break;
+                    }
+                    let id = integration.id().to_string();
+                    match tokio::time::timeout(remaining, integration.stop()).await {
+                        Ok(Ok(())) => tracing::info!(integration = %id, "Stopped gracefully at exit"),
+                        Ok(Err(e)) => {
+                            tracing::warn!(integration = %id, error = %e, "Graceful stop failed at exit")
+                        }
+                        Err(_) => tracing::warn!(
+                            integration = %id,
+                            "Graceful stop did not finish inside the exit budget"
+                        ),
+                    }
+                }
+            });
+            let _ = tx.send(());
+        })
+        .map(|_| {
+            if rx.recv_timeout(EXIT_GRACE_BUDGET + Duration::from_secs(2)).is_err() {
+                tracing::warn!(
+                    count,
+                    "Graceful partner shutdown did not report back — exiting anyway"
+                );
+            }
+        })
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Could not start the exit shutdown thread — falling back to the job object");
+        });
+}
+
 fn main() {
     tauri::Builder::default()
         // B2: FIRST, before every other plugin. The guard only collapses a
@@ -1141,6 +1227,7 @@ fn main() {
             commands::settings::set_storage_location,
             commands::system::get_system_status,
             commands::migration::check_migration,
+            commands::partner_secret::set_partner_secret,
             commands::migration::run_migration,
             commands::updates::check_updates,
             commands::updates::install_update,
@@ -1158,6 +1245,7 @@ fn main() {
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 use tauri::Manager;
                 if let Some(state) = app.try_state::<AppState>() {
+                    stop_partners_gracefully(&state);
                     match state.supervisor.lock() {
                         Ok(mut sup) => sup.shutdown(),
                         Err(e) => {
@@ -1301,16 +1389,44 @@ mod b1_crt_linkage_tests {
         );
     }
 
+    /// The one workflow step the gate command lives in.
+    ///
+    /// Slicing to EOF instead made the bundle assertion below VACUOUS: the
+    /// needle `target/release/bundle` also occurs in the NSIS upload globs
+    /// further down the file, so the gate could stop scanning the bundle
+    /// entirely and the test stayed green. The bundle is where the installer
+    /// lives — the exact artifact that reproduces VCRUNTIME140_1.dll for a user
+    /// — so that was the one argument it could least afford not to pin.
+    fn crt_gate_step() -> &'static str {
+        let at = BUILD_WORKFLOW
+            .find("check_crt_imports.py")
+            .expect("build.yml must run the CRT-import gate");
+        let end = BUILD_WORKFLOW[at..]
+            .find("\n      - name:")
+            .map(|e| at + e)
+            .unwrap_or(BUILD_WORKFLOW.len());
+        let step = &BUILD_WORKFLOW[at..end];
+        // Self-check: if a future edit lets this slice swallow the following
+        // steps again, fail HERE rather than quietly weakening every assertion
+        // that reads it.
+        assert!(
+            step.len() < 1000,
+            "the gate-step slice has widened to {} bytes — it must cover ONE step, \
+             or the assertions over it can be satisfied by an unrelated step",
+            step.len()
+        );
+        assert!(
+            !step.contains("upload-artifact"),
+            "the gate-step slice has run into the upload steps: {step}"
+        );
+        step
+    }
+
     /// The gate is only worth anything if it covers the binary that actually
     /// failed on users' machines, not just the installer wrapper around it.
     #[test]
     fn the_gate_covers_the_app_binary_the_bundle_and_the_bundled_resources() {
-        let step = {
-            let at = BUILD_WORKFLOW
-                .find("check_crt_imports.py")
-                .expect("build.yml must run the CRT-import gate");
-            &BUILD_WORKFLOW[at..]
-        };
+        let step = crt_gate_step();
         for target in [
             "target/release/fry-edge-miner.exe",
             "target/release/bundle",
@@ -1328,14 +1444,21 @@ mod b1_crt_linkage_tests {
     /// release build alone.
     #[test]
     fn the_test_pass_does_not_share_the_release_target_directory() {
+        // Scoped to the step that runs the gates. File-wide anchors would let a
+        // second `cd src-tauri` / export pair somewhere else in the workflow
+        // satisfy this by accident — the same defect that made the bundle
+        // assertion above vacuous.
         let at = BUILD_WORKFLOW
             .find("cargo test --release")
             .expect("build.yml must still run the Rust tests");
-        let before = &BUILD_WORKFLOW[..at];
-        let export = before
+        let step_start = BUILD_WORKFLOW[..at]
+            .rfind("      - name:")
+            .expect("the tests must run inside a named step");
+        let step = &BUILD_WORKFLOW[step_start..at];
+        let export = step
             .rfind("CARGO_TARGET_DIR")
             .expect("the gates must run in their own target directory");
-        let cd = before
+        let cd = step
             .rfind("cd src-tauri")
             .expect("the gates still run from src-tauri");
         assert!(

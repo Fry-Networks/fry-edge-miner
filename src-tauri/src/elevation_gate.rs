@@ -4,6 +4,10 @@
 //! `firewall::delete_rules`, `security_setup::run_hardening_elevated`,
 //! `titan::install_vc_redist_elevated`, `docker_manager::run_docker_installer`)
 //! raised `Start-Process -Verb RunAs` straight from whatever called them —
+//! that list is the historical inventory of what NEEDED gating, not a claim
+//! about what currently routes through here. A site is covered only where its
+//! own call site passes a trigger, which lives in that integration's file —
+//! so read the call sites, not this list, to know what is wired.
 //! including the boot pass, the per-integration health loop and the Docker
 //! watcher. A declined prompt left no record anywhere, so the next tick asked
 //! again: the reported "endless PowerShell admin right request" with dozens of
@@ -84,8 +88,14 @@ impl std::fmt::Display for ElevationSkipped {
 
 #[derive(Default)]
 struct GateState {
-    /// Every `attempt_key` a `UserClick` has already spent its one shot on.
-    attempted: HashSet<String>,
+    /// Per purpose, every `attempt_key` a `UserClick` has already spent its one
+    /// shot on.
+    ///
+    /// Keyed by PURPOSE, not a flat set: the retry gesture is per-integration,
+    /// so `clear_blocked` has to be able to re-arm exactly one purpose's
+    /// attempts and nothing else. A flat set could only be cleared wholesale,
+    /// which would let a decline on one card re-arm another.
+    attempted: HashMap<String, HashSet<String>>,
 }
 
 /// Serialises the elevations themselves. Held ACROSS the caller's closure, so
@@ -153,12 +163,22 @@ pub fn run_elevated<T>(
     // Held across `f` on purpose: two UAC prompts must never be on screen at
     // once, and a second request must WAIT rather than be dropped.
     let mut state = gate().lock().unwrap_or_else(|e| e.into_inner());
-    if !state.attempted.insert(attempt_key.to_string()) {
+    if !state
+        .attempted
+        .entry(purpose.to_string())
+        .or_default()
+        .insert(attempt_key.to_string())
+    {
         info!(
             purpose,
             trigger = "user_click",
             "elevation suppressed — this exact request already had its one attempt this run"
         );
+        // Re-publish rather than fall silent. Going quiet here is what turned a
+        // declined prompt into the B14 silent-revert shape: the card had said
+        // "Needs administrator approval — Retry", the user retried, and the
+        // message was cleared with nothing put back in its place.
+        publish_block(purpose, NEEDS_APPROVAL_MESSAGE.to_string());
         return Err(ElevationSkipped::AlreadyAttempted);
     }
     info!(purpose, trigger = "user_click", "elevation allowed");
@@ -167,7 +187,12 @@ pub fn run_elevated<T>(
 
     match outcome {
         Ok(value) => {
-            clear_blocked(purpose);
+            // Message only. The attempt record is deliberately NOT re-armed
+            // here: on success there is nothing to retry, and every explicit
+            // user gesture goes through `clear_blocked` anyway
+            // (commands::integration::toggle_integration), so a later genuine
+            // click is never refused.
+            clear_blocked_message(purpose);
             Ok(value)
         }
         Err(e) => {
@@ -202,12 +227,32 @@ pub fn blocked_reasons() -> HashMap<String, String> {
         .clone()
 }
 
-/// Forget a block. Called on a successful elevation, and by the retry gesture
-/// (toggling the integration off and on) before it asks again.
-pub fn clear_blocked(purpose: &str) {
+/// Drop only the UI message for `purpose`, leaving its attempt record alone.
+fn clear_blocked_message(purpose: &str) {
     blocked_map()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+        .remove(purpose);
+}
+
+/// THE RETRY GESTURE. Forget both the card message AND this purpose's spent
+/// attempts, so the one allowed attempt re-arms.
+///
+/// D-02 ships no Retry button: toggling the integration off and on IS the
+/// gesture. Clearing only the message was therefore a guaranteed no-op — the
+/// user declined, the card said "Needs administrator approval — Retry", they
+/// toggled, the message was wiped, and `run_elevated` returned
+/// `AlreadyAttempted` and raised no prompt. No UAC, no firewall rule, and an
+/// empty card: exactly the B14 silent-revert failure, produced by the B3 fix.
+///
+/// MUST NOT be called while the gate mutex is held — it takes that lock.
+/// `run_elevated`'s success path uses `clear_blocked_message` for that reason.
+pub fn clear_blocked(purpose: &str) {
+    clear_blocked_message(purpose);
+    gate()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .attempted
         .remove(purpose);
 }
 

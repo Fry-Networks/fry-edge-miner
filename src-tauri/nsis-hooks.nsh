@@ -51,6 +51,24 @@
   ; from a version that predates those sweeps) can still hit a locked file
   ; here. Best-effort, same "non-zero = nothing matched" contract.
   ;
+  ; KNOWN LIMITATION (G4 finding 21, MINOR, deliberately NOT fixed here).
+  ; NSIS expands $INSTDIR/$APPDATA/$LOCALAPPDATA into this string verbatim with
+  ; no escaping, so a profile folder containing an apostrophe — O'Brien,
+  ; D'Angelo — closes the single-quoted PowerShell pattern early, the whole
+  ; -Command fails to parse, Pop $1 is discarded, and the installer walks into
+  ; the "Error opening file for writing" failure this hook exists to prevent.
+  ; That is a regression against the old bare `taskkill /IM`, which had no
+  ; quoting to break.
+  ;
+  ; Switching these to double quotes does NOT work: the outer -Command is
+  ; already double-quoted, so inner double quotes terminate the argument early
+  ; and it breaks for EVERY user rather than for apostrophe accounts. The
+  ; correct fix is to stop interpolating paths into the script at all — set
+  ; them as environment variables via System::Call SetEnvironmentVariable and
+  ; read $env:... in PowerShell, which is safe for both ' and $. That needs an
+  ; installer build to verify and is not something the Linux CI leg can test,
+  ; so it is left for someone who can run the NSIS build.
+  ;
   ; B4: this used to be four `taskkill /F /T /IM <image>` calls. `/IM` matches
   ; by image name across the WHOLE session with no path filter, so installing
   ; or updating FEM force-killed a user's OWN unrelated Space Acres, Titan or

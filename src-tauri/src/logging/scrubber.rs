@@ -49,6 +49,60 @@ pub fn scrub_line(line: &str) -> String {
     result
 }
 
+/// B23: what gets scrubbed out of a PARTNER's own stdout/stderr on the way to
+/// disk, as opposed to what gets scrubbed out of an exported bundle.
+///
+/// The two are deliberately different, and the difference is the whole point of
+/// having both:
+///
+/// * A partner's log file is written to `%LOCALAPPDATA%\com.frynetworks.fem\
+///   logs\<id>\`, whose OWN absolute path contains the Windows username. No
+///   amount of content scrubbing can make that folder username-free, so trying
+///   to strip usernames out of the CONTENT buys nothing there.
+/// * The artifact that actually leaves the machine is the exported bundle, and
+///   `commands::debug` already scrubs every collected file line-by-line with the
+///   full `scrub_line` at collection time. Usernames, IPs, MACs and serials are
+///   handled there, on the thing users post publicly.
+///
+/// So write-time scrubbing covers exactly the classes that must never reach the
+/// disk in the first place because they are IRREVERSIBLE if seen: a wallet
+/// address, a WireGuard key, a mnemonic, a token. The shipped frynode.exe
+/// prints `Node address: <58-char Algorand address>` and `WG public key: <key>`
+/// on startup — confirmed in the Go source and in the vendored binary's string
+/// table — and those are the reason this function exists.
+///
+/// It deliberately does NOT rewrite paths. `redact_username`,
+/// `redact_literal_identity`, `redact_ipv4`, `redact_mac` and `redact_serial`
+/// all rewrite text that can legitimately be part of a filesystem path, and a
+/// partner's output is full of paths that FEM and its own tests read back.
+/// Rewriting them destroys diagnostic value and breaks real invariants — the
+/// pre-existing `bug9_working_dir_tests` spawns a child, reads the path it
+/// reports out of this very log, and canonicalizes it, which cannot survive a
+/// substituted username because `canonicalize` requires the path to exist.
+/// That test encodes a real invariant (a partner must run in the directory it
+/// was given) and is correct to fail if this function mangles a path.
+pub fn scrub_partner_line(line: &str) -> String {
+    let mut result = line.to_string();
+
+    // Mnemonics, both the strict 25-word form and the loose comma/mixed-case one.
+    result = redact_mnemonic(&result);
+    result = redact_loose_mnemonic(&result);
+
+    // Tokens and named secrets, in every shape.
+    result = redact_bearer_token(&result);
+    result = redact_api_key(&result);
+    result = redact_token(&result);
+    result = redact_op_session(&result);
+    result = redact_json_secret(&result);
+    result = redact_named_secret(&result);
+
+    // The two frynode actually prints.
+    result = redact_algorand_address(&result);
+    result = redact_wireguard_key(&result);
+
+    result
+}
+
 /// The markers this module itself produces. A rule that re-wrote one of these
 /// would change `scrub_line`'s output on a second pass — the debug bundle
 /// scrubs a second time on the way into the zip, and `redact_named_secret`
@@ -70,7 +124,17 @@ fn is_redaction_marker(value: &str) -> bool {
 
 /// Secret NAMES, not secret SHAPES. A value is unguessable by definition; the
 /// key next to it is not.
-const SECRET_NAMES: &str = r"(?:[a-z0-9_]*(?:mnemonic|seed[_-]?phrase|secret|passwd|password|private[_-]?key|access[_-]?key|api[_-]?key|auth[_-]?token|node[_-]?token|token))";
+/// Secret NAMES, not secret SHAPES. A value is unguessable by definition; the
+/// key next to it is not.
+///
+/// The prefix class includes `.` and `-` because a real leak needed it:
+/// MystNodes is started with `--user.token=<device token>` (mysterium.rs), and
+/// sdk_client echoes its own invocation on an ERR/FTL line. With a `[a-z0-9_]*`
+/// prefix the alternation could not span the `.` in `user.token`, so the flag
+/// arm died right after `--` and the token reached the card, fem.log, the
+/// partner log and the exported bundle verbatim — under a comment in
+/// mysterium.rs asserting it was scrubbed.
+const SECRET_NAMES: &str = r"(?:[a-z0-9_.-]*(?:mnemonic|seed[_-]?phrase|secret|passwd|password|private[_-]?key|access[_-]?key|api[_-]?key|auth[_-]?token|node[_-]?token|token))";
 
 /// B23: `{"node_token": "<key>"}` — the exact file format `iagon.rs` tells the
 /// user to create, and a shape none of the existing rules match (they need a
@@ -120,13 +184,37 @@ fn redact_named_secret(s: &str) -> String {
         ))
         .unwrap()
     });
-    bare.replace_all(&out, |caps: &regex::Captures| {
+    let out = bare.replace_all(&out, |caps: &regex::Captures| {
         if is_redaction_marker(&caps[3]) {
             return caps[0].to_string();
         }
         format!("{}{}=<redacted>", &caps[1], &caps[2])
-    })
-    .to_string()
+    });
+
+    // A COLON form. Only `token:` and `api[_-]key:` had a colon rule, so
+    // `password: hunter2`, `secret: x`, `private_key: x` and `user.token: x`
+    // all came back unredacted. Requires a space or quote after the colon so a
+    // Windows path (`C:\Users\x`) and a URL scheme cannot match.
+    static COLON: OnceLock<Regex> = OnceLock::new();
+    let colon = COLON.get_or_init(|| {
+        Regex::new(&format!(
+            r#"(?i)(^|[\s,;(\[{{])(--?)?({SECRET_NAMES})\s*:\s+("[^"]*"|\S+)"#
+        ))
+        .unwrap()
+    });
+    colon
+        .replace_all(&out, |caps: &regex::Captures| {
+            if is_redaction_marker(&caps[4]) {
+                return caps[0].to_string();
+            }
+            format!(
+                "{}{}{}=<redacted>",
+                &caps[1],
+                caps.get(2).map_or("", |m| m.as_str()),
+                &caps[3]
+            )
+        })
+        .to_string()
 }
 
 /// B23: `device_name=GEORGE-RIG-01 device_id=fem-george-rig-01` — the exact
