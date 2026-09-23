@@ -185,3 +185,52 @@ fn the_parser_reads_the_timestamp_shapes_windows_actually_emits() {
         "these real-world shapes do not parse: {bad:?}"
     );
 }
+
+/// T2's should-fix: `event_time` byte-sliced after reading a CHAR.
+///
+/// `recent_block` feeds this `String::from_utf8_lossy(&out.stdout)`, and lossy
+/// conversion substitutes U+FFFD — three bytes — so an invalid byte immediately
+/// after a literal `SystemTime=` made a one-byte slice land mid-character and
+/// PANIC. That panic happens inside titan's health_check, which aborts the task,
+/// so titan would stop being health-checked at all for the life of the process.
+///
+/// Reproduced by T2 verbatim: "byte index 1 is not a char boundary; it is
+/// inside '\u{fffd}' (bytes 0..3)".
+#[test]
+fn a_lossy_byte_after_the_attribute_name_does_not_panic() {
+    // Exactly what from_utf8_lossy produces for an invalid byte there.
+    let lossy = format!(
+        "<TimeCreated SystemTime={}2026-09-22T10:00:00Z'/>",
+        '\u{fffd}'
+    );
+
+    // The assertion is that this RETURNS rather than unwinding.
+    assert_eq!(event_time(&lossy), None);
+
+    // And the whole scan over such a listing must survive it too, since that is
+    // the path health_check actually takes.
+    let now = chrono::Utc::now();
+    let _ = first_block_for_at(&lossy, &titan_dll(), now, BLOCK_RECENCY);
+}
+
+/// A multi-byte character where the quote should be is the same class of bug,
+/// reached without any lossy conversion at all. The property is that it does
+/// not PANIC — extracting a well-formed value from between two multi-byte
+/// delimiters is correct behaviour, not a failure, so this asserts on the
+/// outcome rather than insisting on None.
+#[test]
+fn a_multibyte_character_where_the_quote_should_be_does_not_panic() {
+    let at = "2026-09-22T10:00:00Z";
+    for odd in ['\u{2019}', '\u{fffd}', 'é'] {
+        let balanced = format!("<TimeCreated SystemTime={odd}{at}{odd}/>");
+        // Delimited on both sides: the value is recoverable, and must be right.
+        assert!(
+            event_time(&balanced).is_some(),
+            "a value delimited by {odd:?} should still be read"
+        );
+
+        // Unbalanced: nothing sane to extract, and still no panic.
+        let unbalanced = format!("<TimeCreated SystemTime={odd}{at}'/>");
+        assert_eq!(event_time(&unbalanced), None, "for {odd:?}");
+    }
+}

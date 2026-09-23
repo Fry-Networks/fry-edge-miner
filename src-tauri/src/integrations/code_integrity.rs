@@ -103,7 +103,15 @@ pub(crate) fn event_time(event_xml: &str) -> Option<chrono::DateTime<chrono::Utc
     let at = event_xml.find("SystemTime=")?;
     let rest = &event_xml[at + "SystemTime=".len()..];
     let quote = rest.chars().next()?;
-    let value = rest[1..].split(quote).next()?;
+    // `quote.len_utf8()`, not 1: this string comes from
+    // `String::from_utf8_lossy`, which substitutes U+FFFD — three bytes — so an
+    // invalid byte immediately after a literal `SystemTime=` would make a
+    // one-byte slice land mid-character and PANIC. That panic would happen
+    // inside titan's health_check, aborting the task, so titan would stop being
+    // health-checked at all for the life of the process. Found by T2, who
+    // reproduced it: "byte index 1 is not a char boundary; it is inside
+    // '\u{fffd}' (bytes 0..3)".
+    let value = rest[quote.len_utf8()..].split(quote).next()?;
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|t| t.with_timezone(&chrono::Utc))
@@ -142,11 +150,21 @@ pub(crate) fn event_is_recent(
         return true;
     };
     let age = now.signed_duration_since(stamped);
-    let skew = chrono::Duration::from_std(CLOCK_SKEW_TOLERANCE).unwrap_or_default();
+    // A failed conversion must not silently collapse the window to ZERO, which
+    // would reject every event and turn this into a no-op nobody notices. It
+    // only fails for an absurdly large constant, so assert in debug and fall
+    // back to "accept" — the same direction as the unparseable case above.
+    let as_chrono = |d: std::time::Duration, what: &str| {
+        chrono::Duration::from_std(d).unwrap_or_else(|_| {
+            debug_assert!(false, "{what} is too large to convert: {d:?}");
+            chrono::Duration::MAX
+        })
+    };
+    let skew = as_chrono(CLOCK_SKEW_TOLERANCE, "CLOCK_SKEW_TOLERANCE");
     if age < -skew {
         return false;
     }
-    age <= chrono::Duration::from_std(window).unwrap_or_default()
+    age <= as_chrono(window, "the recency window")
 }
 
 /// PURE: the first RECENT block in `listing` that names `image`, if any. The
@@ -157,15 +175,27 @@ pub(crate) fn first_block_for_at(
     now: chrono::DateTime<chrono::Utc>,
     window: std::time::Duration,
 ) -> Option<String> {
-    listing
-        .split("\n\n")
-        .map(str::trim)
-        .find(|chunk| {
-            !chunk.is_empty()
-                && event_names_our_image(chunk, image)
-                && event_is_recent(chunk, now, window)
-        })
-        .map(|chunk| chunk.to_string())
+    for chunk in listing.split("\n\n").map(str::trim) {
+        if chunk.is_empty() || !event_names_our_image(chunk, image) {
+            continue;
+        }
+        if event_is_recent(chunk, now, window) {
+            return Some(chunk.to_string());
+        }
+        // T2's ask, and it is the right one: an event that NAMES our image but
+        // is discarded must say so. Otherwise "there is no block" and "we could
+        // not read the clock on the block that is there" look identical from
+        // outside, and the VM leg has no way to tell a working feature from an
+        // inert one. The raw attribute goes in the line so a shape we parse
+        // wrongly is diagnosable from a log alone.
+        tracing::warn!(
+            image = ?image,
+            system_time = ?event_time(chunk),
+            raw = %chunk.chars().take(200).collect::<String>(),
+            "A code-integrity block names this image but was discarded as not current"
+        );
+    }
+    None
 }
 
 /// The name-only form the existing tests pin. Kept so those tests stay
