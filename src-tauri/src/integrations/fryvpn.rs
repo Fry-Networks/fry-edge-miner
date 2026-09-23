@@ -599,15 +599,28 @@ impl FryVpnIntegration {
         // a declined UAC just means Windows prompts as before. Only when the
         // resolved path is absolute — a bare PATH-lookup name has nothing
         // concrete to bind the rule to.
-        let binary_path = std::path::Path::new(&binary);
+        //
+        // Offloaded: at UAC_ANSWER_TIMEOUT this blocks on a HUMAN answering a
+        // consent dialog for up to three minutes. Left on the async task it
+        // pins a tokio worker for that whole time AND silently voids the 60 s
+        // toggle bound, because a timeout cannot fire while the worker is
+        // blocked. titan.rs already does this for its redist install.
+        let binary_path = std::path::PathBuf::from(&binary);
         if binary_path.is_absolute() {
-            if let Err(e) = super::firewall::ensure_program_rules(
-                FRYNODE_RULE_NAME,
-                binary_path,
-                "fryvpn",
-                trigger,
-            ) {
-                warn!(error = %e, "Fry dVPN firewall rule setup failed — continuing");
+            let rule_path = binary_path.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                super::firewall::ensure_program_rules(
+                    FRYNODE_RULE_NAME,
+                    &rule_path,
+                    "fryvpn",
+                    trigger,
+                )
+            })
+            .await;
+            match outcome {
+                Ok(Err(e)) => warn!(error = %e, "Fry dVPN firewall rule setup failed — continuing"),
+                Err(e) => warn!(error = %e, "Fry dVPN firewall rule task panicked — continuing"),
+                Ok(Ok(())) => {}
             }
         }
 

@@ -132,3 +132,84 @@ fn an_ordinary_daemon_failure_is_still_restarted() {
         crate::supervisor::health::RecoveryAction::Restart
     );
 }
+
+/// G4 finding 8 — the gate and the reason used DIFFERENT predicates to pick a
+/// line, so they could describe different failures.
+///
+/// Reproduced against the real functions before the fix: a fresh local
+/// `{"level":"fatal","msg":"cannot open datastore"}` fired the recency-aware
+/// gate, while `daemon_log_failure_reason` re-scanned with `first_error_line`
+/// (no recency) and returned an hour-old connectivity line. That reason
+/// matched `upstream_unreachable`, so `recovery_action` returned None and a
+/// genuine device-side fault was never restarted — painted as a network
+/// problem instead.
+#[test]
+fn a_local_fatal_is_not_reported_as_an_upstream_failure() {
+    let now = now_truncated();
+    let stale = (now - chrono::Duration::minutes(60))
+        .format("%Y-%m-%dT%H:%M:%S%.3f%z")
+        .to_string();
+    // Stale connectivity line FIRST, which is what first_error_line returns.
+    let combined = format!(
+        "{stale} {REPORTED_LINE}\n{}\n",
+        r#"{"level":"fatal","msg":"cannot open datastore"}"#
+    );
+
+    let selected = first_recent_error_line(&combined, now, window())
+        .expect("the fresh local fatal must fire the gate");
+    assert!(
+        selected.contains("cannot open datastore"),
+        "the gate selected {selected:?}"
+    );
+
+    let reason = daemon_log_failure_reason_for_line(selected);
+
+    assert!(
+        reason.contains("cannot open datastore"),
+        "the card must describe the failure that actually fired the gate: {reason}"
+    );
+    assert!(
+        !crate::integrations::upstream_unreachable(&reason),
+        "a local fatal must not be exempted from recovery as an upstream condition: {reason}"
+    );
+    assert_eq!(
+        crate::supervisor::health::recovery_action(&HealthStatus::Unhealthy(reason), true, 0, 6),
+        crate::supervisor::health::RecoveryAction::Restart,
+        "a genuine device-side fault must still be restarted"
+    );
+}
+
+/// And the exemption must still work when the recent failure really IS
+/// upstream — the fix must not have narrowed D-14 into uselessness.
+#[test]
+fn a_recent_upstream_failure_is_still_exempt() {
+    let now = now_truncated();
+    let combined = stamped(now);
+
+    let selected = first_recent_error_line(&combined, now, window()).unwrap();
+    let reason = daemon_log_failure_reason_for_line(selected);
+
+    assert!(
+        crate::integrations::upstream_unreachable(&reason),
+        "{reason}"
+    );
+    assert_eq!(
+        crate::supervisor::health::recovery_action(&HealthStatus::Unhealthy(reason), true, 0, 6),
+        crate::supervisor::health::RecoveryAction::None
+    );
+}
+
+/// The whole-log entry point keeps its behaviour, so bug3_daemon_error_tests
+/// stay byte-identical and green.
+#[test]
+fn the_whole_log_entry_point_still_delegates_to_the_same_formatting() {
+    let line = "2026-09-18T19:56:30.482-0500 ERROR main x.go:1 dial tcp: i/o timeout";
+    assert_eq!(
+        daemon_log_failure_reason(line),
+        daemon_log_failure_reason_for_line(line)
+    );
+    assert_eq!(
+        daemon_log_failure_reason(""),
+        "Titan Network: the daemon reported a problem"
+    );
+}
