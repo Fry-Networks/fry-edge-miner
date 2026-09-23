@@ -273,6 +273,30 @@ pub trait Integration: Send + Sync {
     async fn stop_for_restart(&self) -> Result<()> {
         self.stop().await
     }
+    /// Stop this integration because FEM ITSELF IS EXITING, as distinct from
+    /// the user turning it off.
+    ///
+    /// BL-1, found by the pre-tag review of 0.4.34. The D-03 exit courtesy path
+    /// called the bare `stop()` on every enabled integration, and for Pawns
+    /// `stop()` means `StopReason::UserDisable` — so every ordinary quit appended
+    /// a §5.8 `withdrawal` to the durable consent log and reintroduced B18 with
+    /// its period changed from ~1-2 h to once per launch. A process exit is not
+    /// the owner changing their mind.
+    ///
+    /// Defaults to `stop_for_restart()` rather than to `stop()`: the exit case
+    /// shares the property that matters — the owner's decision has not changed —
+    /// so any integration that already declines to record a withdrawal on a
+    /// restart gets the same treatment here for free. It is deliberately its OWN
+    /// method rather than a second caller of `stop_for_restart()`, so that a
+    /// later change made for restart-specific reasons cannot silently alter what
+    /// happens on exit. That is the precise shape of the bug this fixes: two
+    /// individually correct paths sharing one method.
+    ///
+    /// It must NOT default to `stop_for_disable()` — fryDVPN overrides that to
+    /// deregister on-chain, which must not happen every time FEM quits.
+    async fn stop_for_exit(&self) -> Result<()> {
+        self.stop_for_restart().await
+    }
     /// Stop this integration because the USER disabled it, as distinct from
     /// the supervisor restarting it.
     ///

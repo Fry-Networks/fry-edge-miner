@@ -224,7 +224,11 @@ fn stop_partners_gracefully(state: &AppState) {
                         break;
                     }
                     let id = integration.id().to_string();
-                    match tokio::time::timeout(remaining, integration.stop()).await {
+                    // BL-1: NOT the bare `stop()`. For Pawns that means
+                    // StopReason::UserDisable, which appends a §5.8 withdrawal —
+                    // so every quit revoked a consent nobody withdrew and
+                    // reintroduced B18 once per launch.
+                    match tokio::time::timeout(remaining, integration.stop_for_exit()).await {
                         Ok(Ok(())) => tracing::info!(integration = %id, "Stopped gracefully at exit"),
                         Ok(Err(e)) => {
                             tracing::warn!(integration = %id, error = %e, "Graceful stop failed at exit")

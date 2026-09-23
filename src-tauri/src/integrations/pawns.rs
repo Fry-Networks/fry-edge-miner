@@ -957,6 +957,12 @@ mod pawns_retention_tests;
 #[path = "pawns_restart_consent_tests.rs"]
 mod pawns_restart_consent_tests;
 
+/// BL-1: the exit path must not record a §5.8 withdrawal. Separate file so
+/// `pawns_restart_consent_tests.rs` stays byte-identical.
+#[cfg(test)]
+#[path = "pawns_exit_consent_tests.rs"]
+mod pawns_exit_consent_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

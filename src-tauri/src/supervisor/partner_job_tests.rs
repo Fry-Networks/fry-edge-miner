@@ -131,10 +131,27 @@ fn a_normal_quit_stops_partners_gracefully_before_the_job_kills_them() {
         "the graceful stop must enumerate the REGISTRY; Supervisor.processes \
          cannot see a partner spawned outside start_integration:\n{helper}"
     );
+    // BL-1, found by the pre-tag review of 0.4.34. This assertion used to read
+    // `integration.stop()`, which matched the bug rather than the intent. The
+    // intent — stated in its own message — is "through the TRAIT", because that
+    // is what reaches partners the supervisor never tracked. `stop_for_exit()` is
+    // equally a trait method and reaches them identically. But WHICH trait method
+    // turned out to matter: for Pawns the bare `stop()` means
+    // `StopReason::UserDisable`, so it appended a §5.8 consent withdrawal on every
+    // ordinary quit and reintroduced B18 once per launch. So the needle is
+    // retargeted, NOT loosened — it now pins the exact method and additionally
+    // forbids the one that caused the defect.
+    let trait_stop = format!("integration.stop_for{}()", "_exit");
     assert!(
-        helper.contains("integration.stop()"),
-        "it must stop each integration through the trait, which is what reaches \
-         the bare-spawn partners:\n{helper}"
+        helper.contains(&trait_stop),
+        "it must stop each integration through the EXIT-SCOPED trait method, which \
+         reaches the bare-spawn partners without recording a consent withdrawal:\n{helper}"
+    );
+    let bare_stop = format!("integration.stop{}", "()");
+    assert!(
+        !helper.contains(&bare_stop),
+        "the bare stop() is StopReason::UserDisable for Pawns and writes a §5.8 \
+         withdrawal on every quit — that is BL-1:\n{helper}"
     );
     assert!(
         !helper.contains("processes"),
