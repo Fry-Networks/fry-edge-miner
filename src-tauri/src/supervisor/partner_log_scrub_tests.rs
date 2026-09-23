@@ -15,13 +15,16 @@
 //! (`redact_serial`) and a dotted quad (`redact_ipv4`) — so the test is
 //! meaningful rather than incidentally passing.
 
-use std::path::Path;
-
-use super::ManagedProcess;
-
 #[cfg(not(windows))]
 #[test]
 fn a_partner_path_survives_the_scrubbing_pipe_end_to_end() {
+    // Imports live INSIDE the test: the whole file is Linux-only, so at module
+    // scope they are dead code on the Windows target and `-D warnings` rejects
+    // them. Caught by the Windows-target clippy gate, which is the only place
+    // that compiles this file's `cfg(windows)` side.
+    use super::ManagedProcess;
+    use std::path::Path;
+
     let unique = format!(
         "fem-redact-probe-{}-{}",
         std::process::id(),
