@@ -202,13 +202,15 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --title "FEM $TAG" --generate-notes
+              --title "FEM $TAG" --generate-notes --prerelease
           fi
 
       - name: Upload release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
+          prerelease: true
+          make_latest: false
           files: |
             fem-installer-nsis/*.exe
             fem-installer-nsis-sig/*.sig
