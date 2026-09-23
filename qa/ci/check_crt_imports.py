@@ -24,14 +24,34 @@ PE_SUFFIXES = (".exe", ".dll", ".sys", ".node")
 
 
 def pe_files(targets):
+    """Yield every PE under `targets`.
+
+    A target that names a FILE must exist. Without that check a path that has
+    been renamed or moved falls through to `os.walk`, which yields nothing for a
+    non-existent directory SILENTLY — so the remaining targets still produce PEs,
+    `scanned` stays above zero, and the gate prints PASSED without ever having
+    looked at the binary it exists to protect. Reproduced: invoked with a missing
+    app exe plus one unrelated DLL, the gate reported
+    "CRT-IMPORT GATE PASSED: 1 PE file(s)" and exit 0.
+
+    The `scanned == 0` guard in main() does not cover this, because it only fires
+    when NOTHING was scanned. This is the same failure shape as an uncontrolled
+    zero: absence of a finding read as a finding of absence.
+    """
     for t in targets:
         if os.path.isfile(t):
             yield t
-        else:
+        elif os.path.isdir(t):
             for root, _dirs, files in os.walk(t):
                 for f in files:
                     if f.lower().endswith(PE_SUFFIXES):
                         yield os.path.join(root, f)
+        else:
+            raise MissingTarget(t)
+
+
+class MissingTarget(Exception):
+    """A path handed to the gate does not exist at all."""
 
 
 def imports_of(path):
@@ -50,13 +70,28 @@ def main(argv):
         return 2
     scanned = 0
     violations = []
-    for path in pe_files(argv[1:]):
+    # Named-file targets are the ones a rename can silently drop; require each
+    # to be scanned by NAME, so "the app exe was inspected" is asserted rather
+    # than assumed from a non-zero count.
+    required = [t for t in argv[1:] if t.lower().endswith(PE_SUFFIXES)]
+    seen = set()
+    try:
+        candidates = list(pe_files(argv[1:]))
+    except MissingTarget as missing:
+        print(
+            f"ERROR: target does not exist: {missing}\n"
+            "Refusing to report a result. A missing path would otherwise be walked as an "
+            "empty directory and the gate would print PASSED without inspecting it."
+        )
+        return 2
+    for path in candidates:
         try:
             imps = imports_of(path)
         except Exception as exc:  # not a PE, or unreadable
             print(f"skip   {path}: {exc}")
             continue
         scanned += 1
+        seen.add(os.path.realpath(path))
         bad = [
             d
             for d in imps
@@ -69,6 +104,13 @@ def main(argv):
             print(f"ok     {path}: no CRT imports ({len(imps)} imports)")
     if scanned == 0:
         print("ERROR: no PE files were scanned — check the path argument")
+        return 2
+    unscanned = [t for t in required if os.path.realpath(t) not in seen]
+    if unscanned:
+        print(
+            "\nERROR: these explicitly named PE files were never scanned: "
+            f"{unscanned}\nThe gate refuses to pass on a partial scan."
+        )
         return 2
     if violations:
         print(
