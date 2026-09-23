@@ -201,6 +201,20 @@ impl Integration for DiiiscoIntegration {
         "Diiisco"
     }
 
+    /// B3: a user who clicked the toggle may be asked to approve the Docker
+    /// Desktop install once. Satisfying Docker first with that authority leaves
+    /// the ordinary install path below untouched — `ensure_docker` is
+    /// idempotent, so its call inside `install()` then finds Docker ready.
+    /// Every other caller of `install()` (boot recovery, the Docker watcher)
+    /// keeps getting Automatic, which the gate refuses without prompting.
+    async fn install_for_user(&self) -> Result<()> {
+        super::docker_manager::ensure_docker_with(
+            crate::elevation_gate::ElevationTrigger::UserClick,
+        )
+        .await?;
+        self.install().await
+    }
+
     async fn install(&self) -> Result<()> {
         // B6: a recent lookup already proved this device has no wallet. Fail
         // immediately with the actionable reason rather than re-asking

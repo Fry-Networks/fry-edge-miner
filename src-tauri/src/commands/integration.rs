@@ -375,7 +375,12 @@ pub async fn toggle_integration(
 
         // Auto-install integrations that have not been deployed yet (e.g., Diiisco).
         if integration.installed_version().is_none() {
-            match tokio::time::timeout(INSTALL_STEP_TIMEOUT, integration.install()).await {
+            // B3: the toggle is the human gesture, so this is the one install
+            // path allowed to raise a UAC prompt for an elevated partner
+            // prerequisite. The boot recovery pass and the Docker watcher keep
+            // calling install() and get ElevationTrigger::Automatic, which the
+            // gate refuses before any prompt appears.
+            match tokio::time::timeout(INSTALL_STEP_TIMEOUT, integration.install_for_user()).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
                     let err_msg = e.to_string();
@@ -481,7 +486,7 @@ pub async fn force_reinstall_integration(
     );
     tokio::task::block_in_place(crate::integrations::aem::AemIntegration::force_clean);
 
-    if let Err(e) = integration.install().await {
+    if let Err(e) = integration.install_for_user().await {
         let err_msg = e.to_string();
         if let Ok(mut errs) = state.last_integration_error.write() {
             errs.insert(id.clone(), Some(err_msg.clone()));
@@ -841,16 +846,26 @@ mod b21_poll_lock_tests {
             .unwrap_or(src.len());
         let body = &src[fn_at..fn_end];
 
-        let install_call = format!("integration.{}()", "install");
-        let at = body
-            .find(&install_call)
-            .expect("toggle_integration must still auto-install");
-        // The timeout wrapping that call sits on the same line, before it.
-        let line_start = body[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let line = &body[line_start..at];
+        // Line-precise: `integration.installed_version()` shares the prefix
+        // `integration.install`, and matching that instead would read the
+        // wrong line entirely. Find the line that both opens a timeout AND
+        // calls an install, then assert which bound it names. (This guard has
+        // now caught two of my own edits: the call site changing to
+        // install_for_user, and this prefix collision.)
+        let opens_timeout = format!("tokio::time::{}(", "timeout");
+        let install_call = format!("integration.{}", "install");
+        let line = body
+            .lines()
+            .find(|l| l.contains(&opens_timeout) && l.contains(&install_call))
+            .expect("toggle_integration must still bound its auto-install");
+
         assert!(
             line.contains("INSTALL_STEP_TIMEOUT"),
             "the install arm is not bounded by the install timeout: {line}"
+        );
+        assert!(
+            !line.contains("TOGGLE_STEP_TIMEOUT"),
+            "the install arm is still bounded by the generic toggle budget: {line}"
         );
     }
 }

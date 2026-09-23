@@ -239,6 +239,17 @@ pub trait Integration: Send + Sync {
     fn id(&self) -> &str;
     fn display_name(&self) -> &str;
     async fn install(&self) -> Result<()>;
+    /// Install because the USER just asked for it, as distinct from the boot
+    /// recovery pass, the Docker watcher or an update step.
+    ///
+    /// B3: an install may need to run an elevated redistributable installer,
+    /// and only a human gesture may raise a UAC prompt. Everything else goes
+    /// through `install()` and gets `ElevationTrigger::Automatic`, which the
+    /// gate refuses before any prompt is shown. Defaults to `install()`, so an
+    /// integration whose install never elevates is unaffected.
+    async fn install_for_user(&self) -> Result<()> {
+        self.install().await
+    }
     async fn start(&self) -> Result<()>;
     /// Start because the USER just asked for it, as distinct from a boot
     /// auto-start, a supervisor restart or the Docker watcher.
@@ -739,5 +750,91 @@ mod marker_parity_tests {
             seen.len(),
             "duplicate marker in {AWAITING_MARKERS:?}"
         );
+    }
+}
+
+/// B3 / G4: the guard whose ABSENCE let a release-blocking violation through.
+///
+/// titan's VC++ redistributable installer and the Docker Desktop installer both
+/// raised `Start-Process -Verb RunAs` directly and referenced the elevation
+/// gate nowhere — while `elevation_gate`'s own module doc listed both functions
+/// among the five sites it covered. Both were reachable with NO user gesture
+/// (the boot recovery pass calls `install()` for every enabled-but-not-installed
+/// integration), so a UAC dialog appeared at app start for exactly the
+/// populations that filed the missing-runtime and wiped-partner-files reports.
+///
+/// Converting the call sites is not enough on its own: nothing stopped the next
+/// elevation site from being added the same way. This makes that structural.
+#[cfg(test)]
+mod b3_elevation_routing_tests {
+    /// Every integration source that can raise a UAC prompt.
+    const ELEVATION_SOURCES: [(&str, &str); 5] = [
+        ("firewall.rs", include_str!("firewall.rs")),
+        ("titan.rs", include_str!("titan.rs")),
+        ("docker_manager.rs", include_str!("docker_manager.rs")),
+        ("aem.rs", include_str!("aem.rs")),
+        ("space_acres.rs", include_str!("space_acres.rs")),
+    ];
+
+    /// Strip line comments, so prose ABOUT an elevation cannot satisfy — or
+    /// trip — this guard. Both matter here: these files deliberately describe
+    /// the pattern they no longer use.
+    fn code_only(src: &str) -> String {
+        src.lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn no_integration_raises_a_uac_prompt_outside_the_elevation_gate() {
+        // Assembled at runtime so this guard cannot match its own source text.
+        let raises = format!("-Verb Run{}", "As");
+        let gate = format!("elevation{}::run_elevated", "_gate");
+
+        let mut checked = 0;
+        for (name, src) in ELEVATION_SOURCES {
+            let code = code_only(src);
+            if !code.contains(&raises) {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                code.contains(&gate),
+                "{name} raises a UAC prompt but never calls the elevation gate — FEM can \
+                 elevate without a user gesture, which is exactly what B3 forbids"
+            );
+        }
+        assert!(
+            checked >= 3,
+            "expected at least the three known UAC-raising integration sources \
+             (firewall, titan, docker_manager), found {checked} — has a file been renamed?"
+        );
+    }
+
+    /// A gate call is only meaningful if the trigger can be Automatic; a site
+    /// that hard-codes UserClick has opted itself out of the policy.
+    #[test]
+    fn every_gated_site_can_refuse_an_automatic_trigger() {
+        let raises = format!("-Verb Run{}", "As");
+        let automatic = format!("ElevationTrigger::Auto{}", "matic");
+        let user = format!("ElevationTrigger::User{}", "Click");
+
+        for (name, src) in ELEVATION_SOURCES {
+            let code = code_only(src);
+            if !code.contains(&raises) {
+                continue;
+            }
+            // Either the site takes a trigger from its caller, or it must name
+            // Automatic somewhere. Hard-coding only UserClick is the failure.
+            let takes_trigger = code.contains("trigger: crate::elevation_gate::ElevationTrigger")
+                || code.contains("trigger,");
+            assert!(
+                takes_trigger || code.contains(&automatic),
+                "{name} always elevates on its own authority; it must accept the caller's \
+                 trigger so an automatic path can be refused"
+            );
+            let _ = &user;
+        }
     }
 }
