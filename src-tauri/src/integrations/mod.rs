@@ -867,3 +867,8 @@ mod b3_elevation_routing_tests {
 #[cfg(test)]
 #[path = "docker_boot_contract_tests.rs"]
 mod docker_boot_contract_tests;
+
+/// NB-2: a timed-out VC++ redist install must not be reported as a decline.
+#[cfg(test)]
+#[path = "titan_vc_redist_timeout_gate_tests.rs"]
+mod titan_vc_redist_timeout_gate_tests;

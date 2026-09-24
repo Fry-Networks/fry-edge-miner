@@ -138,24 +138,25 @@ pub(crate) async fn install_vc_redist_elevated(
     // attempt instead of being silently suppressed.
     let attempt_key = format!("vc-redist|{}", installer_str.to_lowercase());
     let gated = crate::elevation_gate::run_elevated("titan", &attempt_key, trigger, move || {
-        crate::supervisor::platform::command("powershell")
+        match crate::supervisor::platform::command("powershell")
             .args(["-NoProfile", "-Command", &outer])
             .output_bounded(VC_REDIST_INSTALL_TIMEOUT)
-            .map_err(anyhow::Error::new)
+        {
+            // NB-2: a timeout is the "still installing in the background" case
+            // below, not a decline. Hand it back INSIDE Ok: in the gate's error
+            // channel every TimedOut is classified as declined and replaced by
+            // the needs-approval message, so an approved-but-slow install was
+            // told to approve again.
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(Err(e)),
+            other => other.map(Ok).map_err(anyhow::Error::new),
+        }
     });
 
     let result: std::io::Result<std::process::Output> = match gated {
-        Ok(out) => Ok(out),
+        Ok(result) => result,
         Err(crate::elevation_gate::ElevationSkipped::Failed(reason)) => {
-            // The gate ran the closure and it failed. A TimedOut here is the
-            // "still installing in the background" case below, not a failure,
-            // so it has to survive the round trip through the gate.
-            if reason.contains("timed out") || reason.contains("TimedOut") {
-                Err(std::io::Error::new(std::io::ErrorKind::TimedOut, reason))
-            } else {
-                warn!(reason = %reason, "VC++ redist install did not complete");
-                return Ok(vc_redist_install_outcome(false, false, None));
-            }
+            warn!(reason = %reason, "VC++ redist install did not complete");
+            return Ok(vc_redist_install_outcome(false, false, None));
         }
         Err(skipped) => {
             warn!(reason = %skipped, "VC++ redist install skipped by the elevation gate");
