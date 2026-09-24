@@ -3,6 +3,20 @@ import type { RewardSummary } from './types'
 const DASH = '—'
 
 /**
+ * 1.25 -> "1.25", 1.0 -> "1.0", 3.0 -> "3.0", 1.5 -> "1.5". `toFixed(1)`
+ * rounded a real 1.25x staking tier down to a displayed "1.3x" — the label no
+ * longer matched the multiplier every estimate on the page actually used.
+ * Format to 2 decimals (the same precision `estimated`/`baseReward` already
+ * use below) and drop a trailing zero in the hundredths place, but never
+ * below one decimal, so a whole-number tier still reads "1.0x"/"3.0x" rather
+ * than "1x"/"3x".
+ */
+function formatMultiplier(value: number): string {
+  const twoDp = value.toFixed(2)
+  return twoDp.endsWith('0') ? twoDp.slice(0, -1) : twoDp
+}
+
+/**
  * A summary is only "ready" once both cold-cache signals have resolved.
  * Before the first PoC-loop tick (60s interval, network round-trips first),
  * `get_reward_summary` already returns a non-null summary, but base_reward,
@@ -44,7 +58,7 @@ export function deriveRewardDisplay(summary: RewardSummary | null | undefined): 
     rewardToken: summary.reward_token_name,
     rewardAsa: summary.reward_token_asa_id,
     baseReward: summary.base_reward.toFixed(2),
-    stakeMultiplierLabel: `${summary.stake_multiplier.toFixed(1)}×`,
+    stakeMultiplierLabel: `${formatMultiplier(summary.stake_multiplier)}×`,
     stakeLabel: summary.stake_label
   }
 }
