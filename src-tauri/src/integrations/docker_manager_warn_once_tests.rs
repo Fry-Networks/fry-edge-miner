@@ -32,17 +32,19 @@ fn seed_bogus_docker_cli_cache() {
     ));
 }
 
-/// A definitely-spawnable binary that exits immediately and ignores its
-/// arguments — used to produce a real spawn SUCCESS deterministically,
-/// without depending on the real `docker` CLI.
-const SPAWNABLE_NOOP: &str = "/bin/true";
+/// A definitely-spawnable binary that exits immediately — used to produce a
+/// real spawn SUCCESS deterministically, without depending on the real
+/// `docker` CLI. This test executable itself: it exists on every platform
+/// (`/bin/true` does not exist on the Windows CI runner), and given
+/// `--version` libtest rejects the option and exits at once without running
+/// any test.
+fn spawnable_noop() -> PathBuf {
+    std::env::current_exe().expect("the running test executable has a path")
+}
 
 fn seed_spawnable_docker_cli_cache() {
     let mut guard = DOCKER_CLI_CACHE.lock().expect("cache lock");
-    *guard = Some((
-        Some(PathBuf::from(SPAWNABLE_NOOP)),
-        std::time::Instant::now(),
-    ));
+    *guard = Some((Some(spawnable_noop()), std::time::Instant::now()));
 }
 
 #[derive(Clone, Default)]
@@ -84,7 +86,7 @@ fn reset_spawn_state_to_not_previously_failed() {
     assert_ne!(
         probe,
         DockerProbe::CliMissing,
-        "the seeded /bin/true must spawn successfully"
+        "the seeded spawnable executable must spawn successfully"
     );
 }
 
@@ -165,7 +167,7 @@ fn a_failure_after_a_success_warns_again() {
         assert_ne!(
             probe,
             DockerProbe::CliMissing,
-            "the seeded /bin/true must spawn successfully"
+            "the seeded spawnable executable must spawn successfully"
         );
 
         // One more failure: a NEW transition, must warn again.
