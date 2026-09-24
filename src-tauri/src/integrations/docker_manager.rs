@@ -769,6 +769,32 @@ pub async fn ensure_docker() -> Result<()> {
 /// Docker with `UserClick` authority and then run the ordinary install path
 /// unchanged.
 pub async fn ensure_docker_with(trigger: crate::elevation_gate::ElevationTrigger) -> Result<()> {
+    ensure_docker_core(trigger, true).await
+}
+
+/// FAIL-13: like `ensure_docker_with`, but NEVER downloads or installs Docker
+/// Desktop — for automatic paths (a supervisor restart, a health tick) that
+/// must not put a gesture-less network fetch on the wire, let alone an
+/// elevated install.
+///
+/// `ensure_docker_with`'s `NotInstalled` branch downloaded the installer
+/// BEFORE the elevation gate was ever consulted — only the install/elevate
+/// step was gated, the download was not. A Pawns supervisor restart
+/// (`stop_for_restart` -> `start()` -> this) with Docker absent therefore
+/// reached a real network fetch with nobody at the keyboard. `Ready` /
+/// `VirtualizationDisabled` / `DaemonStopped` are unaffected — none of them
+/// ever downloads anything (`DaemonStopped` only launches the
+/// ALREADY-INSTALLED app). A real user gesture still goes through
+/// `ensure_docker_with(UserClick)`, which can install (see
+/// `PawnsIntegration::start_for_user`, mirroring `install_for_user`).
+pub async fn ensure_docker_no_install() -> Result<()> {
+    ensure_docker_core(crate::elevation_gate::ElevationTrigger::Automatic, false).await
+}
+
+async fn ensure_docker_core(
+    trigger: crate::elevation_gate::ElevationTrigger,
+    allow_install: bool,
+) -> Result<()> {
     match docker_status() {
         DockerStatus::Ready => {
             info!("Docker is already available");
@@ -797,6 +823,12 @@ pub async fn ensure_docker_with(trigger: crate::elevation_gate::ElevationTrigger
             })
         }
         DockerStatus::NotInstalled => {
+            if !allow_install {
+                anyhow::bail!(
+                    "Docker Desktop is not installed — enable this integration once (or use \
+                     its Settings action) to install it"
+                );
+            }
             info!("Docker Desktop not installed — downloading installer");
             let installer_path = download_docker_installer().await?;
             run_docker_installer(&installer_path, trigger).await?;
