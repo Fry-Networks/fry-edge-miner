@@ -11,3 +11,6 @@ pub mod updates;
 
 #[cfg(test)]
 mod force_reinstall_rearm_tests;
+
+#[cfg(test)]
+mod integration_update_lock_tests;

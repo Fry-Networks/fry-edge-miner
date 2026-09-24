@@ -238,12 +238,17 @@ pub async fn install_update(
         Ok("restart required".to_string())
     } else if kind == "integration" {
         tokio::task::block_in_place(|| {
-            let reg = state.registry.lock().map_err(|e| e.to_string())?;
             let rt = tokio::runtime::Handle::current();
 
-            let integration = reg
-                .get(&id)
-                .ok_or_else(|| format!("Integration '{}' not found", id))?;
+            // FAIL-4: clone the handle out and drop the registry guard before
+            // any block_on. Health loops, the PoC reporter and get_integrations
+            // take this std Mutex synchronously on async workers; held across a
+            // real SpaceAcres reinstall (B21) it pins every worker.
+            let integration = {
+                let reg = state.registry.lock().map_err(|e| e.to_string())?;
+                reg.get(&id)
+                    .ok_or_else(|| format!("Integration '{}' not found", id))?
+            };
 
             let latest = rt
                 .block_on(integration.check_update())
