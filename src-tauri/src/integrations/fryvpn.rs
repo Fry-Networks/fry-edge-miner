@@ -304,12 +304,12 @@ async fn probe_health_once() -> HealthStatus {
     }
 }
 
-/// D-C4-2: what a RUNNING node that frynode reports healthy and registered
-/// shows. While its wallet cannot pay the next heartbeat that is ONE funding
-/// state instead of Healthy: frynode keeps its own heartbeat cadence and the
-/// chain rejects each unaffordable one without spending anything. The wallet
-/// is re-read on the bounded backoff, and a failed read keeps the last verdict.
-async fn heartbeat_funding_state() -> HealthStatus {
+/// D-C4-2: keep the funding notice of a RUNNING node that frynode reports
+/// healthy and registered up to date. frynode keeps its own heartbeat cadence
+/// and the chain rejects each unaffordable one without spending anything, so
+/// the notice is the only thing that changes: the wallet is re-read on the
+/// bounded backoff, and a failed read keeps the last verdict.
+async fn refresh_funding_notice() {
     let due = {
         let mut watch = WALLET_WATCH.lock().unwrap();
         watch.address.clone().filter(|_| watch.read_due())
@@ -326,10 +326,15 @@ async fn heartbeat_funding_state() -> HealthStatus {
                 ));
         }
     }
-    match WALLET_WATCH.lock().unwrap().heartbeat_shortfall.clone() {
-        Some(shortfall) => HealthStatus::Unhealthy(shortfall),
-        None => HealthStatus::Healthy,
-    }
+}
+
+/// D-C4-2: the UI-only notice for a registered node whose wallet cannot pay its
+/// next heartbeat, or `None`. `get_integrations` shows it in the card's error
+/// line. It is deliberately NOT part of `health_check`: a registered node's
+/// health is frynode's own, exactly as on 0.4.33, so the PoC health map and
+/// the reward scalars built from it never see the balance.
+pub(crate) fn funding_notice() -> Option<String> {
+    WALLET_WATCH.lock().unwrap().heartbeat_shortfall.clone()
 }
 
 /// The payment frynode makes to fund this node's on-chain registry box —
@@ -442,8 +447,8 @@ struct WalletWatch {
     /// The node address last measured. Not a secret: the running-node check
     /// needs no credentials fetch, and the mnemonic is never kept.
     address: Option<String>,
-    /// D-C4-2: the ONE state a registered node shows while its wallet cannot
-    /// pay the next heartbeat.
+    /// D-C4-2: the ONE notice a registered node shows while its wallet cannot
+    /// pay the next heartbeat (see `funding_notice`).
     heartbeat_shortfall: Option<String>,
     /// Bounded backoff: health checks still to skip before the next read,
     /// and the reads that sized the skip.
@@ -486,7 +491,7 @@ impl WalletWatch {
         match (&self.heartbeat_shortfall, &next) {
             (None, Some(reason)) => warn!(
                 reason = %reason,
-                "fryDVPN wallet cannot pay its next heartbeat - showing one funding state until it is funded"
+                "fryDVPN wallet cannot pay its next heartbeat - showing one funding notice until it is funded"
             ),
             (Some(_), None) => info!("fryDVPN wallet can pay its heartbeats again"),
             _ => {}
@@ -559,7 +564,7 @@ pub(crate) fn balance_unreadable_message(detail: &str) -> String {
 /// minimum fee (registry.go `simpleCall`, no extra fee).
 pub(crate) const HEARTBEAT_FEE_MICROALGOS: u64 = ALGORAND_MIN_FEE_MICROALGOS;
 
-/// PURE (D-C4-2): the single state a REGISTERED node shows while its wallet
+/// PURE (D-C4-2): the single notice a REGISTERED node shows while its wallet
 /// cannot pay its next heartbeat, or `None` when it can.
 ///
 /// The shortfall is that call's fee plus the account's own minimum, less what
@@ -578,7 +583,7 @@ pub(crate) fn heartbeat_shortfall_message(
         .saturating_add(HEARTBEAT_FEE_MICROALGOS)
         .saturating_sub(amount);
     Some(format!(
-        "{FUNDING_MARKER} — send {:.6} ALGO to {address} (this registered node's wallet cannot pay the {:.3} ALGO fee of its next heartbeat, so the chain rejects each one and nothing is spent). fryDVPN keeps running, and its heartbeats resume automatically once the wallet is funded.",
+        "fryDVPN is running, but this node's wallet cannot pay the {1:.3} ALGO fee of its next heartbeat — send {0:.6} ALGO to {address}. The chain rejects each unpaid heartbeat and nothing is spent; heartbeats resume automatically once the wallet is funded.",
         short as f64 / 1_000_000.0,
         HEARTBEAT_FEE_MICROALGOS as f64 / 1_000_000.0
     ))
@@ -1166,7 +1171,12 @@ impl Integration for FryVpnIntegration {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
             match probe_health_once().await {
-                HealthStatus::Healthy => return heartbeat_funding_state().await,
+                // D-C4-2: a registered node's health is frynode's own; the
+                // wallet only ever moves the UI notice.
+                HealthStatus::Healthy => {
+                    refresh_funding_notice().await;
+                    return HealthStatus::Healthy;
+                }
                 other => last = other,
             }
         }
@@ -1969,3 +1979,14 @@ mod fryvpn_algod_endpoint_tests;
 #[cfg(test)]
 #[path = "fryvpn_funding_gate_tests.rs"]
 mod fryvpn_funding_gate_tests;
+
+/// D-C4-2 rework: a registered node's health is frynode's own, whatever its
+/// balance, so the PoC document counts it exactly as 0.4.33 did.
+#[cfg(test)]
+#[path = "fryvpn_registered_health_tests.rs"]
+mod fryvpn_registered_health_tests;
+
+/// D-C4-2 rework: the heartbeat shortfall is a UI-only notice on the card.
+#[cfg(test)]
+#[path = "fryvpn_funding_notice_tests.rs"]
+mod fryvpn_funding_notice_tests;

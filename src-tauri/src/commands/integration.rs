@@ -143,7 +143,15 @@ pub async fn get_integrations(
                     error: last_errors
                         .get(&id)
                         .and_then(|e| e.clone())
-                        .or_else(|| elevation_blocks.get(&id).cloned()),
+                        .or_else(|| elevation_blocks.get(&id).cloned())
+                        // D-C4-2: a registered fryDVPN node that cannot pay its
+                        // next heartbeat. UI only — it never reaches `health`,
+                        // so the PoC health map and reward scalars are untouched.
+                        .or_else(|| {
+                            (id == "fryvpn")
+                                .then(crate::integrations::fryvpn::funding_notice)
+                                .flatten()
+                        }),
                     unavailable_reason,
                 }
             },

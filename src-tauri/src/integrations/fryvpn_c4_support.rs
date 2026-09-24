@@ -540,6 +540,40 @@ impl Scene {
         );
     }
 
+    /// The PoC document the reporter would submit right now, built the way the
+    /// reporter builds it: `compute_health_map_with_timeout`, then
+    /// `build_poc_doc`, over a registry holding this scene's fryDVPN, enabled.
+    /// The registered integration shares this scene's supervisor and config,
+    /// so it sees the same process and the same wallet state.
+    pub fn poc_doc(&self) -> crate::api::types::ApiPocHardwareDoc {
+        let twin = Arc::new(FryVpnIntegration {
+            config: self.integ.config.clone(),
+            api_client: self.integ.api_client.clone(),
+            supervisor: self.integ.supervisor.clone(),
+            log_dir: self.integ.log_dir.clone(),
+        });
+        let mut reg = crate::integrations::IntegrationRegistry::new();
+        reg.register(twin);
+        reg.set_enabled("fryvpn", true);
+        let registry = Arc::new(Mutex::new(reg));
+        let for_map = registry.clone();
+        // Spawned from inside the runtime: the reporter bridges with
+        // block_in_place, which needs a runtime thread.
+        let map = self
+            .block_on(async move {
+                tokio::task::spawn_blocking(move || {
+                    crate::poc::reporter::compute_health_map_with_timeout(
+                        &for_map,
+                        Duration::from_secs(45),
+                    )
+                })
+                .await
+            })
+            .expect("the health map task must finish");
+        let reg = registry.lock().unwrap();
+        crate::poc::reporter::build_poc_doc(MINER_KEY, &reg, &map)
+    }
+
     /// The start reached frynode's spawn: the gate let it through.
     pub fn spawn_attempted(started: &anyhow::Result<()>) -> bool {
         matches!(started, Err(e) if e.to_string().contains("Failed to spawn frynode"))

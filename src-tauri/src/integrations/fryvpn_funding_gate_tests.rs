@@ -8,6 +8,8 @@
 //!   resumes on its own once funded.
 //! - A registered node that cannot pay its next heartbeat shows ONE funding
 //!   state, logged once per state change, never per heartbeat or per check.
+//!   Since the chunk-2 rework that state is a UI-only notice: health stays
+//!   frynode's own.
 //! - An unreadable balance spends nothing: an unregistered node is not
 //!   spawned, and a registered one, or one whose registration could not be
 //!   read either, stays up. A failed read is never taken as "registered".
@@ -221,26 +223,26 @@ fn registered_short_running() {
         "frynode must be running"
     );
 
-    let first = s.block_on(s.integ.health_check());
-    assert!(
-        reason(&first).starts_with(FUNDING_MARKER)
-            && reason(&first).contains(&format!("send 0.000986 ALGO to {ADDR}")),
-        "a running registered node that cannot pay its next heartbeat shows the funding \
-         state: {first:?}"
-    );
-    assert_eq!(
-        recovery_action(&first, true, 0, 6),
-        RecoveryAction::None,
-        "restarting frynode cannot fund its wallet"
-    );
-    for check in 2..=13 {
-        let status = s.block_on(s.integ.health_check());
-        assert_eq!(status, first, "check {check}: one state, not one per check");
+    // D-C4-2 (chunk-2 rework): the balance never reaches health. A registered
+    // node reports frynode's own health, and the shortfall lives in a UI-only
+    // notice — observed here through its once-per-change log lines.
+    for check in 1..=13 {
+        assert_eq!(
+            s.block_on(s.integ.health_check()),
+            HealthStatus::Healthy,
+            "check {check}: a registered node's health is frynode's own, whatever its balance"
+        );
     }
+    let entered = s.log_lines(SHORTFALL_ENTERED);
     assert_eq!(
-        s.log_lines(SHORTFALL_ENTERED).len(),
+        entered.len(),
         1,
-        "logged once on entering the state, not per check or per heartbeat"
+        "logged once on entering the state, not per check or per heartbeat: {entered:?}"
+    );
+    assert!(
+        entered[0].contains(&format!("send 0.000986 ALGO to {ADDR}")),
+        "{}",
+        entered[0]
     );
     assert_eq!(
         s.reads(&account_path()),
@@ -250,17 +252,18 @@ fn registered_short_running() {
 
     // Funded: the state clears at the next due re-read, with no restart.
     s.set_world(|w| w.amount = 200_000);
-    let cleared_at =
-        (14..=24).find(|_| s.block_on(s.integ.health_check()) == HealthStatus::Healthy);
+    let cleared_at = (14..=24).find(|check| {
+        assert_eq!(
+            s.block_on(s.integ.health_check()),
+            HealthStatus::Healthy,
+            "check {check}"
+        );
+        s.log_lines(SHORTFALL_LEFT).len() == 1
+    });
     assert_eq!(
         cleared_at,
         Some(15),
-        "the shortfall clears at the next due re-read (check 15)"
-    );
-    assert_eq!(
-        s.log_lines(SHORTFALL_LEFT).len(),
-        1,
-        "leaving is logged once"
+        "the shortfall clears at the next due re-read (check 15), logged once"
     );
     assert!(
         matches!(
@@ -272,25 +275,26 @@ fn registered_short_running() {
 
     // Drained again by its heartbeats: a second state change, logged once more.
     s.set_world(|w| w.amount = 100_014);
-    let short_again_at =
-        (16..=25).find(|_| reason(&s.block_on(s.integ.health_check())).starts_with(FUNDING_MARKER));
+    let short_again_at = (16..=25).find(|check| {
+        assert_eq!(
+            s.block_on(s.integ.health_check()),
+            HealthStatus::Healthy,
+            "check {check}"
+        );
+        s.log_lines(SHORTFALL_ENTERED).len() == 2
+    });
     assert_eq!(
         short_again_at,
         Some(25),
         "re-detected at the next due re-read"
     );
-    assert_eq!(s.log_lines(SHORTFALL_ENTERED).len(), 2);
 
     // A start on the already-running node (boot pass, a toggle) while algod
     // is unreadable proves nothing: the state stays, and nothing is logged.
     s.set_world(|w| w.account = Account::Html503);
     let again = s.block_on(s.integ.start());
     assert!(again.is_ok(), "{again:?}");
-    let unread = s.block_on(s.integ.health_check());
-    assert!(
-        reason(&unread).starts_with(FUNDING_MARKER),
-        "an unreadable wallet must not clear the shortfall state: {unread:?}"
-    );
+    assert_eq!(s.block_on(s.integ.health_check()), HealthStatus::Healthy);
     assert_eq!(
         s.log_lines(SHORTFALL_LEFT).len(),
         1,
