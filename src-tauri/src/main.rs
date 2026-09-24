@@ -1246,6 +1246,7 @@ fn main() {
             commands::migration::run_migration,
             commands::updates::check_updates,
             commands::updates::install_update,
+            commands::hardening::retry_hardening,
         ])
         .build(tauri::generate_context!())
         .expect("error while running FEM")

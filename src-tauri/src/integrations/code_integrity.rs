@@ -26,10 +26,25 @@ use crate::supervisor::platform::BoundedOutput;
 /// without changing that list re-arms the respawn loop.
 pub(crate) const AWAITING_ADMIN_MARKER: &str = "Awaiting administrator action";
 
-/// The CodeIntegrity event ids that mean "this image was refused".
-/// 3033: the file did not meet the signing-level requirement. 3077: the file
-/// would have been blocked (audit). 3076: an audit-mode block.
-const BLOCK_EVENT_IDS: [&str; 3] = ["3033", "3076", "3077"];
+/// The CodeIntegrity event ids the probe script asks the OS for. NOT every
+/// one of these means the image was refused — see `ENFORCED_BLOCK_EVENT_IDS`.
+/// 3033: the file did not meet the signing-level requirement (enforced
+/// refusal). 3077: the file was blocked from loading (enforced refusal).
+/// 3076: AUDIT mode — Code Integrity logged that the file WOULD have failed
+/// an enforced policy, but the file WAS allowed to load.
+///
+/// FAIL-9: this comment used to have 3076 and 3077's meanings swapped, and
+/// the code folded 3076 in with the enforced ids — so a real, non-blocking
+/// audit event (captured from a machine running an AUDIT-mode WDAC policy,
+/// where the image demonstrably loaded) made FEM report "Awaiting
+/// administrator action" and permanently suppress recovery for a process
+/// that was, in fact, running.
+const QUERIED_EVENT_IDS: [&str; 3] = ["3033", "3076", "3077"];
+
+/// The ids among `QUERIED_EVENT_IDS` that mean the OS actually refused to
+/// load the image, as opposed to merely logging — under an Audit policy —
+/// that it WOULD have refused it. 3076 is deliberately excluded.
+const ENFORCED_BLOCK_EVENT_IDS: [&str; 2] = ["3033", "3077"];
 
 /// What the card shows. Starts with the marker so the health loop stops
 /// restarting, and then says the three things the user needs: which file, what
@@ -57,8 +72,17 @@ fn image_file_name(image: &Path) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
+/// PURE: does `haystack` (already lower-cased) carry `<EventID>id</EventID>`
+/// or an `id='...'` attribute equal to `id`? Shared by `event_names_our_image`
+/// and `event_is_enforced_block` so the two id lists are matched identically.
+fn xml_has_event_id(haystack_lowercased: &str, id: &str) -> bool {
+    haystack_lowercased.contains(&format!(">{id}<"))
+        || haystack_lowercased.contains(&format!("'{id}'"))
+}
+
 /// PURE: does this event XML name the image we are asking about, and is it one
-/// of the block ids?
+/// of the ids the probe queries for (audited OR enforced — see
+/// `event_is_enforced_block` for the narrower, block-or-not question)?
 ///
 /// Matched on the file NAME, not the full path: the event log reports an NT
 /// device path (`\Device\HarddiskVolume3\Users\...`) rather than the drive
@@ -72,9 +96,21 @@ pub(crate) fn event_names_our_image(event_xml: &str, image: &Path) -> bool {
     if !haystack.contains(&name) {
         return false;
     }
-    BLOCK_EVENT_IDS
+    QUERIED_EVENT_IDS
         .iter()
-        .any(|id| haystack.contains(&format!(">{id}<")) || haystack.contains(&format!("'{id}'")))
+        .any(|id| xml_has_event_id(&haystack, id))
+}
+
+/// PURE: did the OS actually refuse to load the image described by this
+/// event — as opposed to merely logging, under an Audit policy, that it
+/// WOULD have refused it (3076)? Callers must already know the event names
+/// their image (`event_names_our_image`); this only narrows audit vs.
+/// enforcement.
+fn event_is_enforced_block(event_xml: &str) -> bool {
+    let haystack = event_xml.to_lowercase();
+    ENFORCED_BLOCK_EVENT_IDS
+        .iter()
+        .any(|id| xml_has_event_id(&haystack, id))
 }
 
 /// How recent a block event has to be to describe the CURRENT state.
@@ -167,16 +203,32 @@ pub(crate) fn event_is_recent(
     age <= as_chrono(window, "the recency window")
 }
 
-/// PURE: the first RECENT block in `listing` that names `image`, if any. The
-/// listing is one event's XML per chunk, separated by blank lines.
+/// PURE: the first RECENT, ENFORCED block in `listing` that names `image`, if
+/// any. The listing is one event's XML per chunk, separated by blank lines.
+///
+/// FAIL-10: `Get-WinEvent | ForEach-Object { $_.ToXml(); '' }` emits CRLF —
+/// PowerShell's own line endings — so the real separator between events is
+/// `"\r\n\r\n"`, which does not contain the substring `"\n\n"` this used to
+/// split on. A multi-event CRLF listing therefore collapsed into ONE chunk,
+/// and `event_time` (which finds the FIRST `SystemTime=` in whatever chunk it
+/// is given) judged every event in the listing by whichever timestamp
+/// happened to come first in the raw string — not the timestamp of the event
+/// that actually named our image. Normalising CRLF to LF before splitting
+/// restores one chunk per event.
 pub(crate) fn first_block_for_at(
     listing: &str,
     image: &Path,
     now: chrono::DateTime<chrono::Utc>,
     window: std::time::Duration,
 ) -> Option<String> {
-    for chunk in listing.split("\n\n").map(str::trim) {
+    let normalized = listing.replace("\r\n", "\n");
+    for chunk in normalized.split("\n\n").map(str::trim) {
         if chunk.is_empty() || !event_names_our_image(chunk, image) {
+            continue;
+        }
+        if !event_is_enforced_block(chunk) {
+            // FAIL-9: audit-only (3076) — the image WAS allowed to load, so
+            // this is not a block and must not suppress recovery.
             continue;
         }
         if event_is_recent(chunk, now, window) {
@@ -211,7 +263,8 @@ pub(crate) fn first_block_for_at(
 /// production entry point, which is a trap for the next reader.
 #[allow(dead_code)]
 pub(crate) fn first_block_for_ignoring_recency(listing: &str, image: &Path) -> Option<String> {
-    listing
+    let normalized = listing.replace("\r\n", "\n");
+    normalized
         .split("\n\n")
         .map(str::trim)
         .find(|chunk| !chunk.is_empty() && event_names_our_image(chunk, image))
@@ -230,7 +283,7 @@ pub(crate) fn recent_blocks_script() -> String {
         "Get-WinEvent -FilterHashtable @{{LogName='Microsoft-Windows-CodeIntegrity/Operational'; \
          Id={}; StartTime=(Get-Date).AddSeconds(-{})}} -MaxEvents 20 -ErrorAction SilentlyContinue | \
          ForEach-Object {{ $_.ToXml(); '' }}",
-        BLOCK_EVENT_IDS.join(","),
+        QUERIED_EVENT_IDS.join(","),
         BLOCK_RECENCY.as_secs()
     )
 }
@@ -288,3 +341,9 @@ mod code_integrity_tests;
 #[cfg(test)]
 #[path = "code_integrity_recency_tests.rs"]
 mod code_integrity_recency_tests;
+
+/// FAIL-9 + FAIL-10: real captures from the B15 VM leg. Separate file so the
+/// two files above stay byte-identical.
+#[cfg(test)]
+#[path = "code_integrity_b15_capture_tests.rs"]
+mod code_integrity_b15_capture_tests;

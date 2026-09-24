@@ -435,3 +435,18 @@ mod bug10_elevation_hygiene_tests {
         );
     }
 }
+
+/// FAIL-11: at 5b7c8f5, `run_hardening_elevated` had exactly two callers —
+/// the boot pass (main.rs) and the pre-update re-assert (updater_auto.rs) —
+/// and BOTH pass `ElevationTrigger::Automatic`. No `#[tauri::command]`
+/// anywhere in the tree passed `UserClick`, so a user who wanted hardening
+/// applied (after a decline, or proactively) had no way to ask for it.
+///
+/// This walks the real filesystem under `src/` at TEST RUNTIME (not
+/// `include_str!`, which embeds a fixed file at compile time and cannot see
+/// a file added after this test file itself was written) — this must
+/// compile and run unmodified against 5b7c8f5's product tree, where the
+/// command this looks for does not exist yet.
+#[cfg(test)]
+#[path = "security_setup_user_click_hardening_tests.rs"]
+mod security_setup_user_click_hardening_tests;

@@ -796,6 +796,33 @@ impl Integration for PawnsIntegration {
         Ok(())
     }
 
+    /// FAIL-13: satisfy Docker with `UserClick` authority first — mirrors
+    /// `install_for_user` above. Idempotent (`ensure_docker_with` is a no-op
+    /// once Docker is ready), so `start()`'s own `ensure_docker_no_install`
+    /// call below then finds Docker already ready and needs no authority of
+    /// its own.
+    /// Chunk-3 fix: this used to call `ensure_docker_with` BEFORE any consent
+    /// or credentials check, so a user who toggled Pawns on WITHOUT consent
+    /// got a Docker Desktop download and a UAC prompt, and only THEN "needs
+    /// your consent" — ahead of the very gate that is supposed to decide
+    /// whether Pawns may do anything at all. Runs the SAME preconditions
+    /// `start()` runs, in the SAME order, first — reusing the exact
+    /// functions/strings, not new ones.
+    async fn start_for_user(&self) -> Result<()> {
+        if !Self::user_consent() {
+            anyhow::bail!("{}", consent_required_status());
+        }
+        if let Err(reason) = self.credentials().await {
+            anyhow::bail!("{}", reason);
+        }
+
+        super::docker_manager::ensure_docker_with(
+            crate::elevation_gate::ElevationTrigger::UserClick,
+        )
+        .await?;
+        self.start().await
+    }
+
     async fn start(&self) -> Result<()> {
         if !Self::user_consent() {
             // BUG 8: short + actionable. The audited disclosure is shown by the
@@ -809,7 +836,14 @@ impl Integration for PawnsIntegration {
             Err(reason) => anyhow::bail!("{}", reason),
         };
 
-        super::docker_manager::ensure_docker().await?;
+        // FAIL-13: NOT `ensure_docker()`. The supervisor's restart path
+        // (`stop_for_restart` -> `start()`) is not a user gesture, and
+        // `ensure_docker()`'s NotInstalled branch downloads the Docker
+        // Desktop installer before the elevation gate is ever consulted — a
+        // gesture-less network fetch. `ensure_docker_no_install` never
+        // downloads; a real user gesture goes through `start_for_user`
+        // above, which satisfies Docker with `UserClick` first.
+        super::docker_manager::ensure_docker_no_install().await?;
         if !Self::install_marker().exists() {
             self.install().await?;
         }
@@ -1364,3 +1398,10 @@ mod bug8_consent_presentation_tests {
 #[cfg(test)]
 #[path = "pawns_anchored_consent_tests.rs"]
 mod pawns_anchored_consent_tests;
+
+/// FAIL-13: the automatic restart path must never reach a Docker Desktop
+/// download. Separate file so the consent test files above stay
+/// byte-identical.
+#[cfg(test)]
+#[path = "pawns_no_install_docker_tests.rs"]
+mod pawns_no_install_docker_tests;
