@@ -102,6 +102,10 @@ pub fn scrub_partner_line(line: &str) -> String {
     result = redact_algorand_address(&result);
     result = redact_wireguard_key(&result);
 
+    // BUG LOOP 2: no partner is handed the miner key today, but a line that
+    // carries one must not reach the disk either.
+    result = redact_miner_key(&result);
+
     result
 }
 
@@ -416,13 +420,36 @@ fn redact_hostname(s: &str) -> String {
     re.replace_all(s, "hostname=<host>").to_string()
 }
 
-/// Row 4: a miner key, `FEM-` + 32 hex in any case. The M6 bundle carried the
-/// device's key in plain text (`miner_key=FEM-<UPPERCASE HEX>`): the only
-/// rule that could touch it, `redact_serial`, matches lowercase hex only.
+/// Row 4: a miner key. The M6 bundle carried the device's key in plain text
+/// (`miner_key=FEM-<UPPERCASE HEX>`): the only rule that could touch it,
+/// `redact_serial`, matches lowercase hex only.
+///
+/// BUG LOOP 2: two rules, because the product both ACCEPTS and KEEPS more
+/// than hex. The SHAPE is the validator's own contract (`config/miner_key.rs`:
+/// `FEM-` + 32 alphanumerics, any case), redacted wherever it appears —
+/// including the request URLs FEM builds from it. The FIELD rule redacts
+/// whatever a `miner_key` field holds, because `resolve_stored_miner_key`
+/// keeps a stored key that fails validation (e.g. `FEM-SHORTKEY123`) and the
+/// device emitters log it as is: `miner_key=…` / `miner_key: …` (tracing,
+/// quoted or not) and `"miner_key": "…"` (JSON).
 fn redact_miner_key(s: &str) -> String {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"\bFEM-[0-9A-Fa-f]{32}\b").unwrap());
-    re.replace_all(s, "FEM-[REDACTED]").to_string()
+    static SHAPE: OnceLock<Regex> = OnceLock::new();
+    let shape = SHAPE.get_or_init(|| Regex::new(r"(?i)\bFEM-[0-9A-Z]{32}\b").unwrap());
+    let out = shape.replace_all(s, "FEM-[REDACTED]");
+
+    static FIELD: OnceLock<Regex> = OnceLock::new();
+    let field = FIELD.get_or_init(|| {
+        Regex::new(r#"(?i)(\bminer_key\s*[=:]\s*|"miner_key"\s*:\s*)("[^"]*"|[^\s,}]+)"#).unwrap()
+    });
+    field
+        .replace_all(&out, |caps: &regex::Captures| {
+            if caps[2].starts_with('"') {
+                format!(r#"{}"FEM-[REDACTED]""#, &caps[1])
+            } else {
+                format!("{}FEM-[REDACTED]", &caps[1])
+            }
+        })
+        .to_string()
 }
 
 /// Redact serial-like strings (hex sequences > 12 chars or alphanumeric serials)
@@ -580,3 +607,8 @@ mod tests {
 #[cfg(test)]
 #[path = "scrubber_c4_tests.rs"]
 mod scrubber_c4_tests;
+
+/// BUG LOOP 2: the miner key in every shape the product accepts or keeps.
+#[cfg(test)]
+#[path = "scrubber_bl2_key_tests.rs"]
+mod scrubber_bl2_key_tests;
