@@ -59,6 +59,18 @@ pub struct ReleaseAsset {
 #[derive(Default)]
 pub struct SpaceAcresIntegration {
     child: Mutex<Option<std::process::Child>>,
+    /// FAIL/row-10: `install_impl`'s single-bool signature is pinned by
+    /// `integration_update_lock_tests::space_acres_update_forces_the_reinstall_and_restarts`
+    /// (it text-matches `self.install_impl(true)`/`self.install_impl(false)`
+    /// call sites and `install_impl`'s own body), so it cannot take an
+    /// `ElevationTrigger` parameter. `install_for_user` and `apply_update`
+    /// (both reachable only from a real user gesture — see their own doc
+    /// comments) set this immediately before calling `install_impl`, which
+    /// reads-and-resets it as the FIRST thing it does, before any `.await` —
+    /// so there is no yield point between the set and the read. `install()`
+    /// (the boot pass / health-loop path) never sets it, so `install_impl`
+    /// reads `false` (Automatic) by default.
+    next_install_is_user_gesture: std::sync::atomic::AtomicBool,
 }
 
 /// Whether the version string read off a staged partners-dir copy signals it
@@ -656,6 +668,20 @@ impl SpaceAcresIntegration {
     async fn install_impl(&self, force: bool) -> Result<()> {
         #[cfg(target_os = "windows")]
         {
+            // FAIL/row-10: read-and-reset BEFORE anything else in this
+            // function — including before the first `.await` — so a caller
+            // that sets the flag immediately before calling this function
+            // hands it off with no yield point in between. See the field's
+            // own doc comment on why this can't be a normal parameter.
+            let install_trigger = if self
+                .next_install_is_user_gesture
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                crate::elevation_gate::ElevationTrigger::UserClick
+            } else {
+                crate::elevation_gate::ElevationTrigger::Automatic
+            };
+
             // These three shell out to PowerShell up to five times, each
             // bounded at 20 s, and they run BEFORE the first await — so the
             // tokio::time::timeout wrapped around install() could never fire
@@ -702,25 +728,45 @@ impl SpaceAcresIntegration {
 
             // The Windows artifact is an installer, so RUN it silently rather
             // than treating it as the farmer binary.
+            //
+            // FAIL/row-10: this used to spawn msiexec/the WiX Burn
+            // bootstrapper directly — outside the elevation gate entirely, so
+            // an automatic path (boot recovery, an automatic reinstall) could
+            // put a real install (and whatever consent prompt msiexec/Burn's
+            // own manifest raises) on screen with nobody at the keyboard.
+            // `install_trigger` (read above, before this function's first
+            // `.await`) is `Automatic` unless a caller reachable only from a
+            // real user gesture just set it.
             let is_msi = release.asset_name.to_lowercase().ends_with(".msi");
             let output = {
                 let installer = installer.clone();
+                let attempt_key = installer.to_string_lossy().to_lowercase();
                 tokio::task::spawn_blocking(move || {
-                    if is_msi {
-                        crate::supervisor::platform::command("msiexec")
-                            .arg("/i")
-                            .arg(&installer)
-                            .args(["/quiet", "/norestart"])
-                            .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)
-                    } else {
-                        // WiX Burn bootstrapper flags.
-                        crate::supervisor::platform::command(&installer)
-                            .args(["/quiet", "/norestart"])
-                            .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)
-                    }
+                    crate::elevation_gate::run_elevated(
+                        "space_acres",
+                        &attempt_key,
+                        install_trigger,
+                        move || {
+                            if is_msi {
+                                crate::supervisor::platform::command("msiexec")
+                                    .arg("/i")
+                                    .arg(&installer)
+                                    .args(["/quiet", "/norestart"])
+                                    .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)
+                                    .map_err(anyhow::Error::new)
+                            } else {
+                                // WiX Burn bootstrapper flags.
+                                crate::supervisor::platform::command(&installer)
+                                    .args(["/quiet", "/norestart"])
+                                    .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)
+                                    .map_err(anyhow::Error::new)
+                            }
+                        },
+                    )
                 })
                 .await
-                .map_err(|e| anyhow::anyhow!("SpaceAcres installer task panicked: {e}"))??
+                .map_err(|e| anyhow::anyhow!("SpaceAcres installer task panicked: {e}"))?
+                .map_err(|skipped| anyhow::anyhow!("{skipped}"))?
             };
             if !output.status.success() {
                 warn!(
@@ -813,6 +859,19 @@ impl Integration for SpaceAcresIntegration {
     }
 
     async fn install(&self) -> Result<()> {
+        self.install_impl(false).await
+    }
+
+    /// FAIL/row-10: the ONLY path that may let `install_impl`'s msiexec/Burn
+    /// spawn use `UserClick` — reached from the toggle
+    /// (`commands::integration::toggle_integration` calls `install_for_user`
+    /// for every integration) and from force-reinstall. `install()` above
+    /// (boot recovery, the health loop, and the technically-unreachable
+    /// `install_integration` command — the frontend never invokes it) never
+    /// sets the flag, so it always gets `Automatic`.
+    async fn install_for_user(&self) -> Result<()> {
+        self.next_install_is_user_gesture
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.install_impl(false).await
     }
 
@@ -988,6 +1047,12 @@ impl Integration for SpaceAcresIntegration {
         // Forced: stop() has just made `running` false while the old binary is
         // still on disk, which is precisely the state the ordinary guard reads
         // as "already installed".
+        //
+        // FAIL/row-10: apply_update is reached ONLY from install_update (a
+        // #[tauri::command], the Updates page's "Update" click) — never
+        // automatically — so this reinstall is a real user gesture too.
+        self.next_install_is_user_gesture
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.install_impl(true).await?;
         // And bring the farmer back — without this the update left the machine
         // with no SpaceAcres running and the caller still logged success.
@@ -1874,3 +1939,8 @@ mod b21_blocking_offload_tests {
 #[cfg(test)]
 #[path = "space_acres_exit_tests.rs"]
 mod space_acres_exit_tests;
+
+/// Row 10: install_impl's msiexec/Burn spawn goes through elevation_gate.
+#[cfg(test)]
+#[path = "space_acres_elevation_gate_tests.rs"]
+mod space_acres_elevation_gate_tests;
