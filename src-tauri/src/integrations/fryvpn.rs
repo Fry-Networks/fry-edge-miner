@@ -304,6 +304,34 @@ async fn probe_health_once() -> HealthStatus {
     }
 }
 
+/// D-C4-2: what a RUNNING node that frynode reports healthy and registered
+/// shows. While its wallet cannot pay the next heartbeat that is ONE funding
+/// state instead of Healthy: frynode keeps its own heartbeat cadence and the
+/// chain rejects each unaffordable one without spending anything. The wallet
+/// is re-read on the bounded backoff, and a failed read keeps the last verdict.
+async fn heartbeat_funding_state() -> HealthStatus {
+    let due = {
+        let mut watch = WALLET_WATCH.lock().unwrap();
+        watch.address.clone().filter(|_| watch.read_due())
+    };
+    if let Some(address) = due {
+        if let Ok((amount, min_balance)) = FryVpnIntegration::read_wallet_balance(&address).await {
+            WALLET_WATCH
+                .lock()
+                .unwrap()
+                .set_heartbeat_shortfall(heartbeat_shortfall_message(
+                    amount,
+                    min_balance,
+                    &address,
+                ));
+        }
+    }
+    match WALLET_WATCH.lock().unwrap().heartbeat_shortfall.clone() {
+        Some(shortfall) => HealthStatus::Unhealthy(shortfall),
+        None => HealthStatus::Healthy,
+    }
+}
+
 /// The payment frynode makes to fund this node's on-chain registry box —
 /// `defaultMBR` in the node's `registry` package. It is a real transfer out of
 /// the device wallet, not a fee, and leaving it out of the requirement is what
@@ -402,6 +430,73 @@ pub(crate) fn registration_affordability(
 /// process, so a module-level slot is the same state with a smaller diff.
 static PARKED_FUNDING_REASON: Mutex<Option<String>> = Mutex::new(None);
 
+/// FAIL-2: the health loop reads the wallet at most every 10th check — 5 min
+/// at the supervisor's 30 s interval, which is also frynode's default
+/// heartbeat interval — so a funded wallet is seen within that bound.
+const WALLET_RECHECK_MAX_SKIP: u32 = 9;
+
+/// FAIL-2 / D-C4-2: what the health loop remembers about the device wallet
+/// between reads. Process-global for the same reason as
+/// `PARKED_FUNDING_REASON`.
+struct WalletWatch {
+    /// The node address last measured. Not a secret: the running-node check
+    /// needs no credentials fetch, and the mnemonic is never kept.
+    address: Option<String>,
+    /// D-C4-2: the ONE state a registered node shows while its wallet cannot
+    /// pay the next heartbeat.
+    heartbeat_shortfall: Option<String>,
+    /// Bounded backoff: health checks still to skip before the next read,
+    /// and the reads that sized the skip.
+    skip: u32,
+    reads: u32,
+}
+
+impl WalletWatch {
+    const fn new() -> Self {
+        Self {
+            address: None,
+            heartbeat_shortfall: None,
+            skip: 0,
+            reads: 0,
+        }
+    }
+
+    /// A start just read the wallet: re-read after 1, then 2, 4, 8 and at
+    /// most every 10 health checks.
+    fn restart_backoff(&mut self) {
+        self.skip = 0;
+        self.reads = 1;
+    }
+
+    /// Whether this health check may read the wallet; a skipped check counts
+    /// down the backoff instead of reaching algod.
+    fn read_due(&mut self) -> bool {
+        if self.skip > 0 {
+            self.skip -= 1;
+            return false;
+        }
+        self.skip = ((1u32 << self.reads.min(4)) - 1).min(WALLET_RECHECK_MAX_SKIP);
+        self.reads += 1;
+        true
+    }
+
+    /// D-C4-2: logged once per STATE change — entering and leaving the
+    /// shortfall — and never per heartbeat or per check.
+    fn set_heartbeat_shortfall(&mut self, next: Option<String>) {
+        match (&self.heartbeat_shortfall, &next) {
+            (None, Some(reason)) => warn!(
+                reason = %reason,
+                "fryDVPN wallet cannot pay its next heartbeat - showing one funding state until it is funded"
+            ),
+            (Some(_), None) => info!("fryDVPN wallet can pay its heartbeats again"),
+            _ => {}
+        }
+        self.heartbeat_shortfall = next;
+    }
+}
+
+static WALLET_WATCH: Mutex<WalletWatch> = Mutex::new(WalletWatch::new());
+
 /// The prefix every fryDVPN funding message starts with.
 ///
 /// Load-bearing, not decoration: `integrations::awaits_user_action` matches it,
@@ -460,6 +555,35 @@ pub(crate) fn balance_unreadable_message(detail: &str) -> String {
     format!("{FUNDING_MARKER} — could not read this device's wallet balance ({detail}); retrying on the next check.")
 }
 
+/// One heartbeat: frynode's `Heartbeat` is a plain app call at the network
+/// minimum fee (registry.go `simpleCall`, no extra fee).
+pub(crate) const HEARTBEAT_FEE_MICROALGOS: u64 = ALGORAND_MIN_FEE_MICROALGOS;
+
+/// PURE (D-C4-2): the single state a REGISTERED node shows while its wallet
+/// cannot pay its next heartbeat, or `None` when it can.
+///
+/// The shortfall is that call's fee plus the account's own minimum, less what
+/// it holds — to the µALGO, since a heartbeat is 0.001 ALGO. frynode keeps
+/// sending heartbeats on its own cadence; each unaffordable one is rejected
+/// on chain and spends nothing.
+pub(crate) fn heartbeat_shortfall_message(
+    amount: u64,
+    min_balance: u64,
+    address: &str,
+) -> Option<String> {
+    if spendable_microalgos(amount, min_balance) >= HEARTBEAT_FEE_MICROALGOS {
+        return None;
+    }
+    let short = min_balance
+        .saturating_add(HEARTBEAT_FEE_MICROALGOS)
+        .saturating_sub(amount);
+    Some(format!(
+        "{FUNDING_MARKER} — send {:.6} ALGO to {address} (this registered node's wallet cannot pay the {:.3} ALGO fee of its next heartbeat, so the chain rejects each one and nothing is spent). fryDVPN keeps running, and its heartbeats resume automatically once the wallet is funded.",
+        short as f64 / 1_000_000.0,
+        HEARTBEAT_FEE_MICROALGOS as f64 / 1_000_000.0
+    ))
+}
+
 /// PURE: pull `amount` and `min-balance` out of an algod account response.
 /// `None` on anything unparseable — an HTML error page must NEVER read as a
 /// zero balance, or the pre-check would block a perfectly funded wallet.
@@ -468,6 +592,33 @@ pub(crate) fn parse_account_balance(body: &str) -> Option<(u64, u64)> {
     let amount = v.get("amount")?.as_u64()?;
     let min_balance = v.get("min-balance").and_then(|m| m.as_u64()).unwrap_or(0);
     Some((amount, min_balance))
+}
+
+/// What the NodeRegistry box says about this node (FAIL-2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Registration {
+    Registered,
+    Unregistered,
+    /// The read failed or proved nothing. NEVER taken as registered where
+    /// funds could be spent.
+    Unknown(String),
+}
+
+/// PURE (FAIL-2): classify algod's answer to the registry-box read — the same
+/// read frynode's own `IsRegistered` makes at every start. Registered only on
+/// a 200 whose JSON carries the box `value`; unregistered only on algod's own
+/// "box not found" 404. Anything else proves nothing.
+pub(crate) fn registration_from_box_read(status: u16, body: &str) -> Registration {
+    let has_value = || {
+        serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .is_some_and(|v| v.get("value").is_some_and(|x| x.is_string()))
+    };
+    match status {
+        200 if has_value() => Registration::Registered,
+        404 if body.contains("box not found") => Registration::Unregistered,
+        _ => Registration::Unknown(format!("registry box read returned HTTP {status}")),
+    }
 }
 
 /// What to do about frynode's node identity (BUG 6).
@@ -503,10 +654,19 @@ pub(crate) enum FundingState {
     /// instruction, already carrying `FUNDING_MARKER`.
     Underfunded(String),
     /// Not measurable right now — algod unreachable, or an error page where
-    /// JSON was expected. Never a reason to refuse to run a node that would
+    /// JSON was expected — and the registry box could not rule registration
+    /// out either. Never a reason to refuse to run a node that would
     /// otherwise serve traffic: frynode's own preflight is what stops an
     /// underfunded submission reaching the chain.
     Unmeasurable(String),
+    /// FAIL-2: the registry box shows this node is already registered, so
+    /// there is no registration left to pay for and it starts whatever the
+    /// balance. Carries D-C4-2's heartbeat shortfall state, if any.
+    Registered(Option<String>),
+    /// Fail-open fix: the balance could not be read AND the registry box shows
+    /// the node is NOT registered. Starting it would let frynode attempt the
+    /// one paid call, registration, at a price nobody checked.
+    UnmeasurableUnregistered(String),
 }
 
 /// PURE (FAIL-12): the algod base URL FEM reads from — `server`, with `port`
@@ -572,6 +732,28 @@ impl FryVpnIntegration {
         parse_account_balance(&body).ok_or_else(|| format!("algod returned HTTP {status}"))
     }
 
+    /// FAIL-2: one read of this node's NodeRegistry box, through the same
+    /// builder as the balance read. The key is the node address in algod's
+    /// `addr:` form. A failure is logged with its status only, never a body.
+    async fn read_registration(address: &str) -> Registration {
+        let path = format!(
+            "/v2/applications/{}/box?name=addr:{address}",
+            Self::registry_app_id()
+        );
+        let registration = match Self::algod_get(&path, Duration::from_secs(5)).send().await {
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let body = resp.text().await.unwrap_or_default();
+                registration_from_box_read(status, &body)
+            }
+            Err(e) => Registration::Unknown(format!("algod unreachable: {e}")),
+        };
+        if let Registration::Unknown(detail) = &registration {
+            warn!(detail = %detail, "Could not read this node's registry box - it is never taken as registered");
+        }
+        registration
+    }
+
     /// The device's provisioned Algorand identity together with what its wallet
     /// can currently afford (BUG 6, B7, B8).
     ///
@@ -606,7 +788,9 @@ impl FryVpnIntegration {
             IdentityPlan::UseIdentity { address, mnemonic } => {
                 // We hold this key, so the balance we measure IS the account
                 // frynode will spend from - only now is refusing justified.
-                let state = match Self::read_wallet_balance(&address).await {
+                let balance = Self::read_wallet_balance(&address).await;
+                let measured = balance.is_ok();
+                let state = match balance {
                     Ok((amount, min_balance)) => match registration_funding_message(
                         amount,
                         min_balance,
@@ -614,16 +798,48 @@ impl FryVpnIntegration {
                         &address,
                     ) {
                         Ok(()) => FundingState::Affordable,
-                        Err(msg) => FundingState::Underfunded(msg),
+                        // FAIL-2: REGISTRATION_MIN_MICROALGOS prices the
+                        // register group, which a registered node never pays
+                        // again. Only a positive box read skips it.
+                        Err(msg) => match Self::read_registration(&address).await {
+                            Registration::Registered => {
+                                info!("fryDVPN node is already registered on-chain - starting it without the registration funding gate");
+                                FundingState::Registered(heartbeat_shortfall_message(
+                                    amount,
+                                    min_balance,
+                                    &address,
+                                ))
+                            }
+                            _ => FundingState::Underfunded(msg),
+                        },
                     },
                     Err(detail) => {
                         warn!(
                             detail = %detail,
-                            "Could not read the fryDVPN wallet balance - starting without a pre-check"
+                            "Could not read the fryDVPN wallet balance"
                         );
-                        FundingState::Unmeasurable(detail)
+                        match Self::read_registration(&address).await {
+                            Registration::Registered => FundingState::Registered(None),
+                            Registration::Unregistered => {
+                                FundingState::UnmeasurableUnregistered(detail)
+                            }
+                            Registration::Unknown(_) => FundingState::Unmeasurable(detail),
+                        }
                     }
                 };
+                {
+                    // D-C4-2: only a MEASURED balance moves the heartbeat
+                    // state; a failed read proves nothing either way.
+                    let mut watch = WALLET_WATCH.lock().unwrap();
+                    watch.address = Some(address);
+                    match &state {
+                        FundingState::Registered(shortfall) if measured => {
+                            watch.set_heartbeat_shortfall(shortfall.clone())
+                        }
+                        FundingState::Affordable => watch.set_heartbeat_shortfall(None),
+                        _ => {}
+                    }
+                }
                 Some((mnemonic, state))
             }
         }
@@ -711,7 +927,11 @@ impl FryVpnIntegration {
         // BUG 6: hand frynode the device's OWN funded account. Without this it
         // generated a fresh 0-ALGO identity and RegisterNode failed with an
         // overspend the user could do nothing about.
-        let mnemonic = match self.resolve_funded_identity().await {
+        let funding = self.resolve_funded_identity().await;
+        // FAIL-2: that was a fresh wallet read; the health loop's backoff
+        // counts from it.
+        WALLET_WATCH.lock().unwrap().restart_backoff();
+        let mnemonic = match funding {
             Ok(m) => {
                 *PARKED_FUNDING_REASON.lock().unwrap() = None;
                 m
@@ -724,7 +944,8 @@ impl FryVpnIntegration {
             // one failed toggle measured and the owner had to keep toggling.
             // Park the instruction and succeed WITHOUT spawning frynode:
             // nothing is submitted on chain, the integration stays enabled, and
-            // `health_check` re-reads the wallet every tick until it is funded.
+            // `health_check` re-reads the wallet, on a bounded backoff, until it
+            // is funded.
             Err(reason) => {
                 warn!(
                     reason = %reason,
@@ -761,6 +982,11 @@ impl FryVpnIntegration {
         match self.device_identity_and_funding().await {
             None => Ok(None),
             Some((_, FundingState::Underfunded(msg))) => Err(msg),
+            // Fail-open fix: an unregistered node whose wallet cannot be read
+            // is not spawned, so frynode cannot register at an unchecked price.
+            Some((_, FundingState::UnmeasurableUnregistered(detail))) => {
+                Err(balance_unreadable_message(&detail))
+            }
             Some((mnemonic, _)) => Ok(Some(mnemonic)),
         }
     }
@@ -804,6 +1030,8 @@ impl Integration for FryVpnIntegration {
         // drop it so re-enabling measures the wallet again rather than showing
         // a stale figure.
         *PARKED_FUNDING_REASON.lock().unwrap() = None;
+        // FAIL-2: nor does anything learned about the wallet survive a stop.
+        *WALLET_WATCH.lock().unwrap() = WalletWatch::new();
         {
             let mut sup = self.supervisor.lock().unwrap();
             sup.stop_integration("fryvpn")
@@ -846,8 +1074,13 @@ impl Integration for FryVpnIntegration {
         // the moment the wallet is funded the park clears, the not-running
         // branch below arms the supervisor's existing restart, and `start()`
         // re-runs against a wallet that can pay — with no user toggling.
-        let parked = PARKED_FUNDING_REASON.lock().unwrap().is_some();
-        if parked {
+        let parked = PARKED_FUNDING_REASON.lock().unwrap().clone();
+        if let Some(reason) = parked {
+            // FAIL-2: re-read on a bounded backoff, not on every check; in
+            // between, the card keeps the last verdict.
+            if !WALLET_WATCH.lock().unwrap().read_due() {
+                return HealthStatus::Unhealthy(reason);
+            }
             match self.device_identity_and_funding().await {
                 Some((_, FundingState::Underfunded(msg))) => {
                     *PARKED_FUNDING_REASON.lock().unwrap() = Some(msg.clone());
@@ -855,10 +1088,17 @@ impl Integration for FryVpnIntegration {
                 }
                 // Keep the park rather than churning frynode while algod is
                 // unreadable, and never quote a balance we could not measure.
-                Some((_, FundingState::Unmeasurable(detail))) => {
-                    return HealthStatus::Unhealthy(balance_unreadable_message(&detail));
+                Some((
+                    _,
+                    FundingState::Unmeasurable(detail)
+                    | FundingState::UnmeasurableUnregistered(detail),
+                )) => {
+                    let msg = balance_unreadable_message(&detail);
+                    *PARKED_FUNDING_REASON.lock().unwrap() = Some(msg.clone());
+                    return HealthStatus::Unhealthy(msg);
                 }
-                // Affordable now, or we no longer hold a key to measure.
+                // Affordable now, registered after all, or we no longer hold
+                // a key to measure.
                 _ => *PARKED_FUNDING_REASON.lock().unwrap() = None,
             }
         }
@@ -926,7 +1166,7 @@ impl Integration for FryVpnIntegration {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
             match probe_health_once().await {
-                HealthStatus::Healthy => return HealthStatus::Healthy,
+                HealthStatus::Healthy => return heartbeat_funding_state().await,
                 other => last = other,
             }
         }
@@ -1722,3 +1962,10 @@ mod fryvpn_c4_support;
 #[cfg(test)]
 #[path = "fryvpn_algod_endpoint_tests.rs"]
 mod fryvpn_algod_endpoint_tests;
+
+/// FAIL-2 and the fryDVPN fail-open: registered nodes are never parked for
+/// balance, only calls that spend are gated, and a registered node short of
+/// one heartbeat fee shows a single shortfall state.
+#[cfg(test)]
+#[path = "fryvpn_funding_gate_tests.rs"]
+mod fryvpn_funding_gate_tests;

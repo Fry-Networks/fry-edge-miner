@@ -106,6 +106,15 @@ pub(super) fn run_scenario(module: &str, scenario: &str) {
     );
 }
 
+/// `run_scenario` for a scenario that binds or probes frynode's API port
+/// (8088). Such children are serialized, so one's `/health` decoy can never be
+/// mistaken by another for a program holding the port.
+pub(super) fn run_scenario_on_frynode_port(module: &str, scenario: &str) {
+    static FRYNODE_PORT: Mutex<()> = Mutex::new(());
+    let _one_at_a_time = FRYNODE_PORT.lock().unwrap_or_else(|e| e.into_inner());
+    run_scenario(module, scenario);
+}
+
 /// What algod answers for the device account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Account {
@@ -141,6 +150,9 @@ pub(super) struct World {
     /// Answer every `/v2` route with algod's 401 unless the token header
     /// matches — how a token-protected algod such as LocalNet behaves.
     pub require_token: bool,
+    /// Whether hardwareapi releases the device mnemonic (it does not when the
+    /// encrypted blob fails to decrypt).
+    pub mnemonic_released: bool,
 }
 
 impl World {
@@ -151,6 +163,7 @@ impl World {
             account: Account::Balance,
             registry_box,
             require_token: false,
+            mnemonic_released: true,
         }
     }
 }
@@ -332,7 +345,7 @@ fn route(world: Arc<Mutex<World>>) -> impl Fn(&Request) -> Reply + Send + 'stati
                 serde_json::json!({
                     "miner_key": MINER_KEY,
                     "algo_address": ADDR,
-                    "algo_mnemonic": mnemonic(),
+                    "algo_mnemonic": w.mnemonic_released.then(mnemonic),
                 })
                 .to_string(),
             );
@@ -538,6 +551,46 @@ impl Drop for Scene {
         // Clears the park and kills any decoy frynode this scene launched.
         let _ = self.rt.block_on(self.integ.stop());
     }
+}
+
+/// A frynode stand-in that stays alive whatever flags it is given. Unix only:
+/// a script found on PATH under a bare name, so the start path's firewall step
+/// (absolute paths only) is still skipped. It exits on its own within a
+/// minute even if a failing scenario never stops it.
+#[cfg(unix)]
+pub(super) fn install_decoy_frynode(scene: &Scene) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = scene.tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("decoy bin dir");
+    let script = bin.join("fem-c4-decoy-frynode");
+    std::fs::write(&script, "#!/bin/sh\nexec sleep 60\n").expect("write the decoy frynode");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("make the decoy executable");
+    let path = std::env::var("PATH").unwrap_or_default();
+    std::env::set_var("PATH", format!("{}:{path}", bin.display()));
+    std::env::set_var("FRYNODE_BIN", "fem-c4-decoy-frynode");
+}
+
+/// frynode's local `/health`, answering healthy and registered — what the real
+/// node reports once it has found its box on chain.
+pub(super) fn frynode_health_decoy() -> Decoy {
+    let route = |req: &Request| {
+        if req.target == "/health" {
+            json(200, r#"{"status":"healthy","registered":true}"#)
+        } else {
+            json(404, "{}")
+        }
+    };
+    for _ in 0..50 {
+        if let Ok(decoy) = Decoy::serve(&format!("127.0.0.1:{FRYNODE_API_PORT}"), route) {
+            return decoy;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "harness: port {FRYNODE_API_PORT} stayed busy; this scenario needs it for frynode's \
+         /health decoy"
+    );
 }
 
 /// The not-running branch of `health_check` probes frynode's API port and, on
