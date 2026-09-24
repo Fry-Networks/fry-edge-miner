@@ -45,6 +45,8 @@ pub fn scrub_line(line: &str) -> String {
     result = redact_wireguard_key(&result);
     result = redact_loose_mnemonic(&result);
     result = redact_literal_identity(&result);
+    // Row 4: last, like the B23 rules, so no earlier rule's output shifts.
+    result = redact_miner_key(&result);
 
     result
 }
@@ -251,10 +253,13 @@ fn redact_wireguard_key(s: &str) -> String {
 /// words on one line and has no `(?i)`. A comma-separated, mixed-case or
 /// 24-word form escaped it. The original rule at the top of the pipeline is
 /// untouched.
+///
+/// Row 4: open-ended, like the strict rule, so a phrase with prose words
+/// around it is taken whole instead of leaving its last word behind.
 fn redact_loose_mnemonic(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re =
-        RE.get_or_init(|| Regex::new(r"(?i)(?:\b[a-z]{3,12}\b[ ,]+){23,24}[a-z]{3,12}\b").unwrap());
+        RE.get_or_init(|| Regex::new(r"(?i)(?:\b[a-z]{3,12}\b[ ,]+){23,}[a-z]{3,12}\b").unwrap());
     re.replace_all(s, "[MNEMONIC]").to_string()
 }
 
@@ -307,9 +312,14 @@ fn redact_literal_identity(s: &str) -> String {
 }
 
 /// Redact 25-word BIP39 mnemonic sequences
+///
+/// Row 4: 25 words OR MORE. Exactly 25 matched from the first word of a run,
+/// so a phrase with a prose word in front of it ("loose abandon … adapt")
+/// lost 25 words from the front and left its real last word on the line —
+/// and this rule runs first, so nothing after it could see the phrase whole.
 fn redact_mnemonic(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"(?:\b[a-z]{3,12}\b\s+){24}[a-z]{3,12}\b").unwrap());
+    let re = RE.get_or_init(|| Regex::new(r"(?:\b[a-z]{3,12}\b\s+){24,}[a-z]{3,12}\b").unwrap());
     re.replace_all(s, "[MNEMONIC]").to_string()
 }
 
@@ -404,6 +414,15 @@ fn redact_hostname(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"(?i)hostname\s*=\s*(\S+)").unwrap());
     re.replace_all(s, "hostname=<host>").to_string()
+}
+
+/// Row 4: a miner key, `FEM-` + 32 hex in any case. The M6 bundle carried the
+/// device's key in plain text (`miner_key=FEM-<UPPERCASE HEX>`): the only
+/// rule that could touch it, `redact_serial`, matches lowercase hex only.
+fn redact_miner_key(s: &str) -> String {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"\bFEM-[0-9A-Fa-f]{32}\b").unwrap());
+    re.replace_all(s, "FEM-[REDACTED]").to_string()
 }
 
 /// Redact serial-like strings (hex sequences > 12 chars or alphanumeric serials)
@@ -555,3 +574,9 @@ mod tests {
         assert!(!scrubbed.contains("abc123"));
     }
 }
+
+/// Row 4 (continuation #4): the miner key and the tail word of a
+/// prose-prefixed phrase, pinned with the run-#3 M6 inputs.
+#[cfg(test)]
+#[path = "scrubber_c4_tests.rs"]
+mod scrubber_c4_tests;
