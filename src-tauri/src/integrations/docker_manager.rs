@@ -3,6 +3,7 @@ use crate::supervisor::platform::BoundedOutput;
 use anyhow::Result;
 use serde::Serialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -125,6 +126,21 @@ fn invalidate_docker_cli() {
     }
 }
 
+/// Whether the PREVIOUS `docker_bounded_probe` CLI-spawn attempt also failed.
+/// Read-and-reset around each attempt so a run of identical failures logs the
+/// fact once, not once per health tick (FAIL-14).
+static DOCKER_SPAWN_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// PURE: should THIS spawn failure be logged at WARN, given whether the
+/// previous probe's spawn also failed?
+///
+/// Only the transition INTO failure earns a WARN — a run of N consecutive
+/// failures logs exactly one. A success in between means the NEXT failure is
+/// a new fact, not a repeat, and must warn again.
+pub(crate) fn should_warn_on_spawn_failure(previous_spawn_failed: bool) -> bool {
+    !previous_spawn_failed
+}
+
 /// A `Command` for the docker CLI, resolved to an absolute path when the bare
 /// name is not spawnable. Drop-in for `platform::command("docker")`.
 pub fn docker_command() -> std::process::Command {
@@ -178,11 +194,25 @@ fn docker_bounded_probe(args: &[&str], timeout_secs: u64) -> DockerProbe {
         .stderr(std::process::Stdio::null())
         .spawn()
     {
-        Ok(c) => c,
+        Ok(c) => {
+            // A spawn that works is a state change from a prior failure —
+            // the NEXT failure (if any) is a new fact again, so re-arm the
+            // warning.
+            DOCKER_SPAWN_FAILED.store(false, Ordering::Relaxed);
+            c
+        }
         Err(e) => {
-            // Was debug!, so the one fact that explains a "Docker unavailable"
-            // chip never reached a shipped log.
-            warn!(error = %e, "Docker CLI could not be spawned");
+            // FAIL-14: this used to warn on EVERY failed probe — 175
+            // identical "Docker CLI could not be spawned" lines in a single
+            // 76-minute soak, one per health tick. Only the transition INTO
+            // failure is worth a WARN; a run of repeats is downgraded to
+            // debug so the fact isn't lost, just not repeated.
+            let previously_failed = DOCKER_SPAWN_FAILED.swap(true, Ordering::Relaxed);
+            if should_warn_on_spawn_failure(previously_failed) {
+                warn!(error = %e, "Docker CLI could not be spawned");
+            } else {
+                tracing::debug!(error = %e, "Docker CLI could not be spawned (repeat)");
+            }
             invalidate_docker_cli();
             return DockerProbe::CliMissing;
         }
@@ -1090,3 +1120,9 @@ mod b19_probe_cache_ttl_tests {
         assert!(VIRT_CACHE_TTL >= Duration::from_secs(60));
     }
 }
+
+/// FAIL-14: the CLI-spawn-failure WARN fired on every probe. Separate file so
+/// the inline `mod tests`/`mod b19_*` blocks above stay byte-identical.
+#[cfg(test)]
+#[path = "docker_manager_warn_once_tests.rs"]
+mod docker_manager_warn_once_tests;
