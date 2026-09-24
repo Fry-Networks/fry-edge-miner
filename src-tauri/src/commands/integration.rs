@@ -484,7 +484,14 @@ pub async fn force_reinstall_integration(
         integration = id,
         "Force reinstall: cleaning previous install"
     );
-    tokio::task::block_in_place(crate::integrations::aem::AemIntegration::force_clean);
+    // NB-3: Reinstall is a user gesture too, so, like toggle_integration,
+    // re-arm this integration's one elevation attempt before anything below
+    // can elevate (force_clean's rule delete, start_for_user's rule create).
+    // Inside block_in_place because clear_blocked takes the gate mutex.
+    tokio::task::block_in_place(|| {
+        crate::elevation_gate::clear_blocked(&id);
+        crate::integrations::aem::AemIntegration::force_clean()
+    });
 
     if let Err(e) = integration.install_for_user().await {
         let err_msg = e.to_string();

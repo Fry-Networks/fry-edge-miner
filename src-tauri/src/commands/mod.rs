@@ -8,3 +8,6 @@ pub mod rewards;
 pub mod settings;
 pub mod system;
 pub mod updates;
+
+#[cfg(test)]
+mod force_reinstall_rearm_tests;
