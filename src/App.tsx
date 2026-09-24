@@ -18,6 +18,8 @@ import { useDevice } from './hooks/useDevice'
 import { makeName } from './lib/names'
 import { isTauri } from './lib/tauri'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+import { hardeningWarningFromEventPayload, type HardeningWarning } from './lib/hardeningWarning'
 
 // Truncated error banner with expandable details — raw multi-line backend
 // output (e.g. Docker logs) must never flood the layout.
@@ -136,6 +138,76 @@ function IntegrationsErrorCard({ error, onRetry }: { error: string; onRetry: () 
   )
 }
 
+// FAIL-11: the boot pass and the pre-update re-assert both run hardening
+// `Automatic`, which the gate refuses before any UAC prompt — that's by
+// design (B3), but until this banner existed the ONLY record of it was a log
+// line. Retry invokes the `retry_hardening` command, the one call site that
+// passes `ElevationTrigger::UserClick`, so a user who wants hardening
+// applied (after a decline, or proactively) has a real gesture to ask for
+// it. Dismissible so a user who has already read the manual-command fallback
+// isn't stuck looking at it.
+function HardeningWarningBanner({ warning, onDismiss }: { warning: HardeningWarning; onDismiss: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const [retryError, setRetryError] = useState<string | null>(null)
+
+  const retry = () => {
+    setBusy(true)
+    setRetryError(null)
+    invoke('retry_hardening')
+      .then(() => onDismiss())
+      // A failed retry re-emits `elevation-required`, which updates
+      // `warning` above via the listener in AppShell — this local error is
+      // just for the case the command itself rejects before that happens.
+      .catch((e) => setRetryError(String(e)))
+      .finally(() => setBusy(false))
+  }
+
+  return (
+    <div
+      style={{
+        padding: '8px 16px',
+        background: 'var(--amb)18',
+        borderBottom: '1px solid var(--amb)40',
+        fontFamily: 'var(--fb)',
+        fontSize: 12,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        flexWrap: 'wrap'
+      }}
+    >
+      <span style={{ fontWeight: 600, flexShrink: 0 }}>Security hardening:</span>
+      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+        {retryError ?? warning.reason}
+      </span>
+      <button
+        onClick={retry}
+        disabled={busy}
+        style={{
+          flexShrink: 0,
+          fontFamily: 'var(--fb)',
+          fontSize: 11,
+          padding: '4px 12px',
+          borderRadius: 'var(--radsm)',
+          border: '1px solid var(--teal)',
+          background: 'var(--tealg)',
+          color: 'var(--teal)',
+          cursor: busy ? 'default' : 'pointer',
+          opacity: busy ? 0.6 : 1
+        }}
+      >
+        {busy ? 'Retrying…' : 'Retry'}
+      </button>
+      <button
+        onClick={onDismiss}
+        style={{ flexShrink: 0, background: 'none', border: 'none', color: 'var(--t1)', cursor: 'pointer', fontSize: 11 }}
+      >
+        Dismiss
+      </button>
+    </div>
+  )
+}
+
 function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceName: string; minerKey?: string; deregister: (force?: boolean) => Promise<void>; deviceError: string | null }) {
   const [page, setPage] = useState<NavPage>('dashboard')
   const {
@@ -172,6 +244,26 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
   })
   const dockerChip = system && system.docker !== 'ready' ? system.docker : null
 
+  // FAIL-11: the backend's `elevation-required` event is the only record a
+  // suppressed/declined AUTOMATIC hardening attempt used to leave — nothing
+  // read it. This is the listener that makes it reach the UI, and
+  // `hardeningWarningFromEventPayload` (unit-tested separately) is the pure
+  // decoder that ignores other purposes' elevation events.
+  const [hardeningWarning, setHardeningWarning] = useState<HardeningWarning | null>(null)
+  useEffect(() => {
+    if (!isTauri()) return
+    let unlisten: (() => void) | undefined
+    listen('elevation-required', (event) => {
+      const warning = hardeningWarningFromEventPayload(event.payload)
+      if (warning) setHardeningWarning(warning)
+    })
+      .then((f) => {
+        unlisten = f
+      })
+      .catch(() => {})
+    return () => unlisten?.()
+  }, [])
+
   return (
     <div
       style={{
@@ -186,6 +278,9 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <TopBar page={page} connectivity={connectivity} docker={dockerChip} />
         {error && <ErrorBanner error={error} />}
+        {hardeningWarning && (
+          <HardeningWarningBanner warning={hardeningWarning} onDismiss={() => setHardeningWarning(null)} />
+        )}
         <div style={{ flex: 1, overflow: 'hidden' }}>
           {page === 'dashboard' && <Dashboard intgs={integrations} system={system} />}
           {page === 'integrations' &&

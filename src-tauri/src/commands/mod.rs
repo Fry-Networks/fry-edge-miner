@@ -1,6 +1,7 @@
 pub mod consent;
 pub mod debug;
 pub mod device;
+pub mod hardening;
 pub mod integration;
 pub mod migration;
 pub mod partner_secret;
