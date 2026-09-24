@@ -167,3 +167,75 @@ fn fn_body_does_not_run_past_the_functions_own_end() {
         body.len()
     );
 }
+
+// ---------------------------------------------------------------------
+// Chunk-3 fix B: start_for_user must run the SAME preconditions start()
+// runs, in the SAME order, BEFORE ensuring Docker. It used to call
+// ensure_docker_with (a real Docker Desktop download + UAC prompt on a
+// fresh install) before ever checking consent or credentials — a user who
+// toggled Pawns on WITHOUT consent got a download/UAC prompt, and only
+// THEN "needs your consent".
+// ---------------------------------------------------------------------
+
+/// THE fix: the consent check precedes ensure_docker_with.
+#[test]
+fn start_for_user_checks_consent_before_ensuring_docker() {
+    let code = code_only(PAWNS_SRC);
+    let body = fn_body(&code, "async fn start_for_user(&self) -> Result<()> {");
+
+    let consent_at = body
+        .find("user_consent()")
+        .unwrap_or_else(|| panic!("start_for_user must check user_consent(): {body}"));
+    let docker_at = body
+        .find("ensure_docker_with(")
+        .unwrap_or_else(|| panic!("start_for_user must still ensure Docker: {body}"));
+    assert!(
+        consent_at < docker_at,
+        "the consent check must run BEFORE ensure_docker_with — otherwise a \
+         user without consent gets a Docker Desktop download/UAC prompt \
+         before ever being told they need to consent: {body}"
+    );
+}
+
+/// The credentials check must ALSO precede Docker — same reasoning, same
+/// precondition start() itself checks second.
+#[test]
+fn start_for_user_checks_credentials_before_ensuring_docker() {
+    let code = code_only(PAWNS_SRC);
+    let body = fn_body(&code, "async fn start_for_user(&self) -> Result<()> {");
+
+    let creds_at = body
+        .find("self.credentials()")
+        .unwrap_or_else(|| panic!("start_for_user must check credentials(): {body}"));
+    let docker_at = body
+        .find("ensure_docker_with(")
+        .unwrap_or_else(|| panic!("start_for_user must still ensure Docker: {body}"));
+    assert!(
+        creds_at < docker_at,
+        "the credentials check must run BEFORE ensure_docker_with: {body}"
+    );
+}
+
+/// The reused message, not a new one — a caller-visible behavioural
+/// guarantee: this must be `consent_required_status()`, the exact function
+/// `start()` and the consent-required card already use.
+#[test]
+fn start_for_user_reuses_the_exact_consent_message_function() {
+    let code = code_only(PAWNS_SRC);
+    let body = fn_body(&code, "async fn start_for_user(&self) -> Result<()> {");
+    assert!(
+        body.contains("consent_required_status()"),
+        "must reuse the exact consent message start() uses, not a new one: {body}"
+    );
+}
+
+// A behavioural version of the same property (drive start_for_user() for
+// real with no consent, assert Err(consent_required_status()) fast) was
+// deliberately NOT added: user_consent() is `consent_from_env_value
+// (PAWNS_USER_CONSENT) || Self::consent_active()`, and PAWNS_USER_CONSENT /
+// PAWNS_DEVICE_ID are process-global env vars also READ by every consent
+// test in pawns_consent_tests.rs / pawns_restart_consent_tests.rs /
+// pawns_anchored_consent_tests.rs, which run concurrently in the same test
+// binary and which this item must not touch or add synchronization to. The
+// three structural tests above prove the exact same ordering property
+// deterministically, with no shared-state race.

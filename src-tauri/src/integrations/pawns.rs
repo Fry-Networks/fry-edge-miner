@@ -801,7 +801,21 @@ impl Integration for PawnsIntegration {
     /// once Docker is ready), so `start()`'s own `ensure_docker_no_install`
     /// call below then finds Docker already ready and needs no authority of
     /// its own.
+    /// Chunk-3 fix: this used to call `ensure_docker_with` BEFORE any consent
+    /// or credentials check, so a user who toggled Pawns on WITHOUT consent
+    /// got a Docker Desktop download and a UAC prompt, and only THEN "needs
+    /// your consent" — ahead of the very gate that is supposed to decide
+    /// whether Pawns may do anything at all. Runs the SAME preconditions
+    /// `start()` runs, in the SAME order, first — reusing the exact
+    /// functions/strings, not new ones.
     async fn start_for_user(&self) -> Result<()> {
+        if !Self::user_consent() {
+            anyhow::bail!("{}", consent_required_status());
+        }
+        if let Err(reason) = self.credentials().await {
+            anyhow::bail!("{}", reason);
+        }
+
         super::docker_manager::ensure_docker_with(
             crate::elevation_gate::ElevationTrigger::UserClick,
         )
