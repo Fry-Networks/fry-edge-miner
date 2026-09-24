@@ -904,6 +904,21 @@ impl Integration for SpaceAcresIntegration {
         Ok(())
     }
 
+    /// FAIL-6: FEM quitting is not the owner turning SpaceAcres off. Stop only
+    /// the instance FEM spawned; an adopted one (Windows autostart, the owner)
+    /// was never FEM's to kill, and 0.4.33 left it running.
+    async fn stop_for_exit(&self) -> Result<()> {
+        let tracked = self.child.lock().ok().and_then(|mut g| g.take());
+        if let Some(mut child) = tracked {
+            let _ = child.kill();
+            let _ = tokio::task::spawn_blocking(move || child.wait()).await;
+            info!("Stopped SpaceAcres at exit (FEM-spawned instance)");
+        } else {
+            info!("Left SpaceAcres running at exit (FEM did not start this instance)");
+        }
+        Ok(())
+    }
+
     async fn health_check(&self) -> HealthStatus {
         // F6: resolve the real install location (Program Files on Windows), so a
         // running farmer reports Healthy instead of a permanent Stopped.
@@ -1854,3 +1869,8 @@ mod b21_blocking_offload_tests {
         );
     }
 }
+
+/// FAIL-6: on exit FEM stops only the SpaceAcres it spawned.
+#[cfg(test)]
+#[path = "space_acres_exit_tests.rs"]
+mod space_acres_exit_tests;

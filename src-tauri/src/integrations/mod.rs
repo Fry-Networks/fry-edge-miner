@@ -872,3 +872,8 @@ mod docker_boot_contract_tests;
 #[cfg(test)]
 #[path = "titan_vc_redist_timeout_gate_tests.rs"]
 mod titan_vc_redist_timeout_gate_tests;
+
+/// FAIL-6 family: on exit FEM never kills a partner instance it did not start.
+#[cfg(test)]
+#[path = "partner_exit_adoption_tests.rs"]
+mod partner_exit_adoption_tests;

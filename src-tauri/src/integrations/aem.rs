@@ -511,6 +511,19 @@ impl Integration for AemIntegration {
         Ok(())
     }
 
+    /// FAIL-6: FEM quitting is not the owner turning Olostep off. Only the
+    /// OlostepBrowser FEM spawned (tracked, in its job) gets the graceful stop;
+    /// one the owner or its own autostart launched was never FEM's to kill.
+    async fn stop_for_exit(&self) -> Result<()> {
+        let tracked = self.child.lock().map(|g| g.is_some()).unwrap_or(false);
+        if tracked {
+            self.stop().await
+        } else {
+            info!("Left OlostepBrowser running at exit (FEM did not start this instance)");
+            Ok(())
+        }
+    }
+
     async fn health_check(&self) -> HealthStatus {
         if self.is_running() {
             // BUG 10: resource caps (v0.4.8) used to report Unhealthy on a

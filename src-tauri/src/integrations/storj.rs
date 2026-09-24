@@ -290,6 +290,13 @@ impl Integration for StorjIntegration {
         Ok(())
     }
 
+    /// FAIL-6: FEM never starts storagenode (start() only logs), so quitting
+    /// FEM has nothing of its own to stop and must not kill the owner's node.
+    async fn stop_for_exit(&self) -> Result<()> {
+        info!("Left Storj storagenode running at exit (FEM never starts it)");
+        Ok(())
+    }
+
     async fn health_check(&self) -> HealthStatus {
         let binary = Self::binary_path();
         if !binary.exists() {
