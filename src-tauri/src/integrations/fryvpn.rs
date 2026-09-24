@@ -509,17 +509,58 @@ pub(crate) enum FundingState {
     Unmeasurable(String),
 }
 
+/// PURE (FAIL-12): the algod base URL FEM reads from — `server`, with `port`
+/// added when the server string names none.
+///
+/// frynode is handed the same two values and joins them as `server:port`, so
+/// a bare `FRYNODE_ALGOD_SERVER` plus `FRYNODE_ALGOD_PORT` (LocalNet's form)
+/// reached frynode's algod while FEM's own read went to the scheme's default
+/// port. A server string that already carries a port is used as is, and a
+/// port that is not a number is never spliced in.
+fn algod_base_url(server: &str, port: &str) -> String {
+    let server = server.trim_end_matches('/');
+    let authority_start = server.find("://").map_or(0, |i| i + 3);
+    let authority_end = server[authority_start..]
+        .find('/')
+        .map_or(server.len(), |i| authority_start + i);
+    // `[::1]` is a bare host; `[::1]:4001` names a port.
+    let has_port = server[authority_start..authority_end]
+        .rsplit_once(':')
+        .is_some_and(|(_, p)| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    match port.trim().parse::<u16>() {
+        Ok(port) if !has_port => format!(
+            "{}:{port}{}",
+            &server[..authority_end],
+            &server[authority_end..]
+        ),
+        _ => server.to_string(),
+    }
+}
+
 impl FryVpnIntegration {
+    /// FAIL-12: the ONE request builder for every FEM algod read, aimed at the
+    /// same server, port and token frynode is started with. The balance read
+    /// used the server alone — no port, no token — so a token-protected algod
+    /// (LocalNet) answered 401 and the gate saw an unreadable wallet.
+    fn algod_get(path: &str, timeout: Duration) -> reqwest::RequestBuilder {
+        let url = format!(
+            "{}{path}",
+            algod_base_url(&Self::algod_server(), &Self::algod_port())
+        );
+        let request = reqwest::Client::new().get(url).timeout(timeout);
+        match Self::algod_token().trim() {
+            "" => request,
+            token => request.header("X-Algo-API-Token", token),
+        }
+    }
+
     /// One algod account read.
     ///
     /// `Err` carries a short reason for the card and never a balance — an HTML
     /// error page or a rate-limit body read as "0" would tell an owner who has
     /// already funded the wallet to send more.
     async fn read_wallet_balance(address: &str) -> Result<(u64, u64), String> {
-        let url = format!("{}/v2/accounts/{}", Self::algod_server(), address);
-        let resp = reqwest::Client::new()
-            .get(&url)
-            .timeout(std::time::Duration::from_secs(10))
+        let resp = Self::algod_get(&format!("/v2/accounts/{address}"), Duration::from_secs(10))
             .send()
             .await
             .map_err(|e| format!("algod unreachable: {e}"))?;
@@ -1667,3 +1708,17 @@ mod b11_identity_dir_tests {
         );
     }
 }
+
+/// Continuation #4: the loopback decoy and child-process runner the FAIL-12
+/// and FAIL-2 scenario tests share. Each of those files uses a different part
+/// of it, hence the dead-code allowance.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "fryvpn_c4_support.rs"]
+mod fryvpn_c4_support;
+
+/// FAIL-12: FEM's algod reads honour FRYNODE_ALGOD_PORT and
+/// FRYNODE_ALGOD_TOKEN, exactly as frynode's do.
+#[cfg(test)]
+#[path = "fryvpn_algod_endpoint_tests.rs"]
+mod fryvpn_algod_endpoint_tests;
