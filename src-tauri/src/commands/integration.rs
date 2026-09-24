@@ -260,6 +260,16 @@ pub(crate) fn mutual_exclusion_conflict(
     ))
 }
 
+/// FAIL-1: a Docker integration's install elevates under Docker Desktop's own
+/// gate purpose (`docker_manager::run_docker_installer`), not the card's id, so
+/// the enable gesture must re-arm that purpose too, or one Docker attempt
+/// refuses every later Docker enable until FEM restarts.
+fn rearm_docker_prerequisite(requires_docker: bool) {
+    if requires_docker {
+        crate::elevation_gate::clear_blocked("docker-desktop");
+    }
+}
+
 #[tauri::command]
 pub async fn toggle_integration(
     id: String,
@@ -372,6 +382,9 @@ pub async fn toggle_integration(
         // button. Clear any block recorded for this integration so the card
         // reflects what THIS attempt does rather than what the last one did.
         crate::elevation_gate::clear_blocked(&id);
+        // FAIL-1: and the Docker Desktop prerequisite's own purpose, off the
+        // async worker because clear_blocked takes the gate mutex.
+        tokio::task::block_in_place(|| rearm_docker_prerequisite(integration.requires_docker()));
 
         // Auto-install integrations that have not been deployed yet (e.g., Diiisco).
         if integration.installed_version().is_none() {
@@ -873,6 +886,46 @@ mod b21_poll_lock_tests {
         assert!(
             !line.contains("TOGGLE_STEP_TIMEOUT"),
             "the install arm is still bounded by the generic toggle budget: {line}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod fail1_docker_rearm_tests {
+    use super::rearm_docker_prerequisite;
+    use crate::elevation_gate::{run_elevated, ElevationSkipped, ElevationTrigger};
+
+    fn attempt(key: &str) -> Result<(), ElevationSkipped> {
+        run_elevated(
+            "docker-desktop",
+            key,
+            ElevationTrigger::UserClick,
+            || Ok(()),
+        )
+    }
+
+    /// FAIL-1, behaviourally, against the real gate: only a Docker enable
+    /// re-arms Docker Desktop's one attempt.
+    #[test]
+    fn a_docker_enable_re_arms_docker_desktops_attempt_and_no_other_enable_does() {
+        let key = "docker-desktop|fail1-behavioural-test";
+        assert_eq!(attempt(key), Ok(()), "control: the first attempt runs");
+        assert_eq!(
+            attempt(key),
+            Err(ElevationSkipped::AlreadyAttempted),
+            "control: the attempt is spent"
+        );
+        rearm_docker_prerequisite(false);
+        assert_eq!(
+            attempt(key),
+            Err(ElevationSkipped::AlreadyAttempted),
+            "a non-Docker enable must not re-arm Docker Desktop"
+        );
+        rearm_docker_prerequisite(true);
+        assert_eq!(
+            attempt(key),
+            Ok(()),
+            "FAIL-1: a Docker enable must re-arm Docker Desktop's one attempt"
         );
     }
 }
