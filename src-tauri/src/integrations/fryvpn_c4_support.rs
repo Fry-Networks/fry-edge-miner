@@ -153,6 +153,9 @@ pub(super) struct World {
     /// Whether hardwareapi releases the device mnemonic (it does not when the
     /// encrypted blob fails to decrypt).
     pub mnemonic_released: bool,
+    /// How long algod takes to answer the account read and the box read.
+    pub account_delay: Duration,
+    pub box_delay: Duration,
 }
 
 impl World {
@@ -164,6 +167,8 @@ impl World {
             registry_box,
             require_token: false,
             mnemonic_released: true,
+            account_delay: Duration::ZERO,
+            box_delay: Duration::ZERO,
         }
     }
 }
@@ -357,6 +362,7 @@ fn route(world: Arc<Mutex<World>>) -> impl Fn(&Request) -> Reply + Send + 'stati
             return json(401, r#"{"message":"Invalid API Token"}"#);
         }
         if target == account_path() {
+            std::thread::sleep(w.account_delay);
             return match w.account {
                 Account::Balance => json(
                     200,
@@ -372,6 +378,7 @@ fn route(world: Arc<Mutex<World>>) -> impl Fn(&Request) -> Reply + Send + 'stati
             };
         }
         if target == box_path() {
+            std::thread::sleep(w.box_delay);
             return match w.registry_box {
                 RegistryBox::Present => json(
                     200,

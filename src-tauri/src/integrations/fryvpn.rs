@@ -674,6 +674,13 @@ pub(crate) enum FundingState {
     UnmeasurableUnregistered(String),
 }
 
+/// FAIL-2: the time one wallet measurement may spend on algod — the balance
+/// read's own 10 s, SHARED with the registry-box read that can follow it.
+/// `start_for_user` runs under TOGGLE_STEP_TIMEOUT (60 s), and its worst case
+/// was already firewall probe (20 s) + credentials lookup (30 s) + this 10 s;
+/// a box read with a budget of its own would push the toggle past its bound.
+const ALGOD_READ_BUDGET: Duration = Duration::from_secs(10);
+
 /// PURE (FAIL-12): the algod base URL FEM reads from — `server`, with `port`
 /// added when the server string names none.
 ///
@@ -725,7 +732,7 @@ impl FryVpnIntegration {
     /// error page or a rate-limit body read as "0" would tell an owner who has
     /// already funded the wallet to send more.
     async fn read_wallet_balance(address: &str) -> Result<(u64, u64), String> {
-        let resp = Self::algod_get(&format!("/v2/accounts/{address}"), Duration::from_secs(10))
+        let resp = Self::algod_get(&format!("/v2/accounts/{address}"), ALGOD_READ_BUDGET)
             .send()
             .await
             .map_err(|e| format!("algod unreachable: {e}"))?;
@@ -740,18 +747,25 @@ impl FryVpnIntegration {
     /// FAIL-2: one read of this node's NodeRegistry box, through the same
     /// builder as the balance read. The key is the node address in algod's
     /// `addr:` form. A failure is logged with its status only, never a body.
-    async fn read_registration(address: &str) -> Registration {
+    ///
+    /// `budget` is what is left of `ALGOD_READ_BUDGET` after the balance read;
+    /// with nothing left there is no request and the answer is Unknown.
+    async fn read_registration(address: &str, budget: Duration) -> Registration {
         let path = format!(
             "/v2/applications/{}/box?name=addr:{address}",
             Self::registry_app_id()
         );
-        let registration = match Self::algod_get(&path, Duration::from_secs(5)).send().await {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                let body = resp.text().await.unwrap_or_default();
-                registration_from_box_read(status, &body)
+        let registration = if budget.is_zero() {
+            Registration::Unknown("no time left in the algod read budget".to_string())
+        } else {
+            match Self::algod_get(&path, budget).send().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let body = resp.text().await.unwrap_or_default();
+                    registration_from_box_read(status, &body)
+                }
+                Err(e) => Registration::Unknown(format!("algod unreachable: {e}")),
             }
-            Err(e) => Registration::Unknown(format!("algod unreachable: {e}")),
         };
         if let Registration::Unknown(detail) = &registration {
             warn!(detail = %detail, "Could not read this node's registry box - it is never taken as registered");
@@ -793,7 +807,9 @@ impl FryVpnIntegration {
             IdentityPlan::UseIdentity { address, mnemonic } => {
                 // We hold this key, so the balance we measure IS the account
                 // frynode will spend from - only now is refusing justified.
+                let algod_started = std::time::Instant::now();
                 let balance = Self::read_wallet_balance(&address).await;
+                let box_budget = ALGOD_READ_BUDGET.saturating_sub(algod_started.elapsed());
                 let measured = balance.is_ok();
                 let state = match balance {
                     Ok((amount, min_balance)) => match registration_funding_message(
@@ -806,7 +822,7 @@ impl FryVpnIntegration {
                         // FAIL-2: REGISTRATION_MIN_MICROALGOS prices the
                         // register group, which a registered node never pays
                         // again. Only a positive box read skips it.
-                        Err(msg) => match Self::read_registration(&address).await {
+                        Err(msg) => match Self::read_registration(&address, box_budget).await {
                             Registration::Registered => {
                                 info!("fryDVPN node is already registered on-chain - starting it without the registration funding gate");
                                 FundingState::Registered(heartbeat_shortfall_message(
@@ -823,7 +839,7 @@ impl FryVpnIntegration {
                             detail = %detail,
                             "Could not read the fryDVPN wallet balance"
                         );
-                        match Self::read_registration(&address).await {
+                        match Self::read_registration(&address, box_budget).await {
                             Registration::Registered => FundingState::Registered(None),
                             Registration::Unregistered => {
                                 FundingState::UnmeasurableUnregistered(detail)
@@ -1990,3 +2006,9 @@ mod fryvpn_registered_health_tests;
 #[cfg(test)]
 #[path = "fryvpn_funding_notice_tests.rs"]
 mod fryvpn_funding_notice_tests;
+
+/// FAIL-2 follow-up: the balance and registry-box reads share one algod
+/// budget, so the toggle path keeps its TOGGLE_STEP_TIMEOUT bound.
+#[cfg(test)]
+#[path = "fryvpn_algod_budget_tests.rs"]
+mod fryvpn_algod_budget_tests;
