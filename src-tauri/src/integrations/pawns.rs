@@ -284,7 +284,16 @@ impl PawnsIntegration {
     /// the log read as if they consented again. This still writes the first
     /// durable record when consent came from the headless env override.
     fn record_start_consent() {
-        Self::record_start_consent_at(&Self::consent_log(), &Self::device_id());
+        // FAIL-3: deduplicate against the same resolution the gate uses, write
+        // only when the headless override is what authorised this start, and
+        // write to the anchored log every other decision goes to. Writing the
+        // mirror to the storage-root log split the decision across two logs.
+        if Self::consent_active()
+            || !consent_from_env_value(std::env::var("PAWNS_USER_CONSENT").ok().as_deref())
+        {
+            return;
+        }
+        Self::record_start_consent_at(&Self::stable_consent_log(), &Self::device_id());
     }
 
     fn record_start_consent_at(path: &Path, device_id: &str) {
@@ -541,13 +550,20 @@ fn last_consent_entry_in(path: &Path, device_id: &str) -> Option<ConsentRecord> 
 /// readable entry, or a withdrawal all mean no — the gate fails closed.
 /// The newest consent entry across several logs.
 ///
-/// Newest-by-`happened_at` and NOT first-match, so an old consent under a
-/// stale root can never outrank a newer withdrawal: the resolution fails
-/// closed, the same way a single log does.
+/// FAIL-3: `paths[0]` is the anchored log, where every decision is written,
+/// and inside one log the last line wins whatever the clock said. So a
+/// decision there that is not a consent is final. Only when it holds a
+/// consent (or nothing) does newest-by-`happened_at` decide, so an old consent
+/// under a stale root still never outranks a newer withdrawal.
 fn last_consent_entry_across(paths: &[PathBuf], device_id: &str) -> Option<ConsentRecord> {
-    paths
-        .iter()
-        .filter_map(|p| last_consent_entry_in(p, device_id))
+    let mut entries = paths.iter().map(|p| last_consent_entry_in(p, device_id));
+    let anchored = entries.next().flatten();
+    if matches!(&anchored, Some(e) if e.action != "consent") {
+        return anchored;
+    }
+    anchored
+        .into_iter()
+        .chain(entries.flatten())
         .max_by(|a, b| a.happened_at.cmp(&b.happened_at))
 }
 
@@ -1343,3 +1359,8 @@ mod bug8_consent_presentation_tests {
         );
     }
 }
+
+/// FAIL-3: the anchored consent log decides; the start-consent record goes there.
+#[cfg(test)]
+#[path = "pawns_anchored_consent_tests.rs"]
+mod pawns_anchored_consent_tests;
