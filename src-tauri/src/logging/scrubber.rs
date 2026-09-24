@@ -264,7 +264,28 @@ fn redact_loose_mnemonic(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re =
         RE.get_or_init(|| Regex::new(r"(?i)(?:\b[a-z]{3,12}\b[ ,]+){23,}[a-z]{3,12}\b").unwrap());
-    re.replace_all(s, "[MNEMONIC]").to_string()
+    re.replace_all(s, |caps: &regex::Captures| {
+        mnemonic_replacement(s, &caps[0], caps.get(0).map_or(0, |m| m.end()))
+    })
+    .to_string()
+}
+
+/// BUG LOOP 2: what a mnemonic run is replaced with. Open-ended runs can end
+/// in a secret NAME whose value follows it (`… adapt password=X`,
+/// `… token: X`); swallowing the name hid the value from every name-keyed
+/// rule that runs after the mnemonic rules. That last word is kept — but only
+/// when it IS a secret name AND a value is assigned to it, because "secret"
+/// and "token" are phrase words too.
+fn mnemonic_replacement(line: &str, run: &str, end: usize) -> String {
+    static NAME: OnceLock<Regex> = OnceLock::new();
+    let name = NAME.get_or_init(|| Regex::new(&format!(r"(?i)^{SECRET_NAMES}$")).unwrap());
+    let assigned = line[end..].trim_start().starts_with(['=', ':']);
+    match run.rfind(|c: char| c.is_whitespace() || c == ',') {
+        Some(cut) if assigned && name.is_match(&run[cut + 1..]) => {
+            format!("[MNEMONIC]{}", &run[cut..])
+        }
+        _ => "[MNEMONIC]".to_string(),
+    }
 }
 
 /// B23: the only rule that can catch a BARE `GEORGE-RIG-01` or `jdoe` in
@@ -324,7 +345,10 @@ fn redact_literal_identity(s: &str) -> String {
 fn redact_mnemonic(s: &str) -> String {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"(?:\b[a-z]{3,12}\b\s+){24,}[a-z]{3,12}\b").unwrap());
-    re.replace_all(s, "[MNEMONIC]").to_string()
+    re.replace_all(s, |caps: &regex::Captures| {
+        mnemonic_replacement(s, &caps[0], caps.get(0).map_or(0, |m| m.end()))
+    })
+    .to_string()
 }
 
 /// Redact bearer tokens (bearer="..." or Bearer: ...)
@@ -612,3 +636,8 @@ mod scrubber_c4_tests;
 #[cfg(test)]
 #[path = "scrubber_bl2_key_tests.rs"]
 mod scrubber_bl2_key_tests;
+
+/// BUG LOOP 2: a secret named right after a phrase keeps its value redacted.
+#[cfg(test)]
+#[path = "scrubber_bl2_name_tests.rs"]
+mod scrubber_bl2_name_tests;
