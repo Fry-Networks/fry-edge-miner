@@ -75,9 +75,28 @@ fn the_boot_pass_and_the_updater_pre_update_reassert_are_unchanged_at_automatic(
 /// tracking. `Automatic` returns before ever touching that map, so only a
 /// UserClick call can make a REPEAT of the same key come back
 /// `AlreadyAttempted`.
+///
+/// BUG LOOP 2 (NB): `UserClick` makes `run_elevated` actually RUN the
+/// closure — on Windows that spawns the REAL elevated PowerShell (`-Verb
+/// RunAs -Wait`), which raises a genuine UAC prompt and, if approved,
+/// applies real Defender exclusions and rewrites the real FEM-FryNode
+/// firewall rule on whatever machine runs `cargo test`, including the
+/// windows-latest release runner. `#[cfg(not(windows))]` keeps this test —
+/// and its non-vacuous mechanism proof — on Linux CI (the actual gate for
+/// this crate's unit tests), where "powershell" is simply absent and the
+/// closure fails harmlessly with `NotFound`, while making it impossible for
+/// this file to ever run real elevation on any Windows machine, dev or CI.
+#[cfg(not(windows))]
 #[test]
 fn user_click_hardening_reaches_the_gate_attempt_tracking() {
     use crate::elevation_gate::ElevationSkipped;
+
+    // `elevation_gate`'s blocked-reasons map is keyed by PURPOSE only (not
+    // by attempt key), so this must serialize against every other test in
+    // this file that touches "hardening" — see HARDENING_PURPOSE_TEST_LOCK.
+    let _guard = HARDENING_PURPOSE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let install_dir = tmp.path();
@@ -122,3 +141,9 @@ fn user_click_hardening_reaches_the_gate_attempt_tracking() {
          gate's attempt tracking, which only a UserClick trigger touches"
     );
 }
+
+/// Process-global: `elevation_gate`'s blocked-reasons map and attempt
+/// tracking are keyed by PURPOSE only (not by attempt key), so every test in
+/// this file that touches the "hardening" purpose must serialize against
+/// every other one — `cargo test` runs tests in parallel threads by default.
+static HARDENING_PURPOSE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
