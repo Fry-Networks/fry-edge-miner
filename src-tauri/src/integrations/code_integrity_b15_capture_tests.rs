@@ -176,3 +176,70 @@ fn a_recent_block_is_found_even_behind_an_older_unrelated_event_in_the_same_crlf
     );
     assert!(found.contains("goworkerd.dll"));
 }
+
+// ---------------------------------------------------------------------
+// BUG LOOP 2 (NB): the enforced-vs-audit check used to match an id
+// ANYWHERE in the event XML (`>{id}<` or `'{id}'`), not specifically inside
+// the `<EventID>` element — so a genuinely audit-only 3076 event whose
+// EventRecordID, USN, ProcessID or ThreadID happened to equal 3033/3077 was
+// misread as an ENFORCED block. Only the `<EventID>` element may decide.
+// ---------------------------------------------------------------------
+
+/// The exact real capture, with ONLY its EventRecordID changed to 3077 —
+/// `<EventID>` stays 3076 (audit). Everything else (File Name, PolicyName,
+/// the real hashes) is untouched real-capture data.
+#[test]
+fn a_3076_audit_event_whose_eventrecordid_is_3077_is_still_not_a_block() {
+    let decoy = CAPTURED_TITAN_EDGE_AUDIT.replacen(
+        "<EventRecordID>75</EventRecordID>",
+        "<EventRecordID>3077</EventRecordID>",
+        1,
+    );
+    assert!(
+        decoy.contains("<EventID>3076</EventID>"),
+        "fixture sanity: EventID must stay 3076: {decoy}"
+    );
+    assert!(
+        decoy.contains("<EventRecordID>3077</EventRecordID>"),
+        "fixture sanity: EventRecordID must now read 3077: {decoy}"
+    );
+
+    assert!(
+        event_names_our_image(&decoy, &titan_edge()),
+        "fixture sanity: the decoy must still name titan-edge.exe"
+    );
+
+    let listing = crlf_listing(&[decoy.as_str()]);
+    assert!(
+        first_block_for_at(&listing, &titan_edge(), captured_now(), BLOCK_RECENCY).is_none(),
+        "a 3076 (audit) event must not become an enforced block just because \
+         its EventRecordID happens to equal 3077 — only <EventID> may decide: {decoy}"
+    );
+}
+
+/// The same decoy shape, on the `USN` Data value instead of EventRecordID —
+/// the other field lens 1 flagged as an equally reachable false-positive
+/// path through the old id-anywhere matcher.
+#[test]
+fn a_3076_audit_event_whose_usn_is_3033_is_still_not_a_block() {
+    let decoy = CAPTURED_TITAN_EDGE_AUDIT.replacen(
+        "<Data Name='USN'>0</Data>",
+        "<Data Name='USN'>3033</Data>",
+        1,
+    );
+    assert!(
+        decoy.contains("<Data Name='USN'>3033</Data>"),
+        "fixture sanity: USN must now read 3033: {decoy}"
+    );
+    assert!(
+        decoy.contains("<EventID>3076</EventID>"),
+        "fixture sanity: {decoy}"
+    );
+
+    let listing = crlf_listing(&[decoy.as_str()]);
+    assert!(
+        first_block_for_at(&listing, &titan_edge(), captured_now(), BLOCK_RECENCY).is_none(),
+        "a 3076 (audit) event must not become an enforced block just because \
+         an unrelated Data value happens to equal 3033: {decoy}"
+    );
+}
