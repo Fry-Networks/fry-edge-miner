@@ -280,8 +280,15 @@ fn mnemonic_replacement(line: &str, run: &str, end: usize) -> String {
     static NAME: OnceLock<Regex> = OnceLock::new();
     let name = NAME.get_or_init(|| Regex::new(&format!(r"(?i)^{SECRET_NAMES}$")).unwrap());
     let assigned = line[end..].trim_start().starts_with(['=', ':']);
-    match run.rfind(|c: char| c.is_whitespace() || c == ',') {
-        Some(cut) if assigned && name.is_match(&run[cut + 1..]) => {
+    // BUG LOOP 3: the separator is found WITH its width. The strict rule's
+    // `\s` is Unicode, so it can be a multibyte U+00A0 or U+3000, and slicing
+    // one byte past its start panicked inside it.
+    match run
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| c.is_whitespace() || c == ',')
+    {
+        Some((cut, sep)) if assigned && name.is_match(&run[cut + sep.len_utf8()..]) => {
             format!("[MNEMONIC]{}", &run[cut..])
         }
         _ => "[MNEMONIC]".to_string(),
@@ -641,3 +648,8 @@ mod scrubber_bl2_key_tests;
 #[cfg(test)]
 #[path = "scrubber_bl2_name_tests.rs"]
 mod scrubber_bl2_name_tests;
+
+/// BUG LOOP 3: a multibyte Unicode separator never panics the scrubber.
+#[cfg(test)]
+#[path = "scrubber_bl3_unicode_tests.rs"]
+mod scrubber_bl3_unicode_tests;
