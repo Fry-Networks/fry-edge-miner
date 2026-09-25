@@ -279,7 +279,16 @@ fn redact_loose_mnemonic(s: &str) -> String {
 fn mnemonic_replacement(line: &str, run: &str, end: usize) -> String {
     static NAME: OnceLock<Regex> = OnceLock::new();
     let name = NAME.get_or_init(|| Regex::new(&format!(r"(?i)^{SECRET_NAMES}$")).unwrap());
-    let assigned = line[end..].trim_start().starts_with(['=', ':']);
+    // BUG LOOP 3: a JOINED name (`api-key`, `user.token`, `seed-phrase`)
+    // continues past the run: a run's last word stops at '.' or '-', so that
+    // word is only the name's first segment and the rest follows the match.
+    let rest = &line[end..];
+    let joined = rest.len()
+        - rest
+            .trim_start_matches(|c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            .len();
+    let (tail, after) = rest.split_at(joined);
+    let assigned = after.trim_start().starts_with(['=', ':']);
     // BUG LOOP 3: the separator is found WITH its width. The strict rule's
     // `\s` is Unicode, so it can be a multibyte U+00A0 or U+3000, and slicing
     // one byte past its start panicked inside it.
@@ -288,7 +297,9 @@ fn mnemonic_replacement(line: &str, run: &str, end: usize) -> String {
         .rev()
         .find(|&(_, c)| c.is_whitespace() || c == ',')
     {
-        Some((cut, sep)) if assigned && name.is_match(&run[cut + sep.len_utf8()..]) => {
+        Some((cut, sep))
+            if assigned && name.is_match(&format!("{}{tail}", &run[cut + sep.len_utf8()..])) =>
+        {
             format!("[MNEMONIC]{}", &run[cut..])
         }
         _ => "[MNEMONIC]".to_string(),
@@ -685,3 +696,9 @@ mod scrubber_bl3_unicode_tests;
 #[cfg(test)]
 #[path = "scrubber_bl3_url_key_tests.rs"]
 mod scrubber_bl3_url_key_tests;
+
+/// BUG LOOP 3: a joined secret name right after a phrase keeps its value
+/// redacted.
+#[cfg(test)]
+#[path = "scrubber_bl3_joined_name_tests.rs"]
+mod scrubber_bl3_joined_name_tests;
