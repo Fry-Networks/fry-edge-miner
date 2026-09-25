@@ -85,6 +85,18 @@ fn start_never_calls_the_installing_ensure_docker() {
          ensure_docker(), which downloads the Docker Desktop installer \
          before the elevation gate is ever consulted: {body}"
     );
+    // BUG LOOP 2 (NB): `let _ = ensure_docker_no_install().await;` (dropping
+    // the `?`) would pass BOTH checks above — the text is present and
+    // ensure_docker() is absent — while silently swallowing any Err and
+    // falling through to `if !Self::install_marker().exists() {
+    // self.install().await?; }`, whose install() DOES call the installing
+    // ensure_docker(). The error must actually propagate.
+    assert!(
+        body.contains("ensure_docker_no_install().await?"),
+        "start() must propagate ensure_docker_no_install()'s error with `?` \
+         — dropping it falls through to install(), which reaches the \
+         installing ensure_docker() anyway: {body}"
+    );
 }
 
 /// The user-initiated path must still exist, or Docker can never be
@@ -126,6 +138,18 @@ fn ensure_docker_core_bails_before_downloading_when_install_is_not_allowed() {
         guard_at < download_at,
         "the allow_install guard must come BEFORE the download call, or a caller \
          with allow_install=false could still reach it: {body}"
+    );
+
+    // BUG LOOP 2 (NB): text order alone passes a guard that never actually
+    // exits, e.g. `if !allow_install { warn!("Docker Desktop not
+    // installed"); }` — the warn! text still precedes download_docker_
+    // installer positionally, and execution falls through to it anyway. The
+    // guarded block itself must contain a bail!/return.
+    let guard_block = fn_body(body, "if !allow_install {");
+    assert!(
+        guard_block.contains("bail!") || guard_block.contains("return"),
+        "the allow_install guard must actually exit (bail!/return), or \
+         falling through still reaches the download: {guard_block}"
     );
 }
 
