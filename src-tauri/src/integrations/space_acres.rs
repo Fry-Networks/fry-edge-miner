@@ -707,6 +707,24 @@ impl SpaceAcresIntegration {
                 return Ok(());
             }
 
+            // BUG LOOP 2 (NB, item 6c): `Automatic` is ALWAYS refused by the
+            // gate (elevation_gate::run_elevated returns before ever running
+            // the closure for it) — no need to hit the GitHub API and
+            // download the full installer first just to find that out on
+            // every launch. Ask the gate directly, before any network I/O,
+            // exactly as `ensure_docker_no_install` does for Docker. The
+            // attempt key is irrelevant here: Automatic never touches the
+            // gate's per-key attempt tracking, only UserClick does.
+            if install_trigger == crate::elevation_gate::ElevationTrigger::Automatic {
+                crate::elevation_gate::run_elevated(
+                    "space_acres",
+                    "space_acres-automatic-precheck",
+                    install_trigger,
+                    || -> Result<()> { unreachable!("Automatic never runs the closure") },
+                )
+                .map_err(|skipped| anyhow::anyhow!("{skipped}"))?;
+            }
+
             info!("Installing SpaceAcres from GitHub latest release");
             let release = Self::fetch_latest_release().await?;
             info!(
@@ -870,6 +888,15 @@ impl Integration for SpaceAcresIntegration {
     /// `install_integration` command — the frontend never invokes it) never
     /// sets the flag, so it always gets `Automatic`.
     async fn install_for_user(&self) -> Result<()> {
+        // BUG LOOP 2 (NB): the attempt_key (the installer's own path) never
+        // changes between versions/attempts, and this used not to re-arm it
+        // — so a declined/failed install spent the gate's one attempt for
+        // the rest of the process's life, and a LATER genuine user click
+        // (e.g. an Update) was refused as AlreadyAttempted. Every other
+        // retry gesture in this codebase re-arms first (commands/
+        // integration.rs toggle_integration; commands/hardening.rs
+        // retry_hardening).
+        crate::elevation_gate::clear_blocked("space_acres");
         self.next_install_is_user_gesture
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.install_impl(false).await
@@ -1051,6 +1078,13 @@ impl Integration for SpaceAcresIntegration {
         // FAIL/row-10: apply_update is reached ONLY from install_update (a
         // #[tauri::command], the Updates page's "Update" click) — never
         // automatically — so this reinstall is a real user gesture too.
+        //
+        // BUG LOOP 2 (NB): re-arm first — see install_for_user's comment.
+        // Without this, an earlier toggle-on install in the same FEM run
+        // (or a prior failed Update) leaves "space_acres" spent, and this
+        // click's own attempt is refused as AlreadyAttempted before it ever
+        // gets a UAC prompt.
+        crate::elevation_gate::clear_blocked("space_acres");
         self.next_install_is_user_gesture
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.install_impl(true).await?;
