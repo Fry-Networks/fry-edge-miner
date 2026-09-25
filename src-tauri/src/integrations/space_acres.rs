@@ -169,6 +169,60 @@ fn install_short_circuits(force: bool, running: bool, binary_found: bool) -> boo
     !force && !install_needed(running, binary_found)
 }
 
+/// BUG LOOP 3 (NB): the flag-to-trigger mapping, and the Automatic-only
+/// precheck gate, used to be inline conditionals inside `install_impl` —
+/// pinned only by a source-scan that checked textual ORDER (`UserClick`
+/// appearing before `Automatic`) rather than actual behaviour, so a negated
+/// condition (`if !user_gesture { UserClick } else { Automatic }`) or a
+/// flipped `!=` on the precheck survived every existing test while handing
+/// the boot pass (an Automatic caller) real UserClick authority to run
+/// msiexec/Burn with nobody at the keyboard — the exact row-10 hazard this
+/// gate exists to prevent. Pulling them out as plain, unconditional
+/// functions (no `#[cfg(target_os = "windows")]` needed — `ElevationTrigger`
+/// itself is cross-platform) makes them directly unit-testable on Linux: a
+/// negation or a flipped comparison now fails a REAL executed assertion,
+/// not a text-order heuristic.
+///
+/// PURE: `user_gesture` is the read-and-reset flag value (`true` only when
+/// `install_for_user`/`apply_update` — both reachable only from a real user
+/// gesture — just set it; `install()`, the boot pass/health-loop path,
+/// never does).
+fn install_trigger_for(user_gesture: bool) -> crate::elevation_gate::ElevationTrigger {
+    if user_gesture {
+        crate::elevation_gate::ElevationTrigger::UserClick
+    } else {
+        crate::elevation_gate::ElevationTrigger::Automatic
+    }
+}
+
+/// PURE: does the Automatic-only precheck (ask the gate directly, before any
+/// network I/O, since Automatic is always refused) apply for this trigger?
+fn precheck_applies(trigger: crate::elevation_gate::ElevationTrigger) -> bool {
+    trigger == crate::elevation_gate::ElevationTrigger::Automatic
+}
+
+#[cfg(test)]
+mod install_trigger_tests {
+    use super::*;
+    use crate::elevation_gate::ElevationTrigger;
+
+    #[test]
+    fn a_user_gesture_maps_to_user_click() {
+        assert_eq!(install_trigger_for(true), ElevationTrigger::UserClick);
+    }
+
+    #[test]
+    fn no_user_gesture_maps_to_automatic() {
+        assert_eq!(install_trigger_for(false), ElevationTrigger::Automatic);
+    }
+
+    #[test]
+    fn the_precheck_applies_only_to_automatic() {
+        assert!(precheck_applies(ElevationTrigger::Automatic));
+        assert!(!precheck_applies(ElevationTrigger::UserClick));
+    }
+}
+
 /// The PE section name WiX Burn stamps into every bootstrapper it builds.
 const BURN_SECTION_MARKER: &[u8] = b".wixburn";
 
@@ -673,14 +727,10 @@ impl SpaceAcresIntegration {
             // that sets the flag immediately before calling this function
             // hands it off with no yield point in between. See the field's
             // own doc comment on why this can't be a normal parameter.
-            let install_trigger = if self
+            let user_gesture = self
                 .next_install_is_user_gesture
-                .swap(false, std::sync::atomic::Ordering::SeqCst)
-            {
-                crate::elevation_gate::ElevationTrigger::UserClick
-            } else {
-                crate::elevation_gate::ElevationTrigger::Automatic
-            };
+                .swap(false, std::sync::atomic::Ordering::SeqCst);
+            let install_trigger = install_trigger_for(user_gesture);
 
             // These three shell out to PowerShell up to five times, each
             // bounded at 20 s, and they run BEFORE the first await — so the
@@ -715,7 +765,7 @@ impl SpaceAcresIntegration {
             // exactly as `ensure_docker_no_install` does for Docker. The
             // attempt key is irrelevant here: Automatic never touches the
             // gate's per-key attempt tracking, only UserClick does.
-            if install_trigger == crate::elevation_gate::ElevationTrigger::Automatic {
+            if precheck_applies(install_trigger) {
                 crate::elevation_gate::run_elevated(
                     "space_acres",
                     "space_acres-automatic-precheck",
