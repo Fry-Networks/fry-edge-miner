@@ -22,9 +22,12 @@ fn every_unicode_whitespace() -> Vec<char> {
         .collect()
 }
 
+/// A named scrub path.
+type ScrubPath = (&'static str, fn(&str) -> String);
+
 /// Scrub `line` on both paths; a panic is reported, never propagated.
 fn scrub_both(line: &str) -> Vec<(&'static str, Result<String, ()>)> {
-    let paths: [(&'static str, fn(&str) -> String); 2] = [
+    let paths: [ScrubPath; 2] = [
         ("scrub_line", scrub_line),
         ("scrub_partner_line", scrub_partner_line),
     ];
