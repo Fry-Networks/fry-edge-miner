@@ -316,14 +316,16 @@ async fn refresh_funding_notice() {
     };
     if let Some(address) = due {
         if let Ok((amount, min_balance)) = FryVpnIntegration::read_wallet_balance(&address).await {
-            WALLET_WATCH
-                .lock()
-                .unwrap()
-                .set_heartbeat_shortfall(heartbeat_shortfall_message(
+            let mut watch = WALLET_WATCH.lock().unwrap();
+            // BUG LOOP 2: a stop while the read was in flight reset the
+            // watch; its answer belongs to a node that is no longer running.
+            if watch.address.as_deref() == Some(address.as_str()) {
+                watch.set_heartbeat_shortfall(heartbeat_shortfall_message(
                     amount,
                     min_balance,
                     &address,
                 ));
+            }
         }
     }
 }
@@ -2012,3 +2014,9 @@ mod fryvpn_funding_notice_tests;
 #[cfg(test)]
 #[path = "fryvpn_algod_budget_tests.rs"]
 mod fryvpn_algod_budget_tests;
+
+/// BUG LOOP 2: the heartbeat notice follows the node's enabled/health state,
+/// and a disable clears it for good.
+#[cfg(test)]
+#[path = "fryvpn_bl2_notice_state_tests.rs"]
+mod fryvpn_bl2_notice_state_tests;

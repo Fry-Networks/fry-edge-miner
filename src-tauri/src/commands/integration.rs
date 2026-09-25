@@ -147,8 +147,10 @@ pub async fn get_integrations(
                         // D-C4-2: a registered fryDVPN node that cannot pay its
                         // next heartbeat. UI only — it never reaches `health`,
                         // so the PoC health map and reward scalars are untouched.
+                        // Only while it is enabled and Healthy: a dead or
+                        // disabled node's card shows its real state.
                         .or_else(|| {
-                            (id == "fryvpn")
+                            (id == "fryvpn" && enabled && healthy)
                                 .then(crate::integrations::fryvpn::funding_notice)
                                 .flatten()
                         }),
