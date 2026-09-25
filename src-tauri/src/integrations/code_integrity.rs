@@ -110,7 +110,7 @@ pub(crate) fn event_names_our_image(event_xml: &str, image: &Path) -> bool {
     let Some(id) = event_id_element(event_xml) else {
         return false;
     };
-    QUERIED_EVENT_IDS.iter().any(|q| *q == id)
+    QUERIED_EVENT_IDS.contains(&id)
 }
 
 /// PURE: did the OS actually refuse to load the image described by this
@@ -122,7 +122,7 @@ fn event_is_enforced_block(event_xml: &str) -> bool {
     let Some(id) = event_id_element(event_xml) else {
         return false;
     };
-    ENFORCED_BLOCK_EVENT_IDS.iter().any(|q| *q == id)
+    ENFORCED_BLOCK_EVENT_IDS.contains(&id)
 }
 
 /// How recent a block event has to be to describe the CURRENT state.

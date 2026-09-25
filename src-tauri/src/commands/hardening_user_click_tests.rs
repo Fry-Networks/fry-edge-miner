@@ -87,16 +87,17 @@ fn the_boot_pass_and_the_updater_pre_update_reassert_are_unchanged_at_automatic(
 /// closure fails harmlessly with `NotFound`, while making it impossible for
 /// this file to ever run real elevation on any Windows machine, dev or CI.
 #[cfg(not(windows))]
-#[test]
-fn user_click_hardening_reaches_the_gate_attempt_tracking() {
+#[tokio::test]
+async fn user_click_hardening_reaches_the_gate_attempt_tracking() {
     use crate::elevation_gate::ElevationSkipped;
 
     // `elevation_gate`'s blocked-reasons map is keyed by PURPOSE only (not
     // by attempt key), so this must serialize against every other test in
     // this file that touches "hardening" — see HARDENING_PURPOSE_TEST_LOCK.
-    let _guard = HARDENING_PURPOSE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    // A tokio (not std) Mutex: this whole file's tests are async, and
+    // holding a std MutexGuard across an .await is a clippy hard error
+    // (await_holding_lock) as well as a real footgun.
+    let _guard = HARDENING_PURPOSE_TEST_LOCK.lock().await;
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let install_dir = tmp.path();
@@ -229,9 +230,7 @@ fn get_hardening_status_is_registered_in_generate_handler() {
 /// `HARDENING_PURPOSE_TEST_LOCK`.
 #[tokio::test]
 async fn get_hardening_status_surfaces_a_currently_published_block() {
-    let _guard = HARDENING_PURPOSE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HARDENING_PURPOSE_TEST_LOCK.lock().await;
 
     crate::elevation_gate::clear_blocked("hardening");
     assert_eq!(
@@ -299,13 +298,11 @@ fn retry_hardening_rearms_the_gate_before_running() {
 /// itself is pre-existing, correct code; paired with the structural test
 /// above, which is what's new): clearing "hardening" between two UserClick
 /// attempts with the SAME key un-suppresses the second one.
-#[test]
-fn clearing_blocked_before_a_repeat_user_click_avoids_already_attempted() {
+#[tokio::test]
+async fn clearing_blocked_before_a_repeat_user_click_avoids_already_attempted() {
     use crate::elevation_gate::ElevationSkipped;
 
-    let _guard = HARDENING_PURPOSE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HARDENING_PURPOSE_TEST_LOCK.lock().await;
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let install_dir = tmp.path();
@@ -343,4 +340,8 @@ fn clearing_blocked_before_a_repeat_user_click_avoids_already_attempted() {
 /// tracking are keyed by PURPOSE only (not by attempt key), so every test in
 /// this file that touches the "hardening" purpose must serialize against
 /// every other one — `cargo test` runs tests in parallel threads by default.
-static HARDENING_PURPOSE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// `tokio::sync::Mutex`, not `std::sync::Mutex`: every user of this lock is
+/// an async test that awaits while holding the guard, and holding a std
+/// `MutexGuard` across an `.await` is a clippy hard error
+/// (`await_holding_lock`) as well as a genuine footgun.
+static HARDENING_PURPOSE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
