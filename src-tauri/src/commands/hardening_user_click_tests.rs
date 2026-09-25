@@ -76,16 +76,29 @@ fn the_boot_pass_and_the_updater_pre_update_reassert_are_unchanged_at_automatic(
 /// UserClick call can make a REPEAT of the same key come back
 /// `AlreadyAttempted`.
 ///
-/// BUG LOOP 2 (NB): `UserClick` makes `run_elevated` actually RUN the
-/// closure — on Windows that spawns the REAL elevated PowerShell (`-Verb
-/// RunAs -Wait`), which raises a genuine UAC prompt and, if approved,
-/// applies real Defender exclusions and rewrites the real FEM-FryNode
-/// firewall rule on whatever machine runs `cargo test`, including the
-/// windows-latest release runner. `#[cfg(not(windows))]` keeps this test —
-/// and its non-vacuous mechanism proof — on Linux CI (the actual gate for
-/// this crate's unit tests), where "powershell" is simply absent and the
-/// closure fails harmlessly with `NotFound`, while making it impossible for
-/// this file to ever run real elevation on any Windows machine, dev or CI.
+/// BUG LOOP 2/3 (NB then BLOCKING): `UserClick` makes `run_elevated`
+/// actually RUN the closure — on Windows that spawns the REAL elevated
+/// PowerShell (`-Verb RunAs -Wait`), which raises a genuine UAC prompt and,
+/// if approved, applies real Defender exclusions and rewrites the real
+/// FEM-FryNode firewall rule on whatever machine runs `cargo test`.
+/// `#[cfg(not(windows))]` keeps THIS test's mechanism proof on Linux, where
+/// "powershell" is simply absent and the closure fails harmlessly with
+/// `NotFound`.
+///
+/// CORRECTED CLAIM (bug loop 3 found the original wrong on both counts):
+/// this test's own gate does NOT make it "impossible for this file to ever
+/// run real elevation on Windows" — a LATER test added to this exact file in
+/// the same delta (`clearing_blocked_before_a_repeat_user_click_avoids_
+/// already_attempted`) called `run_hardening_elevated` with `UserClick`
+/// completely ungated, and DID run real elevation on Windows. And
+/// `.github/workflows/build.yml` runs `cargo test --release` ONLY on
+/// `windows-latest` (no Linux unit-test job exists) — so Windows is not "the
+/// gate this crate's tests happen not to hit", it is the ONLY CI job that
+/// runs these tests at all. The real, crate-wide guarantee is
+/// `no_unguarded_test_reaches_run_hardening_elevated_with_user_click`
+/// (security_setup_user_click_hardening_tests.rs) — a tripwire that scans
+/// EVERY test under `src/`, not a property any one test's own attribute can
+/// establish on its own.
 #[cfg(not(windows))]
 #[tokio::test]
 async fn user_click_hardening_reaches_the_gate_attempt_tracking() {
@@ -298,6 +311,17 @@ fn retry_hardening_rearms_the_gate_before_running() {
 /// itself is pre-existing, correct code; paired with the structural test
 /// above, which is what's new): clearing "hardening" between two UserClick
 /// attempts with the SAME key un-suppresses the second one.
+///
+/// BUG LOOP 3 (BLOCKING): this called `run_hardening_elevated` with
+/// `UserClick` TWICE with no `#[cfg(not(windows))]` — on every Windows
+/// `cargo test` (the ONLY CI job that runs this crate's tests at all —
+/// build.yml has no Linux unit-test job) it ran the real elevated hardening
+/// script twice: two genuine UAC prompts, and on approval (or on the
+/// no-UAC admin release runner) real Defender exclusions plus a real
+/// delete/re-add of the FEM-FryNode firewall rule pointed at a temp
+/// frynode.exe. Gated exactly like its sibling above, for exactly the same
+/// reason.
+#[cfg(not(windows))]
 #[tokio::test]
 async fn clearing_blocked_before_a_repeat_user_click_avoids_already_attempted() {
     use crate::elevation_gate::ElevationSkipped;

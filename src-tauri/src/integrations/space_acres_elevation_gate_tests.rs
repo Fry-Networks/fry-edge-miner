@@ -182,6 +182,30 @@ fn install_never_sets_the_user_gesture_flag() {
     );
 }
 
+// BUG LOOP 3 (NB): the check above only looks for the literal flag name
+// inside install()'s OWN body — it does not catch `install()` being
+// rewritten to just call `install_for_user()` (which itself sets the flag
+// AND re-arms the gate), since that rewrite makes install()'s own extracted
+// body `self.install_for_user().await`, containing neither
+// "next_install_is_user_gesture" nor any other string the check above
+// looks for. That mutant hands every automatic caller (boot recovery, the
+// health loop) real user-gesture authority.
+#[test]
+fn install_calls_install_impl_directly_not_install_for_user() {
+    let code = code_only(SPACE_ACRES_SRC);
+    let body = fn_body(&code, "async fn install(&self) -> Result<()> {");
+    assert!(
+        body.contains("self.install_impl(false)"),
+        "install() must call install_impl(false) directly: {body}"
+    );
+    assert!(
+        !body.contains("install_for_user"),
+        "install() must never borrow install_for_user's user-gesture \
+         authority (it re-arms the gate and forces UserClick — both wrong \
+         for an automatic caller): {body}"
+    );
+}
+
 /// Fixture sanity: `fn_body` really does stop at the function's own end.
 #[test]
 fn fn_body_does_not_run_past_the_functions_own_end() {
@@ -248,30 +272,69 @@ fn apply_update_rearms_the_gate_before_reinstalling() {
 // every existing test.
 // ---------------------------------------------------------------------
 
+// BUG LOOP 3 (NB): the mapping this test pins used to live inline inside
+// install_impl and was checked only by textual order (UserClick's offset <
+// Automatic's offset) — a negated condition with the SAME two variants in
+// the SAME order (`if !user_gesture { UserClick } else { Automatic }`)
+// survived that check while inverting the actual mapping. It has since been
+// extracted into `install_trigger_for` (a plain, unconditional function —
+// no #[cfg(target_os = "windows")] needed, since ElevationTrigger itself is
+// cross-platform), which `install_trigger_tests` in space_acres.rs pins
+// BEHAVIOURALLY: `install_trigger_for(true) == UserClick` and
+// `install_trigger_for(false) == Automatic` are real executed assertions,
+// immune to any textually-different-but-behaviourally-wrong rewrite. This
+// test now only confirms install_trigger_for's OWN body still has the
+// UserClick/Automatic arms in the textually-expected order (a fixture
+// sanity check on the extraction target, not the real guarantee), and the
+// paired test below confirms install_impl actually calls it, unnegated.
 #[test]
 fn the_swap_true_branch_maps_to_user_click_and_false_to_automatic() {
     let code = code_only(SPACE_ACRES_SRC);
     let body = fn_body(
         &code,
-        "async fn install_impl(&self, force: bool) -> Result<()> {",
+        "fn install_trigger_for(user_gesture: bool) -> crate::elevation_gate::ElevationTrigger {",
     );
 
-    let swap_at = body
-        .find(".swap(false,")
-        .unwrap_or_else(|| panic!("must read-and-reset the flag via swap(false, ..): {body}"));
-    let after_swap = &body[swap_at..];
-    let user_click_at = after_swap
+    let user_click_at = body
         .find("ElevationTrigger::UserClick")
-        .unwrap_or_else(|| panic!("UserClick must appear after the swap: {body}"));
-    let automatic_at = after_swap
+        .unwrap_or_else(|| panic!("UserClick must appear: {body}"));
+    let automatic_at = body
         .find("ElevationTrigger::Automatic")
-        .unwrap_or_else(|| panic!("Automatic must appear after the swap: {body}"));
+        .unwrap_or_else(|| panic!("Automatic must appear: {body}"));
     assert!(
         user_click_at < automatic_at,
-        "the swap's TRUE branch (the flag WAS set — a real user gesture) \
-         must map to UserClick and therefore appear textually first (the \
-         if-branch), before Automatic (the else-branch) — an inverted \
-         mapping would give the boot pass UserClick authority: {body}"
+        "the true (user_gesture) branch must map to UserClick and therefore \
+         appear textually first (the if-branch), before Automatic (the \
+         else-branch) — an inverted mapping would give the boot pass \
+         UserClick authority: {body}"
+    );
+}
+
+/// The real guarantee behind the fixture-sanity check above: install_impl
+/// must call the unit-tested `install_trigger_for`/`precheck_applies`
+/// directly, passing the raw read flag with no negation at either the read
+/// site or the call site — a negation here would bypass the pure functions'
+/// real behavioural tests entirely.
+#[test]
+fn install_impl_uses_the_extracted_trigger_and_precheck_functions_unnegated() {
+    let code = code_only(SPACE_ACRES_SRC);
+    let body = fn_body(
+        &code,
+        "async fn install_impl(&self, force: bool) -> Result<()> {",
+    );
+    assert!(
+        body.contains("install_trigger_for(user_gesture)"),
+        "install_impl must call install_trigger_for(user_gesture) directly: {body}"
+    );
+    assert!(
+        body.contains("precheck_applies(install_trigger)"),
+        "install_impl must gate the Automatic precheck via precheck_applies(install_trigger): {body}"
+    );
+    assert!(
+        !body.contains("!self.next_install_is_user_gesture") && !body.contains("!user_gesture"),
+        "the flag must be passed through as read, with no negation at the \
+         swap site or the install_trigger_for call site — either would hand \
+         the boot pass UserClick authority: {body}"
     );
 }
 
@@ -312,6 +375,11 @@ fn every_run_elevated_call_passes_the_computed_install_trigger_not_a_literal() {
 // the gate refuse it every time.
 // ---------------------------------------------------------------------
 
+// BUG LOOP 3 (NB): the precheck condition (`install_trigger ==
+// ElevationTrigger::Automatic`) has been extracted into `precheck_applies`
+// (unit-tested behaviourally in space_acres.rs's install_trigger_tests —
+// see the comment on the mapping extraction above), so the needle below now
+// targets the call site rather than the inline comparison.
 #[test]
 fn automatic_never_downloads_before_the_gate_refuses_it() {
     let code = code_only(SPACE_ACRES_SRC);
@@ -321,9 +389,9 @@ fn automatic_never_downloads_before_the_gate_refuses_it() {
     );
 
     let precheck_at = body
-        .find("ElevationTrigger::Automatic {")
+        .find("precheck_applies(install_trigger) {")
         .unwrap_or_else(|| {
-            panic!("install_impl must check install_trigger == Automatic before fetching/downloading: {body}")
+            panic!("install_impl must gate on precheck_applies(install_trigger) before fetching/downloading: {body}")
         });
     let fetch_at = body.find("fetch_latest_release()").unwrap_or_else(|| {
         panic!("install_impl must still fetch the release when allowed: {body}")
@@ -355,7 +423,7 @@ fn the_automatic_precheck_propagates_its_refusal() {
     );
 
     let precheck_at = body
-        .find("ElevationTrigger::Automatic {")
+        .find("precheck_applies(install_trigger) {")
         .expect("must exist — proven by the sibling test above");
     let window = &body[precheck_at..(precheck_at + 400).min(body.len())];
     assert!(
