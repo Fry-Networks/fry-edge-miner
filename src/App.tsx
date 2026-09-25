@@ -19,7 +19,11 @@ import { makeName } from './lib/names'
 import { isTauri } from './lib/tauri'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { hardeningWarningFromEventPayload, type HardeningWarning } from './lib/hardeningWarning'
+import {
+  hardeningWarningFromEventPayload,
+  hardeningWarningFromStatus,
+  type HardeningWarning
+} from './lib/hardeningWarning'
 
 // Truncated error banner with expandable details — raw multi-line backend
 // output (e.g. Docker logs) must never flood the layout.
@@ -252,6 +256,23 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
   const [hardeningWarning, setHardeningWarning] = useState<HardeningWarning | null>(null)
   useEffect(() => {
     if (!isTauri()) return
+
+    // PULL: the boot pass's Automatic refusal publishes into the backend's
+    // elevation gate within microseconds of app setup — long before this
+    // effect runs (React has to mount AppShell first, which itself waits on
+    // get_device_info). emit() is fire-and-forget with no replay, so on a
+    // normal boot the event below was already dropped by the time we get
+    // here. Query the gate's current state once on mount so that a block
+    // that happened before we existed is not lost.
+    invoke<string | null>('get_hardening_status')
+      .then((reason) => {
+        const warning = hardeningWarningFromStatus(reason)
+        if (warning) setHardeningWarning(warning)
+      })
+      .catch(() => {})
+
+    // LIVE: catches a later change — a Retry, or the updater's pre-update
+    // re-assert — while this component stays mounted.
     let unlisten: (() => void) | undefined
     listen('elevation-required', (event) => {
       const warning = hardeningWarningFromEventPayload(event.payload)

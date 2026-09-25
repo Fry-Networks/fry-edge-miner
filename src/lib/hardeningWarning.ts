@@ -25,3 +25,20 @@ export function hardeningWarningFromEventPayload(payload: unknown): HardeningWar
     manualCommand: typeof p.manualCommand === 'string' ? p.manualCommand : undefined
   }
 }
+
+/**
+ * BUG LOOP 2 (BLOCKING): the boot pass's Automatic refusal publishes into
+ * the backend's elevation gate within microseconds of app setup — long
+ * before the webview has loaded, React has mounted, or
+ * `hardeningWarningFromEventPayload`'s listener has registered. Tauri's
+ * `emit` is fire-and-forget with no replay, so that event was simply
+ * dropped and the Retry banner never appeared on a normal boot. This is the
+ * decoder for the PULL half: `get_hardening_status` returns whatever the
+ * gate is CURRENTLY holding for "hardening" (a reason string, or null if
+ * nothing is blocked), queried once on mount so a block that happened
+ * before any listener existed is not lost.
+ */
+export function hardeningWarningFromStatus(reason: string | null | undefined): HardeningWarning | null {
+  if (typeof reason !== 'string' || reason.length === 0) return null
+  return { reason, manualCommand: undefined }
+}
