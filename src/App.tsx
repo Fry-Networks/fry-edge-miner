@@ -19,11 +19,8 @@ import { makeName } from './lib/names'
 import { isTauri } from './lib/tauri'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import {
-  hardeningWarningFromEventPayload,
-  hardeningWarningFromStatus,
-  type HardeningWarning
-} from './lib/hardeningWarning'
+import { type HardeningWarning } from './lib/hardeningWarning'
+import { subscribeToHardeningStatus } from './lib/hardeningStatusEffect'
 
 // Truncated error banner with expandable details — raw multi-line backend
 // output (e.g. Docker logs) must never flood the layout.
@@ -250,39 +247,14 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
 
   // FAIL-11: the backend's `elevation-required` event is the only record a
   // suppressed/declined AUTOMATIC hardening attempt used to leave — nothing
-  // read it. This is the listener that makes it reach the UI, and
-  // `hardeningWarningFromEventPayload` (unit-tested separately) is the pure
-  // decoder that ignores other purposes' elevation events.
+  // read it. `subscribeToHardeningStatus` (unit-tested separately, with
+  // mocked invoke/listen, against a real behavioural assertion rather than a
+  // source-text substring match — see hardeningStatusEffect.test.ts) is the
+  // pull-then-listen wiring that makes it reach the UI.
   const [hardeningWarning, setHardeningWarning] = useState<HardeningWarning | null>(null)
   useEffect(() => {
     if (!isTauri()) return
-
-    // PULL: the boot pass's Automatic refusal publishes into the backend's
-    // elevation gate within microseconds of app setup — long before this
-    // effect runs (React has to mount AppShell first, which itself waits on
-    // get_device_info). emit() is fire-and-forget with no replay, so on a
-    // normal boot the event below was already dropped by the time we get
-    // here. Query the gate's current state once on mount so that a block
-    // that happened before we existed is not lost.
-    invoke<string | null>('get_hardening_status')
-      .then((reason) => {
-        const warning = hardeningWarningFromStatus(reason)
-        if (warning) setHardeningWarning(warning)
-      })
-      .catch(() => {})
-
-    // LIVE: catches a later change — a Retry, or the updater's pre-update
-    // re-assert — while this component stays mounted.
-    let unlisten: (() => void) | undefined
-    listen('elevation-required', (event) => {
-      const warning = hardeningWarningFromEventPayload(event.payload)
-      if (warning) setHardeningWarning(warning)
-    })
-      .then((f) => {
-        unlisten = f
-      })
-      .catch(() => {})
-    return () => unlisten?.()
+    return subscribeToHardeningStatus({ invoke, listen, setWarning: setHardeningWarning })
   }, [])
 
   return (
