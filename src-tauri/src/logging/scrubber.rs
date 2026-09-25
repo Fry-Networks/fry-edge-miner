@@ -472,13 +472,40 @@ fn redact_miner_key(s: &str) -> String {
     let field = FIELD.get_or_init(|| {
         Regex::new(r#"(?i)(\bminer_key\s*[=:]\s*|"miner_key"\s*:\s*)("[^"]*"|[^\s,}]+)"#).unwrap()
     });
-    field
+    let out = field.replace_all(&out, |caps: &regex::Captures| {
+        if caps[2].starts_with('"') {
+            format!(r#"{}"FEM-[REDACTED]""#, &caps[1])
+        } else {
+            format!("{}FEM-[REDACTED]", &caps[1])
+        }
+    });
+
+    // BUG LOOP 3: the kept key, whatever its length, also rides in the request
+    // paths FEM builds from it (`/credentials/{key}`, `/PoC/{key}/hardware`,
+    // `/installations/{key}/…`), which reach logs inside reqwest and decode
+    // errors with no `miner_key` field beside them. A `FEM-` segment is taken
+    // as the key only inside an http(s) URL or right after one of those
+    // routes: a filesystem path is never rewritten (partner logs depend on
+    // that), and `FEM-` names such as the firewall rules are left alone.
+    static PATH: OnceLock<Regex> = OnceLock::new();
+    let path = PATH.get_or_init(|| {
+        Regex::new(
+            r#"(?i)(https?://[^\s)"']*?/|/(?:credentials|installations|poc)/)FEM-[^/?#\s)"'\\]+"#,
+        )
+        .unwrap()
+    });
+    let out = path.replace_all(&out, |caps: &regex::Captures| {
+        format!("{}FEM-[REDACTED]", &caps[1])
+    });
+
+    // …and in a Debug-printed body, whose JSON quotes are escaped:
+    // `\"miner_key\": \"…\"`.
+    static ESCAPED: OnceLock<Regex> = OnceLock::new();
+    let escaped =
+        ESCAPED.get_or_init(|| Regex::new(r#"(?i)(\\"miner_key\\"\s*:\s*)\\"[^"\\]*\\""#).unwrap());
+    escaped
         .replace_all(&out, |caps: &regex::Captures| {
-            if caps[2].starts_with('"') {
-                format!(r#"{}"FEM-[REDACTED]""#, &caps[1])
-            } else {
-                format!("{}FEM-[REDACTED]", &caps[1])
-            }
+            format!(r#"{}\"FEM-[REDACTED]\""#, &caps[1])
         })
         .to_string()
 }
@@ -653,3 +680,8 @@ mod scrubber_bl2_name_tests;
 #[cfg(test)]
 #[path = "scrubber_bl3_unicode_tests.rs"]
 mod scrubber_bl3_unicode_tests;
+
+/// BUG LOOP 3: a kept legacy miner key in URL paths and escaped JSON.
+#[cfg(test)]
+#[path = "scrubber_bl3_url_key_tests.rs"]
+mod scrubber_bl3_url_key_tests;
