@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { hardeningWarningFromEventPayload } from './hardeningWarning'
+import { hardeningWarningFromEventPayload, hardeningWarningFromStatus } from './hardeningWarning'
 
 describe('hardeningWarningFromEventPayload', () => {
   it('decodes a hardening elevation-required payload', () => {
@@ -38,5 +38,20 @@ describe('hardeningWarningFromEventPayload', () => {
     expect(hardeningWarningFromEventPayload({ purpose: 'hardening' })).toBeNull()
     expect(hardeningWarningFromEventPayload({ purpose: 'hardening', reason: '' })).toBeNull()
     expect(hardeningWarningFromEventPayload({ purpose: 'hardening', reason: 42 })).toBeNull()
+  })
+})
+
+describe('hardeningWarningFromStatus', () => {
+  it('decodes a pulled blocked-reason string', () => {
+    expect(hardeningWarningFromStatus('Needs administrator approval — Retry')).toEqual({
+      reason: 'Needs administrator approval — Retry',
+      manualCommand: undefined
+    })
+  })
+
+  it('null/undefined/empty means nothing is currently blocked', () => {
+    expect(hardeningWarningFromStatus(null)).toBeNull()
+    expect(hardeningWarningFromStatus(undefined)).toBeNull()
+    expect(hardeningWarningFromStatus('')).toBeNull()
   })
 })

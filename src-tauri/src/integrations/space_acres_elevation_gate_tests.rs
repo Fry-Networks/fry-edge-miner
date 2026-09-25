@@ -192,3 +192,175 @@ fn fn_body_does_not_run_past_the_functions_own_end() {
         "install_for_user's extracted body ran past its own end: {body}"
     );
 }
+
+// ---------------------------------------------------------------------
+// BUG LOOP 2, item 6(a) (NB): the installer_path-derived attempt_key never
+// changes between versions or attempts, and install_for_user/apply_update
+// never re-armed it — so a second UserClick install in the same FEM run
+// (e.g. toggle-on, then later an Update click) was refused as
+// AlreadyAttempted, exactly the B3 "retry gesture was a guaranteed no-op"
+// shape clear_blocked exists to prevent.
+// ---------------------------------------------------------------------
+
+#[test]
+fn install_for_user_rearms_the_gate_before_installing() {
+    let code = code_only(SPACE_ACRES_SRC);
+    let body = fn_body(&code, "async fn install_for_user(&self) -> Result<()> {");
+    let clear_at = body
+        .find("clear_blocked(\"space_acres\")")
+        .unwrap_or_else(|| panic!("install_for_user must re-arm the gate: {body}"));
+    let call_at = body
+        .find("self.install_impl(")
+        .unwrap_or_else(|| panic!("install_for_user must still call install_impl: {body}"));
+    assert!(
+        clear_at < call_at,
+        "clear_blocked(\"space_acres\") must run BEFORE install_impl, or this \
+         gesture's own attempt could be cleared out from under it: {body}"
+    );
+}
+
+#[test]
+fn apply_update_rearms_the_gate_before_reinstalling() {
+    let code = code_only(SPACE_ACRES_SRC);
+    let body = fn_body(
+        &code,
+        "async fn apply_update(&self, version: &str) -> Result<()> {",
+    );
+    let clear_at = body
+        .find("clear_blocked(\"space_acres\")")
+        .unwrap_or_else(|| panic!("apply_update must re-arm the gate: {body}"));
+    let call_at = body.find("self.install_impl(true)").unwrap_or_else(|| {
+        panic!("FAIL-5's own frozen requirement: apply_update must force the reinstall: {body}")
+    });
+    assert!(
+        clear_at < call_at,
+        "clear_blocked(\"space_acres\") must run BEFORE the reinstall: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// BUG LOOP 2, item 6(b) (NB): the existing tests check only that
+// `next_install_is_user_gesture` is read before the first `.await`, and that
+// `store(true` appears in install_for_user/apply_update — neither ties
+// run_elevated's ACTUAL trigger argument to the flag's value, so an inverted
+// mapping (swap(false, ..) == true -> Automatic) or a hardcoded
+// `ElevationTrigger::UserClick` literal passed to run_elevated survives
+// every existing test.
+// ---------------------------------------------------------------------
+
+#[test]
+fn the_swap_true_branch_maps_to_user_click_and_false_to_automatic() {
+    let code = code_only(SPACE_ACRES_SRC);
+    let body = fn_body(
+        &code,
+        "async fn install_impl(&self, force: bool) -> Result<()> {",
+    );
+
+    let swap_at = body
+        .find(".swap(false,")
+        .unwrap_or_else(|| panic!("must read-and-reset the flag via swap(false, ..): {body}"));
+    let after_swap = &body[swap_at..];
+    let user_click_at = after_swap
+        .find("ElevationTrigger::UserClick")
+        .unwrap_or_else(|| panic!("UserClick must appear after the swap: {body}"));
+    let automatic_at = after_swap
+        .find("ElevationTrigger::Automatic")
+        .unwrap_or_else(|| panic!("Automatic must appear after the swap: {body}"));
+    assert!(
+        user_click_at < automatic_at,
+        "the swap's TRUE branch (the flag WAS set — a real user gesture) \
+         must map to UserClick and therefore appear textually first (the \
+         if-branch), before Automatic (the else-branch) — an inverted \
+         mapping would give the boot pass UserClick authority: {body}"
+    );
+}
+
+#[test]
+fn every_run_elevated_call_passes_the_computed_install_trigger_not_a_literal() {
+    let code = code_only(SPACE_ACRES_SRC);
+    let body = fn_body(
+        &code,
+        "async fn install_impl(&self, force: bool) -> Result<()> {",
+    );
+
+    let mut cursor = 0usize;
+    let mut checked = 0usize;
+    while let Some(rel) = body[cursor..].find("elevation_gate::run_elevated(") {
+        let at = cursor + rel;
+        cursor = at + "elevation_gate::run_elevated(".len();
+        let window = &body[at..(at + 300).min(body.len())];
+        assert!(
+            window.contains("install_trigger,"),
+            "every run_elevated call in install_impl must pass the computed \
+             install_trigger, not a hardcoded ElevationTrigger literal — a \
+             literal UserClick here would give an automatic caller user \
+             authority: {window}"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 1,
+        "control: must find at least one run_elevated call in install_impl: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// BUG LOOP 2, item 6(c) (NB): install_impl fetched the release and
+// downloaded the FULL installer before ever asking the gate — and Automatic
+// is ALWAYS refused, so an automatic path (boot recovery with SpaceAcres
+// enabled but not installed) downloaded on every single launch only to have
+// the gate refuse it every time.
+// ---------------------------------------------------------------------
+
+#[test]
+fn automatic_never_downloads_before_the_gate_refuses_it() {
+    let code = code_only(SPACE_ACRES_SRC);
+    let body = fn_body(
+        &code,
+        "async fn install_impl(&self, force: bool) -> Result<()> {",
+    );
+
+    let precheck_at = body
+        .find("ElevationTrigger::Automatic {")
+        .unwrap_or_else(|| {
+            panic!("install_impl must check install_trigger == Automatic before fetching/downloading: {body}")
+        });
+    let fetch_at = body.find("fetch_latest_release()").unwrap_or_else(|| {
+        panic!("install_impl must still fetch the release when allowed: {body}")
+    });
+    let download_at = body
+        .find("download_file_with_options(")
+        .unwrap_or_else(|| panic!("install_impl must still download when allowed: {body}"));
+
+    assert!(
+        precheck_at < fetch_at,
+        "the Automatic gate pre-check must run BEFORE fetch_latest_release — \
+         an automatic path must never call the GitHub API just to have the \
+         gate refuse the install: {body}"
+    );
+    assert!(
+        precheck_at < download_at,
+        "the Automatic gate pre-check must also run BEFORE the download: {body}"
+    );
+}
+
+/// The dropped-`?` mutant class (BUG LOOP 2 item 5): the pre-check's
+/// refusal must actually propagate, not just be present in the source.
+#[test]
+fn the_automatic_precheck_propagates_its_refusal() {
+    let code = code_only(SPACE_ACRES_SRC);
+    let body = fn_body(
+        &code,
+        "async fn install_impl(&self, force: bool) -> Result<()> {",
+    );
+
+    let precheck_at = body
+        .find("ElevationTrigger::Automatic {")
+        .expect("must exist — proven by the sibling test above");
+    let window = &body[precheck_at..(precheck_at + 400).min(body.len())];
+    assert!(
+        window.contains("run_elevated(") && window.contains(")?;"),
+        "the Automatic pre-check must propagate a refusal with `?`, not \
+         silently discard it: {window}"
+    );
+}

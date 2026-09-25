@@ -72,12 +72,23 @@ fn image_file_name(image: &Path) -> Option<String> {
     (!name.is_empty()).then(|| name.to_string())
 }
 
-/// PURE: does `haystack` (already lower-cased) carry `<EventID>id</EventID>`
-/// or an `id='...'` attribute equal to `id`? Shared by `event_names_our_image`
-/// and `event_is_enforced_block` so the two id lists are matched identically.
-fn xml_has_event_id(haystack_lowercased: &str, id: &str) -> bool {
-    haystack_lowercased.contains(&format!(">{id}<"))
-        || haystack_lowercased.contains(&format!("'{id}'"))
+/// PURE: the exact value of this event's `<EventID>` ELEMENT, if present.
+///
+/// BUG LOOP 2 (NB): the old matcher (`xml_has_event_id`, removed) checked
+/// whether `>{id}<` or `'{id}'` occurred ANYWHERE in the event XML — which
+/// also matches `<EventRecordID>3077</EventRecordID>`, a `Data Name='USN'`
+/// value of `3033`, a `ProcessID`/`ThreadID` attribute, or any other numeric
+/// field that happens to equal one of the ids this module cares about. A
+/// real 3076 AUDIT event (image allowed to load) whose EventRecordID or USN
+/// happened to be 3033/3077 was therefore read as an ENFORCED block — the
+/// exact FAIL-9 false positive, reached through a different field. Only the
+/// `<EventID>` element itself may decide this.
+fn event_id_element(event_xml: &str) -> Option<&str> {
+    let at = event_xml.find("<EventID>")?;
+    let start = at + "<EventID>".len();
+    let rest = &event_xml[start..];
+    let end = rest.find("</EventID>")?;
+    Some(rest[..end].trim())
 }
 
 /// PURE: does this event XML name the image we are asking about, and is it one
@@ -96,9 +107,10 @@ pub(crate) fn event_names_our_image(event_xml: &str, image: &Path) -> bool {
     if !haystack.contains(&name) {
         return false;
     }
-    QUERIED_EVENT_IDS
-        .iter()
-        .any(|id| xml_has_event_id(&haystack, id))
+    let Some(id) = event_id_element(event_xml) else {
+        return false;
+    };
+    QUERIED_EVENT_IDS.contains(&id)
 }
 
 /// PURE: did the OS actually refuse to load the image described by this
@@ -107,10 +119,10 @@ pub(crate) fn event_names_our_image(event_xml: &str, image: &Path) -> bool {
 /// their image (`event_names_our_image`); this only narrows audit vs.
 /// enforcement.
 fn event_is_enforced_block(event_xml: &str) -> bool {
-    let haystack = event_xml.to_lowercase();
-    ENFORCED_BLOCK_EVENT_IDS
-        .iter()
-        .any(|id| xml_has_event_id(&haystack, id))
+    let Some(id) = event_id_element(event_xml) else {
+        return false;
+    };
+    ENFORCED_BLOCK_EVENT_IDS.contains(&id)
 }
 
 /// How recent a block event has to be to describe the CURRENT state.

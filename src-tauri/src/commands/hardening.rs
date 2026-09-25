@@ -15,6 +15,25 @@
 
 use crate::elevation_gate::ElevationTrigger;
 
+/// BUG LOOP 2 (BLOCKING): the boot pass's Automatic refusal publishes into
+/// `elevation_gate::blocked_reasons()` (via `run_elevated`'s own
+/// `publish_block`) within microseconds of app setup — long before the
+/// webview has loaded, React has mounted, or the frontend's live
+/// `elevation-required` listener has registered. `events::emit` is
+/// fire-and-forget with no replay, so that boot-time publish was simply
+/// dropped and the Retry banner never appeared on a normal boot/update.
+///
+/// This is the pull half: called once on mount, it returns whatever the
+/// gate is CURRENTLY holding for "hardening", so a block that happened
+/// before any listener existed is not lost. No `AppState` needed —
+/// `blocked_reasons()` is a free function.
+#[tauri::command]
+pub async fn get_hardening_status() -> Result<Option<String>, String> {
+    Ok(crate::elevation_gate::blocked_reasons()
+        .get("hardening")
+        .cloned())
+}
+
 /// The ONLY hardening call site that may pass `UserClick`. Boot
 /// (main.rs) and the pre-update re-assert (updater_auto.rs) are unchanged —
 /// both still pass `Automatic`.
@@ -22,6 +41,15 @@ use crate::elevation_gate::ElevationTrigger;
 pub async fn retry_hardening(state: tauri::State<'_, crate::AppState>) -> Result<(), String> {
     let config = state.config.clone();
     tokio::task::block_in_place(move || {
+        // NB: re-arm the one allowed attempt on EVERY real gesture — the
+        // same pattern `toggle_integration` uses (commands/integration.rs,
+        // `clear_blocked`) for every other card. Without this, a declined or
+        // timed-out UAC prompt spends the current version's one attempt
+        // forever, and every later Retry click this run is a silent
+        // `AlreadyAttempted` no-op — exactly the B3 "retry gesture was a
+        // guaranteed no-op" shape `clear_blocked` exists to prevent.
+        crate::elevation_gate::clear_blocked("hardening");
+
         let current = env!("CARGO_PKG_VERSION");
         let exe_path = std::env::current_exe().map_err(|e| e.to_string())?;
         let install_dir = exe_path
