@@ -571,12 +571,14 @@ pub(crate) fn registration_funding_message(
     }
     let total_needed = required_spendable.saturating_add(min_balance);
     let short = total_needed.saturating_sub(amount);
+    // Whole 0.001 ALGO, rounded so that sending the figure shown is always
+    // enough: the shortfall and the total UP, the holdings DOWN.
     Err(format!(
         "{FUNDING_MARKER} — send {:.3} ALGO to {} (this device's wallet needs {:.3} ALGO total to register on-chain and holds {:.3} ALGO). fryDVPN registers automatically on the next check.",
-        short as f64 / 1_000_000.0,
+        short.div_ceil(1_000) as f64 / 1_000.0,
         address,
-        total_needed as f64 / 1_000_000.0,
-        amount as f64 / 1_000_000.0
+        total_needed.div_ceil(1_000) as f64 / 1_000.0,
+        (amount / 1_000) as f64 / 1_000.0
     ))
 }
 
@@ -2052,3 +2054,8 @@ mod fryvpn_bl2_notice_state_tests;
 #[cfg(test)]
 #[path = "fryvpn_shortfall_gate_tests.rs"]
 mod fryvpn_shortfall_gate_tests;
+
+/// c4 BUG LOOP 9 (B8): the "send X ALGO" figure is never below the shortfall.
+#[cfg(test)]
+#[path = "fryvpn_shortfall_precision_tests.rs"]
+mod fryvpn_shortfall_precision_tests;
