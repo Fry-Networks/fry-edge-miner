@@ -2083,3 +2083,8 @@ mod space_acres_launch_args_tests;
 #[cfg(test)]
 #[path = "space_acres_tree_stop_tests.rs"]
 mod space_acres_tree_stop_tests;
+
+/// c4 BUG LOOP 9 (B11): install_impl reads AND resets the user-gesture flag.
+#[cfg(test)]
+#[path = "space_acres_gesture_flag_reset_tests.rs"]
+mod space_acres_gesture_flag_reset_tests;
