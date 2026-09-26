@@ -339,6 +339,23 @@ pub(crate) fn funding_notice() -> Option<String> {
     WALLET_WATCH.lock().unwrap().heartbeat_shortfall.clone()
 }
 
+/// c4 BUG LOOP 4: a suppressed elevation's card line (`block`) with D-C4-2's
+/// shortfall appended while it is live. `applies` is the card's own gate for
+/// the notice — fryDVPN, enabled and Healthy — so a dead or disabled node's
+/// card still shows only its real state.
+pub(crate) fn with_heartbeat_shortfall(block: String, applies: bool) -> String {
+    join_shortfall(block, if applies { funding_notice() } else { None })
+}
+
+/// One line, the block first: the card condenses a multi-line error to a
+/// single line and would drop half of it.
+pub(crate) fn join_shortfall(block: String, shortfall: Option<String>) -> String {
+    match shortfall {
+        Some(shortfall) => format!("{block} · {shortfall}"),
+        None => block,
+    }
+}
+
 /// The payment frynode makes to fund this node's on-chain registry box —
 /// `defaultMBR` in the node's `registry` package. It is a real transfer out of
 /// the device wallet, not a fee, and leaving it out of the requirement is what

@@ -125,6 +125,9 @@ pub async fn get_integrations(
                 // Healthy-based so the UI matches what the PoC reporter actually
                 // submits (reporter proportion counts Healthy only).
                 let healthy = matches!(health, HealthStatus::Healthy);
+                // c4 BUG LOOP 4: the card's own gate for fryDVPN's heartbeat
+                // shortfall, also applied when a suppressed elevation leads.
+                let fryvpn_live = id == "fryvpn" && enabled && healthy;
 
                 IntegrationStatus {
                     id: id.clone(),
@@ -143,7 +146,7 @@ pub async fn get_integrations(
                     error: last_errors
                         .get(&id)
                         .and_then(|e| e.clone())
-                        .or_else(|| elevation_blocks.get(&id).cloned())
+                        .or_else(|| block_line(elevation_blocks.get(&id), fryvpn_live))
                         // D-C4-2: a registered fryDVPN node that cannot pay its
                         // next heartbeat. UI only — it never reaches `health`,
                         // so the PoC health map and reward scalars are untouched.
@@ -161,6 +164,15 @@ pub async fn get_integrations(
         .collect();
 
     Ok(statuses)
+}
+
+/// c4 BUG LOOP 4: a suppressed elevation still leads the card's warning line,
+/// but when fryDVPN's wallet also cannot pay its next heartbeat that shortfall
+/// is appended instead of hidden. FEM-FryNode's rule stays missing on every
+/// install the gate kept from elevating, and the block used to hide D-C4-2's
+/// notice for that whole time.
+fn block_line(block: Option<&String>, fryvpn_live: bool) -> Option<String> {
+    block.map(|b| crate::integrations::fryvpn::with_heartbeat_shortfall(b.clone(), fryvpn_live))
 }
 
 #[tauri::command]
@@ -939,3 +951,8 @@ mod fail1_docker_rearm_tests {
         );
     }
 }
+
+/// c4 BUG LOOP 4 (BL4-C): a suppressed elevation no longer hides the shortfall.
+#[cfg(test)]
+#[path = "integration_card_notice_order_tests.rs"]
+mod integration_card_notice_order_tests;
