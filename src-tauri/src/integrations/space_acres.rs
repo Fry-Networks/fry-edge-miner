@@ -56,6 +56,16 @@ pub struct ReleaseAsset {
 /// fast, reliable, no-shell-out liveness check for the common case (FEM
 /// started it) while the image-name probe remains the fallback for adoption
 /// (an instance FEM did not start, e.g. one Windows autostarted at login).
+/// c4 BUG LOOP 7: the arguments FEM launches SpaceAcres with — none. Upstream
+/// 0.2.x accepts only --startup / --after-crash / --child-process /
+/// --uninstall (its `--help`); anything else exits the process at once, which
+/// is what the old `--base-directory` did to every FEM start. With no
+/// arguments SpaceAcres starts exactly as its Start-menu entry does and keeps
+/// its own configuration in its default location.
+pub(crate) fn launch_args() -> &'static [&'static str] {
+    &[]
+}
+
 #[derive(Default)]
 pub struct SpaceAcresIntegration {
     child: Mutex<Option<std::process::Child>>,
@@ -972,9 +982,8 @@ impl Integration for SpaceAcresIntegration {
 
         info!(binary = ?binary, "Starting SpaceAcres");
 
-        // Spawn the process with a base directory argument
-        let base_dir = Self::partner_dir().join("data");
-        std::fs::create_dir_all(&base_dir)?;
+        // c4 BUG LOOP 7: no `--base-directory` — SpaceAcres 0.2.x has no such
+        // option, so every FEM start exited on the argument error.
 
         // BUG 3: run with the farmer's own bin directory as CWD, not FEM's.
         // A WiX Burn-managed app can rely on its CWD to locate sibling
@@ -982,7 +991,7 @@ impl Integration for SpaceAcresIntegration {
         // documented triggers for that kind of app's own self-verification
         // kicking off its Repair/Modify UI.
         let mut cmd = crate::supervisor::platform::command(&binary);
-        cmd.arg("--base-directory").arg(&base_dir);
+        cmd.args(launch_args());
         if let Some(bin_dir) = binary.parent() {
             cmd.current_dir(bin_dir);
         }
@@ -2028,3 +2037,8 @@ mod space_acres_exit_tests;
 #[cfg(test)]
 #[path = "space_acres_elevation_gate_tests.rs"]
 mod space_acres_elevation_gate_tests;
+
+/// c4 BUG LOOP 7: FEM launches SpaceAcres only with arguments it accepts.
+#[cfg(test)]
+#[path = "space_acres_launch_args_tests.rs"]
+mod space_acres_launch_args_tests;
