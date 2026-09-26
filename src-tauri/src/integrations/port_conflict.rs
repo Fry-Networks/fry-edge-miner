@@ -44,8 +44,29 @@ pub(crate) fn probe(port: u16) -> PortState {
     }
 }
 
+/// Bind only — never listen. `std::net::TcpListener::bind` is bind + listen,
+/// and listening on the wildcard address from fry-edge-miner.exe makes Windows
+/// Defender Firewall ask the user to allow Fry Edge Miner on public and
+/// private networks (c4 BUG LOOP 4). A bare bind reports a held port the same
+/// way and asks nothing. The socket options match std's `bind`: SO_REUSEADDR
+/// on Unix, so a closed listener's TIME_WAIT never reads as "held", and none
+/// on Windows, where it would let the probe share a live listener's port.
 fn bindable(addr: (&str, u16)) -> bool {
-    std::net::TcpListener::bind(addr).is_ok()
+    let Ok(ip) = addr.0.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    let socket = if ip.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()
+    } else {
+        tokio::net::TcpSocket::new_v6()
+    };
+    socket
+        .and_then(|s| {
+            #[cfg(unix)]
+            s.set_reuseaddr(true)?;
+            s.bind(std::net::SocketAddr::new(ip, addr.1))
+        })
+        .is_ok()
 }
 
 /// Resolve the listening owner of `port` through `netstat -ano` + `tasklist`.
@@ -144,3 +165,8 @@ pub(crate) fn conflict_reason(state: &PortState, port: u16) -> String {
 #[cfg(test)]
 #[path = "port_conflict_tests.rs"]
 mod port_conflict_tests;
+
+/// c4 BUG LOOP 4 (BL4-B): the probe binds, it never listens.
+#[cfg(test)]
+#[path = "port_probe_no_listen_tests.rs"]
+mod port_probe_no_listen_tests;
