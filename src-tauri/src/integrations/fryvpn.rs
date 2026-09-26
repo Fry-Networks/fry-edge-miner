@@ -344,7 +344,17 @@ pub(crate) fn funding_notice() -> Option<String> {
 /// the notice — fryDVPN, enabled and Healthy — so a dead or disabled node's
 /// card still shows only its real state.
 pub(crate) fn with_heartbeat_shortfall(block: String, applies: bool) -> String {
-    join_shortfall(block, if applies { funding_notice() } else { None })
+    with_heartbeat_shortfall_from(block, applies, funding_notice)
+}
+
+/// `with_heartbeat_shortfall` with the notice source injected, so the gate is
+/// testable without the process-wide wallet watch (c4 BUG LOOP 5, lens-1 NB).
+pub(crate) fn with_heartbeat_shortfall_from(
+    block: String,
+    applies: bool,
+    notice: impl FnOnce() -> Option<String>,
+) -> String {
+    join_shortfall(block, if applies { notice() } else { None })
 }
 
 /// One line, the block first: the card condenses a multi-line error to a
@@ -2037,3 +2047,8 @@ mod fryvpn_algod_budget_tests;
 #[cfg(test)]
 #[path = "fryvpn_bl2_notice_state_tests.rs"]
 mod fryvpn_bl2_notice_state_tests;
+
+/// c4 BUG LOOP 5 (lens-1 NB): the shortfall gate, with an injected notice.
+#[cfg(test)]
+#[path = "fryvpn_shortfall_gate_tests.rs"]
+mod fryvpn_shortfall_gate_tests;
