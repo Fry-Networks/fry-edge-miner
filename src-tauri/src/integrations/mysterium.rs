@@ -46,6 +46,23 @@ pub struct MysteriumIntegration {
 }
 
 impl MysteriumIntegration {
+    /// c4 BUG LOOP 6: one credentials read, no retries — Some(true) when the
+    /// device now has a Mysterium token, Some(false) when it still has none,
+    /// None when the read failed.
+    async fn token_present(&self) -> Option<bool> {
+        let cfg = self.config.get();
+        let miner_key = cfg.miner_key.as_deref()?;
+        match crate::api::credentials::lookup(&self.api_client, miner_key).await {
+            Ok(creds) => Some(
+                creds
+                    .mystnodes_user_token
+                    .as_deref()
+                    .is_some_and(|t| !t.is_empty()),
+            ),
+            Err(_) => None,
+        }
+    }
+
     fn partner_dir() -> PathBuf {
         partners_base_dir().join("mysterium")
     }
@@ -464,6 +481,17 @@ impl Integration for MysteriumIntegration {
             ) {
                 return HealthStatus::Unhealthy(TOKEN_NOT_PROVISIONED_REASON.to_string());
             }
+            // c4 BUG LOOP 6: the window expired. Re-read the credentials here
+            // rather than hand the supervisor a "not running" that spends its
+            // restart budget (only a Healthy result refunds it).
+            let expired = TOKEN_MISSING_SINCE.lock().unwrap().is_some();
+            if expired {
+                if still_missing_after_recheck(self.token_present().await) {
+                    *TOKEN_MISSING_SINCE.lock().unwrap() = Some(std::time::Instant::now());
+                    return HealthStatus::Unhealthy(TOKEN_NOT_PROVISIONED_REASON.to_string());
+                }
+                *TOKEN_MISSING_SINCE.lock().unwrap() = None;
+            }
             // BUG 9 (Discord: "toggle on, Installed, STARTING forever, 0%"):
             // a bare `Stopped` here — only ever reached while this integration
             // is ENABLED, since the caller short-circuits disabled ones before
@@ -564,6 +592,12 @@ pub(crate) const TOKEN_NOT_PROVISIONED_REASON: &str =
     "Mysterium node token not provisioned for this device — contact Fry support to provision \
      one; FEM checks again automatically every 10 minutes";
 
+/// c4 BUG LOOP 6: after a re-read of the credentials, is the token still
+/// missing? An unreadable read (None) keeps the last verdict.
+pub(crate) fn still_missing_after_recheck(present: Option<bool>) -> bool {
+    present != Some(true)
+}
+
 pub(crate) fn token_missing_recently(
     since: Option<std::time::Instant>,
     now: std::time::Instant,
@@ -639,3 +673,8 @@ mod mysterium_pin_tests;
 #[cfg(test)]
 #[path = "mysterium_token_state_tests.rs"]
 mod mysterium_token_state_tests;
+
+/// c4 BUG LOOP 6: an expired missing-token window re-checks, never crashes.
+#[cfg(test)]
+#[path = "mysterium_token_recheck_tests.rs"]
+mod mysterium_token_recheck_tests;
