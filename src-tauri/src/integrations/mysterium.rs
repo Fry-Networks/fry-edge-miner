@@ -407,16 +407,19 @@ impl Integration for MysteriumIntegration {
             cred_result.map_err(|e| anyhow::anyhow!("Failed to fetch credentials: {}", e))?;
 
         // Extract mystnodes_user_token — fail-closed if missing (no user-claimable fallback)
-        let token = creds
+        let Some(token) = creds
             .mystnodes_user_token
             .as_deref()
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "mystnodes_user_token not found or empty in device credentials — \
-                     contact support to provision a Mysterium token for this device"
-                )
-            })?;
+        else {
+            // c4 BUG LOOP 5: remembered so health_check can say what is
+            // actually wrong instead of "process is not running".
+            *TOKEN_MISSING_SINCE.lock().unwrap() = Some(std::time::Instant::now());
+            anyhow::bail!(
+                "mystnodes_user_token not found or empty in device credentials — \
+                 contact support to provision a Mysterium token for this device"
+            );
+        };
 
         let binary_str = binary.to_string_lossy().to_string();
         let token_arg = format!("--user.token={}", token);
@@ -429,6 +432,7 @@ impl Integration for MysteriumIntegration {
             sup.start_integration("mysterium", &binary_str, &args)
                 .map_err(|e| anyhow::anyhow!("Failed to spawn sdk_client: {}", e))?;
         }
+        *TOKEN_MISSING_SINCE.lock().unwrap() = None;
 
         info!("Mysterium SDK client started (token redacted)");
         Ok(())
@@ -452,6 +456,14 @@ impl Integration for MysteriumIntegration {
         };
 
         if !process_alive {
+            // c4 BUG LOOP 5: no process because start() refused to spawn it
+            // without a token is a setup state, not a crash.
+            if token_missing_recently(
+                *TOKEN_MISSING_SINCE.lock().unwrap(),
+                std::time::Instant::now(),
+            ) {
+                return HealthStatus::Unhealthy(TOKEN_NOT_PROVISIONED_REASON.to_string());
+            }
             // BUG 9 (Discord: "toggle on, Installed, STARTING forever, 0%"):
             // a bare `Stopped` here — only ever reached while this integration
             // is ENABLED, since the caller short-circuits disabled ones before
@@ -536,6 +548,29 @@ impl Integration for MysteriumIntegration {
     }
 }
 
+/// c4 BUG LOOP 5: when `start()` last refused to spawn sdk_client because the
+/// device credentials carry no Mysterium token. Cleared by a successful spawn.
+static TOKEN_MISSING_SINCE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// How long a missing token is reported as such. Afterwards health_check falls
+/// back to the plain not-running reason, which lets the supervisor run
+/// `start()` again — and `start()` re-fetches the credentials, so a token that
+/// support provisioned in the meantime is picked up without a user action.
+const TOKEN_RECHECK: Duration = Duration::from_secs(600);
+
+/// Contains the "node token not provisioned" AWAITING marker, so the card
+/// shows SETUP REQUIRED and the supervisor does not restart into it.
+pub(crate) const TOKEN_NOT_PROVISIONED_REASON: &str =
+    "Mysterium node token not provisioned for this device — contact Fry support to provision \
+     one; FEM checks again automatically every 10 minutes";
+
+pub(crate) fn token_missing_recently(
+    since: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    since.is_some_and(|at| now.saturating_duration_since(at) < TOKEN_RECHECK)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,3 +634,8 @@ mod tests {
 #[cfg(test)]
 #[path = "mysterium_pin_tests.rs"]
 mod mysterium_pin_tests;
+
+/// c4 BUG LOOP 5: a missing Mysterium token is reported as such, not as a crash.
+#[cfg(test)]
+#[path = "mysterium_token_state_tests.rs"]
+mod mysterium_token_state_tests;
