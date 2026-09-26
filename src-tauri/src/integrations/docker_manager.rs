@@ -791,6 +791,16 @@ pub async fn ensure_docker_no_install() -> Result<()> {
     ensure_docker_core(crate::elevation_gate::ElevationTrigger::Automatic, false).await
 }
 
+/// FAIL-13 (c4 BUG LOOP 4): may this caller fetch the Docker Desktop installer?
+///
+/// Only a real user gesture may. An Automatic caller (the boot recovery pass,
+/// a supervisor restart, a health tick) is refused by the elevation gate at the
+/// install step anyway, so a download on its behalf is a gesture-less ~600 MB
+/// fetch that can never be used — RC13 repeated it every few minutes.
+fn may_fetch_docker_installer(trigger: crate::elevation_gate::ElevationTrigger) -> bool {
+    trigger == crate::elevation_gate::ElevationTrigger::UserClick
+}
+
 async fn ensure_docker_core(
     trigger: crate::elevation_gate::ElevationTrigger,
     allow_install: bool,
@@ -824,6 +834,15 @@ async fn ensure_docker_core(
         }
         DockerStatus::NotInstalled => {
             if !allow_install {
+                anyhow::bail!(
+                    "Docker Desktop is not installed — enable this integration once (or use \
+                     its Settings action) to install it"
+                );
+            }
+            // FAIL-13 (c4 BUG LOOP 4): `allow_install` alone is not a gesture —
+            // `ensure_docker()` passes it on every automatic path, and this
+            // arm fetched the installer before the gate refused to run it.
+            if !may_fetch_docker_installer(trigger) {
                 anyhow::bail!(
                     "Docker Desktop is not installed — enable this integration once (or use \
                      its Settings action) to install it"
@@ -1158,3 +1177,8 @@ mod b19_probe_cache_ttl_tests {
 #[cfg(test)]
 #[path = "docker_manager_warn_once_tests.rs"]
 mod docker_manager_warn_once_tests;
+
+/// c4 BUG LOOP 4 (BL4-A): the installer download needs the caller's gesture.
+#[cfg(test)]
+#[path = "docker_gesture_download_tests.rs"]
+mod docker_gesture_download_tests;
