@@ -956,3 +956,8 @@ mod fail1_docker_rearm_tests {
 #[cfg(test)]
 #[path = "integration_card_notice_order_tests.rs"]
 mod integration_card_notice_order_tests;
+
+/// c4 BUG LOOP 5 (lens-1 NB): BL4-C mutant pins.
+#[cfg(test)]
+#[path = "integration_block_line_pins_tests.rs"]
+mod integration_block_line_pins_tests;

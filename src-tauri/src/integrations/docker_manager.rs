@@ -1182,3 +1182,8 @@ mod docker_manager_warn_once_tests;
 #[cfg(test)]
 #[path = "docker_gesture_download_tests.rs"]
 mod docker_gesture_download_tests;
+
+/// c4 BUG LOOP 5 (lens-1 NB): the caller's trigger reaches the core.
+#[cfg(test)]
+#[path = "docker_trigger_passthrough_tests.rs"]
+mod docker_trigger_passthrough_tests;
