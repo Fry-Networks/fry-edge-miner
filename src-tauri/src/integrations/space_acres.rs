@@ -66,6 +66,33 @@ pub(crate) fn launch_args() -> &'static [&'static str] {
     &[]
 }
 
+/// c4 BUG LOOP 8: `taskkill` arguments that stop `pid` and every process it
+/// started (the SpaceAcres supervisor and its `--child-process` farmer).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn kill_tree_args(pid: u32) -> [String; 4] {
+    [
+        "/PID".to_string(),
+        pid.to_string(),
+        "/T".to_string(),
+        "/F".to_string(),
+    ]
+}
+
+/// Stop a FEM-spawned SpaceAcres tree. Off Windows the tracked kill alone
+/// applies (no shipped target there).
+fn kill_tree(pid: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = crate::supervisor::platform::command("taskkill")
+            .args(kill_tree_args(pid))
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = pid;
+    }
+}
+
 #[derive(Default)]
 pub struct SpaceAcresIntegration {
     child: Mutex<Option<std::process::Child>>,
@@ -1025,6 +1052,9 @@ impl Integration for SpaceAcresIntegration {
         // image-name sweep for an adopted/untracked instance.
         let tracked = self.child.lock().ok().and_then(|mut g| g.take());
         if let Some(mut child) = tracked {
+            // c4 BUG LOOP 8: the tracked process is SpaceAcres' supervisor;
+            // the farmer runs as its --child-process. Stop the whole tree.
+            kill_tree(child.id());
             let _ = child.kill();
             let _ = tokio::task::spawn_blocking(move || child.wait()).await;
             info!("Stopped SpaceAcres (tracked child)");
@@ -1036,6 +1066,10 @@ impl Integration for SpaceAcresIntegration {
         {
             let _ = crate::supervisor::platform::command("taskkill")
                 .args(["/IM", "space-acres.exe", "/F"])
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
+            // c4 BUG LOOP 8: and the farmer the supervisor runs as a child.
+            let _ = crate::supervisor::platform::command("taskkill")
+                .args(["/IM", "space-acres-modern.exe", "/F"])
                 .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
         }
         #[cfg(not(target_os = "windows"))]
@@ -1055,6 +1089,8 @@ impl Integration for SpaceAcresIntegration {
     async fn stop_for_exit(&self) -> Result<()> {
         let tracked = self.child.lock().ok().and_then(|mut g| g.take());
         if let Some(mut child) = tracked {
+            // c4 BUG LOOP 8: the FEM-spawned supervisor and its farmer child.
+            kill_tree(child.id());
             let _ = child.kill();
             let _ = tokio::task::spawn_blocking(move || child.wait()).await;
             info!("Stopped SpaceAcres at exit (FEM-spawned instance)");
@@ -2042,3 +2078,8 @@ mod space_acres_elevation_gate_tests;
 #[cfg(test)]
 #[path = "space_acres_launch_args_tests.rs"]
 mod space_acres_launch_args_tests;
+
+/// c4 BUG LOOP 8: stopping SpaceAcres stops its farmer too.
+#[cfg(test)]
+#[path = "space_acres_tree_stop_tests.rs"]
+mod space_acres_tree_stop_tests;
