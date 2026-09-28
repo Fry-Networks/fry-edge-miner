@@ -111,11 +111,7 @@ fn valid_rule() -> Option<String> {
 
 /// A start with the rule missing: it succeeds, spawns nothing, parks nothing.
 fn start_without_rule(amount: u64, registry_box: RegistryBox) -> Scene {
-    let s = Scene::new(
-        World::new(amount, registry_box),
-        Endpoint::PortInline,
-        None,
-    );
+    let s = Scene::new(World::new(amount, registry_box), Endpoint::PortInline, None);
     set_rule(missing_rule());
     let started = s.block_on(s.integ.start());
     assert!(

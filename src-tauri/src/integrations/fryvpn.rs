@@ -498,7 +498,8 @@ pub(crate) const FIREWALL_SETUP_TEXT: &str =
 /// PURE (D-C5-2): the card line. The "Awaiting administrator action" marker
 /// in front is what makes the card read "Setup required" and keeps the
 /// supervisor from restarting (`integrations::awaits_user_action`). A
-/// registration shortfall follows on the same line (BL4-C layout).
+/// registration shortfall, or a registered node's heartbeat shortfall
+/// (D-C6-1), follows on the same line (BL4-C layout).
 pub(crate) fn firewall_setup_reason(registration_shortfall: Option<String>) -> String {
     join_shortfall(
         format!(
@@ -532,9 +533,10 @@ fn frynode_rule_verdict(binary: &str) -> super::firewall::RuleVerdict {
 }
 
 /// D-C5-2: enter the setup state, and on entry publish the banner the text
-/// points at. The health check adds a registration shortfall to the line. A
-/// funding park or registry wait already in place stays underneath, notice
-/// included (D-C5-6 variant C), and applies again once the rule is found.
+/// points at. The health check adds a registration or heartbeat shortfall to
+/// the line. A funding park or registry wait already in place stays
+/// underneath, notice included (D-C5-6 variant C), and applies again once the
+/// rule is found.
 fn park_for_firewall_rule(verdict: super::firewall::RuleVerdict) {
     let entering = PARKED_RULE_REASON
         .lock()
@@ -716,6 +718,19 @@ pub(crate) fn balance_unreadable_message(detail: &str) -> String {
 /// minimum fee (registry.go `simpleCall`, no extra fee).
 pub(crate) const HEARTBEAT_FEE_MICROALGOS: u64 = ALGORAND_MIN_FEE_MICROALGOS;
 
+/// PURE: the µALGO a wallet is short of its next heartbeat, or `None` when it
+/// can pay it — the ONE arithmetic behind both heartbeat texts.
+fn heartbeat_shortfall_microalgos(amount: u64, min_balance: u64) -> Option<u64> {
+    if spendable_microalgos(amount, min_balance) >= HEARTBEAT_FEE_MICROALGOS {
+        return None;
+    }
+    Some(
+        min_balance
+            .saturating_add(HEARTBEAT_FEE_MICROALGOS)
+            .saturating_sub(amount),
+    )
+}
+
 /// PURE (D-C4-2): the single notice a REGISTERED node shows while its wallet
 /// cannot pay its next heartbeat, or `None` when it can.
 ///
@@ -728,14 +743,25 @@ pub(crate) fn heartbeat_shortfall_message(
     min_balance: u64,
     address: &str,
 ) -> Option<String> {
-    if spendable_microalgos(amount, min_balance) >= HEARTBEAT_FEE_MICROALGOS {
-        return None;
-    }
-    let short = min_balance
-        .saturating_add(HEARTBEAT_FEE_MICROALGOS)
-        .saturating_sub(amount);
+    let short = heartbeat_shortfall_microalgos(amount, min_balance)?;
     Some(format!(
         "fryDVPN is running, but this node's wallet cannot pay the {1:.3} ALGO fee of its next heartbeat — send {0:.6} ALGO to {address}. The chain rejects each unpaid heartbeat and nothing is spent; heartbeats resume automatically once the wallet is funded.",
+        short as f64 / 1_000_000.0,
+        HEARTBEAT_FEE_MICROALGOS as f64 / 1_000_000.0
+    ))
+}
+
+/// PURE (D-C6-1): what a registered node waiting on its firewall rule shows
+/// after the setup text while its wallet cannot pay its next heartbeat, or
+/// `None` when it can. D-C4-2's figures, in D-C4-2's format.
+pub(crate) fn rule_park_heartbeat_suffix(
+    amount: u64,
+    min_balance: u64,
+    address: &str,
+) -> Option<String> {
+    let short = heartbeat_shortfall_microalgos(amount, min_balance)?;
+    Some(format!(
+        "This node's wallet also cannot pay the {1:.3} ALGO fee of its next heartbeat — send {0:.6} ALGO to {address}.",
         short as f64 / 1_000_000.0,
         HEARTBEAT_FEE_MICROALGOS as f64 / 1_000_000.0
     ))
@@ -818,8 +844,10 @@ pub(crate) enum FundingState {
     Unmeasurable(String),
     /// FAIL-2: the registry box shows this node is already registered, so
     /// there is no registration left to pay for and it starts whatever the
-    /// balance. Carries D-C4-2's heartbeat shortfall state, if any.
-    Registered(Option<String>),
+    /// balance. Carries D-C4-2's heartbeat shortfall state, if any, and
+    /// (D-C6-1) the text a firewall-rule wait appends for that same
+    /// shortfall; both come from the one balance read.
+    Registered(Option<String>, Option<String>),
     /// D-C5-6 (variant C): measured and short of the registration price, but
     /// the registry box read failed, so whether the node is registered is
     /// unknown. It changes nothing: a running node keeps running, a node not
@@ -993,11 +1021,10 @@ impl FryVpnIntegration {
                         Err(msg) => match Self::read_registration(&address, box_budget).await {
                             Registration::Registered => {
                                 info!("fryDVPN node is already registered on-chain - starting it without the registration funding gate");
-                                FundingState::Registered(heartbeat_shortfall_message(
-                                    amount,
-                                    min_balance,
-                                    &address,
-                                ))
+                                FundingState::Registered(
+                                    heartbeat_shortfall_message(amount, min_balance, &address),
+                                    rule_park_heartbeat_suffix(amount, min_balance, &address),
+                                )
                             }
                             // D-C5-6 (variant C): a failed read proves nothing,
                             // so it changes nothing.
@@ -1011,7 +1038,7 @@ impl FryVpnIntegration {
                             "Could not read the fryDVPN wallet balance"
                         );
                         match Self::read_registration(&address, box_budget).await {
-                            Registration::Registered => FundingState::Registered(None),
+                            Registration::Registered => FundingState::Registered(None, None),
                             Registration::Unregistered => {
                                 FundingState::UnmeasurableUnregistered(detail)
                             }
@@ -1029,7 +1056,7 @@ impl FryVpnIntegration {
                         FundingState::RegistrationUnknown | FundingState::Unmeasurable(_)
                     );
                     match &state {
-                        FundingState::Registered(shortfall) if measured => {
+                        FundingState::Registered(shortfall, _) if measured => {
                             watch.set_heartbeat_shortfall(shortfall.clone())
                         }
                         FundingState::Affordable => watch.set_heartbeat_shortfall(None),
@@ -1289,16 +1316,18 @@ impl Integration for FryVpnIntegration {
                 .unwrap_or(super::firewall::RuleVerdict::Unreadable);
             if rule != super::firewall::RuleVerdict::Admitted {
                 // An unregistered node short of the registration price shows
-                // that shortfall after the setup text; a registered node's
-                // heartbeat notice is not appended, as it describes a running
-                // node. The start just reset the backoff, so the first check
-                // reads the wallet, and later ones re-read it on the backoff
-                // (B7/B8: a figure on the card never freezes).
+                // that shortfall after the setup text; a registered node that
+                // cannot pay its next heartbeat shows D-C6-1's heartbeat text,
+                // from this check's own read. The start just reset the
+                // backoff, so the first check reads the wallet, and later ones
+                // re-read it on the backoff (B7/B8: a figure on the card never
+                // freezes).
                 if !WALLET_WATCH.lock().unwrap().read_due() {
                     return HealthStatus::Unhealthy(reason);
                 }
-                let shortfall = match self.resolve_funded_identity().await {
-                    Err(StartHold::Shortfall(msg)) => Some(msg),
+                let shortfall = match self.device_identity_and_funding().await {
+                    Some((_, FundingState::Underfunded(msg))) => Some(msg),
+                    Some((_, FundingState::Registered(_, heartbeat))) => heartbeat,
                     _ => None,
                 };
                 let line = firewall_setup_reason(shortfall);
@@ -2329,3 +2358,8 @@ mod fryvpn_c5_dc55_table_tests;
 #[cfg(test)]
 #[path = "fryvpn_c6_rule_park_heartbeat_tests.rs"]
 mod fryvpn_c6_rule_park_heartbeat_tests;
+
+/// Continuation #6, D-C6-1: the heartbeat text itself.
+#[cfg(test)]
+#[path = "fryvpn_c6_heartbeat_suffix_tests.rs"]
+mod fryvpn_c6_heartbeat_suffix_tests;
