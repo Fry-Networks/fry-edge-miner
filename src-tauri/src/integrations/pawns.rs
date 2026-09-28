@@ -1405,3 +1405,8 @@ mod pawns_anchored_consent_tests;
 #[cfg(test)]
 #[path = "pawns_no_install_docker_tests.rs"]
 mod pawns_no_install_docker_tests;
+
+/// c5 F7: pins R29-P1 and R29-P2 (start() always runs the no-install check).
+#[cfg(test)]
+#[path = "pawns_c5_start_pin_tests.rs"]
+mod pawns_c5_start_pin_tests;
