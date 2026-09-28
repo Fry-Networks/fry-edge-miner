@@ -170,3 +170,8 @@ mod port_conflict_tests;
 #[cfg(test)]
 #[path = "port_probe_no_listen_tests.rs"]
 mod port_probe_no_listen_tests;
+
+/// c5 F7: pins RC14-PROBE, RC14-REUSE and RC14-TRIP-a/b.
+#[cfg(test)]
+#[path = "port_conflict_c5_pin_tests.rs"]
+mod port_conflict_c5_pin_tests;
