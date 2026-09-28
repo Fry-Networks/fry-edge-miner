@@ -62,13 +62,30 @@ pub struct ReleaseAsset {
 /// is what the old `--base-directory` did to every FEM start. With no
 /// arguments SpaceAcres starts exactly as its Start-menu entry does and keeps
 /// its own configuration in its default location.
+///
+/// c5 D6: once SpaceAcres is configured it launches with `--startup` (upstream
+/// 0.2.21 main.rs:143-145, "Used for startup to minimize the window"); until
+/// then with nothing, so its setup window is visible.
 pub(crate) fn launch_args() -> &'static [&'static str] {
-    &[]
+    launch_args_for(space_acres_configured())
+}
+
+/// c5 D6: the launch arguments for a configured / unconfigured SpaceAcres.
+/// Pure so the table is testable.
+fn launch_args_for(configured: bool) -> &'static [&'static str] {
+    if configured {
+        &["--startup"]
+    } else {
+        &[]
+    }
 }
 
 /// c4 BUG LOOP 8: `taskkill` arguments that stop `pid` and every process it
 /// started (the SpaceAcres supervisor and its `--child-process` farmer).
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+///
+/// c5 D13: no longer on the stop path — `/T` also ends a browser SpaceAcres
+/// opened. Kept, unchanged, because an existing test pins its shape.
+#[allow(dead_code)]
 pub(crate) fn kill_tree_args(pid: u32) -> [String; 4] {
     [
         "/PID".to_string(),
@@ -80,17 +97,202 @@ pub(crate) fn kill_tree_args(pid: u32) -> [String; 4] {
 
 /// Stop a FEM-spawned SpaceAcres tree. Off Windows the tracked kill alone
 /// applies (no shipped target there).
-fn kill_tree(pid: u32) {
+///
+/// c5 D13: only SpaceAcres' own images are ended. BL8's `taskkill /T` ended
+/// every descendant, including a browser SpaceAcres opened for the owner.
+/// Returns whether SpaceAcres' processes could be listed; `false` means only
+/// `pid` was stopped here, so the caller must fall back to the image sweep.
+fn kill_tree(pid: u32) -> bool {
     #[cfg(target_os = "windows")]
     {
-        let _ = crate::supervisor::platform::command("taskkill")
-            .args(kill_tree_args(pid))
-            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
+        let query = owned_process_query();
+        let rows = crate::supervisor::platform::command("powershell")
+            .args(["-NoProfile", "-Command", query.as_str()])
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| parse_owned_rows(&String::from_utf8_lossy(&o.stdout)));
+        let pids = match &rows {
+            Some(rows) => owned_tree_pids(pid, rows),
+            None => vec![pid],
+        };
+        if !pids.is_empty() {
+            let _ = crate::supervisor::platform::command("taskkill")
+                .args(owned_kill_args(&pids))
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
+        }
+        rows.is_some()
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = pid;
+        true
     }
+}
+
+/// c5 D5: every image a running SpaceAcres shows — its supervisor and the
+/// farmer it runs as `--child-process` (upstream 0.2.21 names that child
+/// `space-acres-modern.exe` on CPUs with xsavec and reuses `space-acres.exe`
+/// otherwise).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const SPACE_ACRES_IMAGES: [&str; 2] = ["space-acres.exe", "space-acres-modern.exe"];
+
+/// c5 D5: whether a `tasklist` listing shows any SpaceAcres process. The
+/// probe matched only the supervisor, so a farmer left running without it
+/// read as stopped and FEM started a second one. Pure so it is testable off
+/// Windows.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn tasklist_shows_space_acres(listing: &str) -> bool {
+    let listing = listing.to_lowercase();
+    SPACE_ACRES_IMAGES
+        .iter()
+        .any(|image| listing.contains(image))
+}
+
+/// c5 D13: PowerShell that lists every SpaceAcres process as `pid,ppid,image`
+/// (single quotes only, so nothing needs escaping on the command line).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn owned_process_query() -> String {
+    let images = SPACE_ACRES_IMAGES.map(|i| format!("'{i}'")).join(",");
+    format!(
+        "Get-CimInstance Win32_Process | Where-Object {{ @({images}) -contains $_.Name }} | ForEach-Object {{ '{{0}},{{1}},{{2}}' -f $_.ProcessId,$_.ParentProcessId,$_.Name }}"
+    )
+}
+
+/// c5 D13: parse `owned_process_query`'s `pid,ppid,image` lines, skipping
+/// anything malformed. Pure so it is testable off Windows.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn parse_owned_rows(listing: &str) -> Vec<(u32, u32, String)> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.trim().splitn(3, ',');
+            let pid = fields.next()?.trim().parse().ok()?;
+            let ppid = fields.next()?.trim().parse().ok()?;
+            let image = fields.next()?.trim();
+            (!image.is_empty()).then(|| (pid, ppid, image.to_string()))
+        })
+        .collect()
+}
+
+/// c5 D13: `root` (when it is still listed) and every process it started,
+/// directly or through another SpaceAcres process, whose image is
+/// SpaceAcres' own. Root first, so the supervisor is gone before it can
+/// restart its farmer. A process of any other image (a browser) is neither
+/// returned nor walked through. The parent link survives the parent's exit on
+/// Windows, so a farmer orphaned by an exited supervisor is still found.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn owned_tree_pids(root: u32, rows: &[(u32, u32, String)]) -> Vec<u32> {
+    let owned = |image: &str| {
+        SPACE_ACRES_IMAGES
+            .iter()
+            .any(|i| i.eq_ignore_ascii_case(image))
+    };
+    let mut pids = Vec::new();
+    if rows
+        .iter()
+        .any(|(pid, _, image)| *pid == root && owned(image))
+    {
+        pids.push(root);
+    }
+    let mut seen = vec![root];
+    let mut frontier = vec![root];
+    while let Some(parent) = frontier.pop() {
+        for (pid, ppid, image) in rows {
+            if *ppid == parent && owned(image) && !seen.contains(pid) {
+                seen.push(*pid);
+                pids.push(*pid);
+                frontier.push(*pid);
+            }
+        }
+    }
+    pids
+}
+
+/// c5 D4: whether stopping the tracked child finished the job, so stop() can
+/// skip the image sweep. Not when the supervisor had already exited (a stale
+/// handle: its farmer may be running on its own) and not when SpaceAcres'
+/// processes could not be listed. Pure so the rule is testable.
+fn tracked_stop_is_complete(already_exited: bool, tree_known: bool) -> bool {
+    !already_exited && tree_known
+}
+
+/// c5 D13: `taskkill` arguments that force-stop exactly `pids` — never `/T`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn owned_kill_args(pids: &[u32]) -> Vec<String> {
+    let mut args = vec!["/F".to_string()];
+    for pid in pids {
+        args.push("/PID".to_string());
+        args.push(pid.to_string());
+    }
+    args
+}
+
+/// D-C5-1: what the SpaceAcres card says while SpaceAcres runs but its own
+/// setup is not finished. It earns nothing until then.
+pub(crate) const SETUP_REQUIRED_REASON: &str =
+    "Finish setup in the SpaceAcres window to start earning.";
+
+/// D-C5-1: where SpaceAcres keeps its own configuration — what upstream
+/// 0.2.21 resolves in src/backend/config.rs:96-114 (`dirs::config_local_dir()`
+/// joined with its package name and "config.json"), i.e.
+/// `%LOCALAPPDATA%\space-acres\config.json` on Windows.
+fn space_acres_config_path() -> Option<PathBuf> {
+    dirs::config_local_dir().map(|dir| dir.join("space-acres").join("config.json"))
+}
+
+/// D-C5-1: whether a SpaceAcres configuration holds a reward address and at
+/// least one farm (upstream 0.2.21 config.rs:67-81: JSON tagged
+/// `"version": "0"` with camelCase `rewardAddress` and `farms`). Anything
+/// unreadable counts as not configured. Pure so the rule is testable.
+fn configured_from(contents: &str) -> bool {
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(contents) else {
+        return false;
+    };
+    let address = config["rewardAddress"]
+        .as_str()
+        .is_some_and(|a| !a.trim().is_empty());
+    let farms = config["farms"].as_array().is_some_and(|f| !f.is_empty());
+    address && farms
+}
+
+/// D-C5-1: `configured_from` on the file at `path`; a missing file is not
+/// configured.
+fn configured_at(path: &std::path::Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|contents| configured_from(&contents))
+}
+
+/// D-C5-1: read fresh on every call — never cached — so an owner who finishes
+/// the setup window turns Healthy on the next health tick, with no restart.
+fn space_acres_configured() -> bool {
+    space_acres_config_path().is_some_and(|path| configured_at(&path))
+}
+
+/// D-C5-1: health once SpaceAcres is installed and its disk is fine. Not
+/// running is `Stopped`, so the supervisor starts it (with its setup window
+/// visible when it is not configured); running but not configured shows the
+/// setup text; only running and configured is Healthy. Pure so the table is
+/// testable.
+fn health_from(running: bool, configured: bool) -> HealthStatus {
+    if !running {
+        HealthStatus::Stopped
+    } else if !configured {
+        HealthStatus::Unhealthy(SETUP_REQUIRED_REASON.to_string())
+    } else {
+        HealthStatus::Healthy
+    }
+}
+
+/// D-C5-1: SpaceAcres proves activity only while it runs AND is configured.
+fn poa_from(running: bool, configured: bool) -> bool {
+    running && configured
+}
+
+/// D-C5-1: whether a supervisor restart must leave SpaceAcres alone: it is
+/// running its setup window (not configured yet), and stopping it would close
+/// the window the owner is filling in.
+fn restart_spares_the_setup_window(configured: bool, running: bool) -> bool {
+    !configured && running
 }
 
 #[derive(Default)]
@@ -239,26 +441,8 @@ fn precheck_applies(trigger: crate::elevation_gate::ElevationTrigger) -> bool {
 }
 
 #[cfg(test)]
-mod install_trigger_tests {
-    use super::*;
-    use crate::elevation_gate::ElevationTrigger;
-
-    #[test]
-    fn a_user_gesture_maps_to_user_click() {
-        assert_eq!(install_trigger_for(true), ElevationTrigger::UserClick);
-    }
-
-    #[test]
-    fn no_user_gesture_maps_to_automatic() {
-        assert_eq!(install_trigger_for(false), ElevationTrigger::Automatic);
-    }
-
-    #[test]
-    fn the_precheck_applies_only_to_automatic() {
-        assert!(precheck_applies(ElevationTrigger::Automatic));
-        assert!(!precheck_applies(ElevationTrigger::UserClick));
-    }
-}
+#[path = "space_acres_install_trigger_tests.rs"]
+mod install_trigger_tests;
 
 /// The PE section name WiX Burn stamps into every bootstrapper it builds.
 const BURN_SECTION_MARKER: &[u8] = b".wixburn";
@@ -697,11 +881,7 @@ impl SpaceAcresIntegration {
         {
             crate::supervisor::platform::command("tasklist")
                 .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
-                .map(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .to_lowercase()
-                        .contains("space-acres.exe")
-                })
+                .map(|o| tasklist_shows_space_acres(&String::from_utf8_lossy(&o.stdout)))
                 .unwrap_or(true)
         }
         #[cfg(not(target_os = "windows"))]
@@ -1052,13 +1232,22 @@ impl Integration for SpaceAcresIntegration {
         // image-name sweep for an adopted/untracked instance.
         let tracked = self.child.lock().ok().and_then(|mut g| g.take());
         if let Some(mut child) = tracked {
+            // c5 D4: a supervisor that already exited leaves a stale handle,
+            // and the farmer it started may still be running on its own.
+            // Asked before the kill, while the answer still means that.
+            let exited = matches!(child.try_wait(), Ok(Some(_)));
             // c4 BUG LOOP 8: the tracked process is SpaceAcres' supervisor;
             // the farmer runs as its --child-process. Stop the whole tree.
-            kill_tree(child.id());
+            let tree_known = kill_tree(child.id());
             let _ = child.kill();
             let _ = tokio::task::spawn_blocking(move || child.wait()).await;
-            info!("Stopped SpaceAcres (tracked child)");
-            return Ok(());
+            if tracked_stop_is_complete(exited, tree_known) {
+                info!("Stopped SpaceAcres (tracked child)");
+                return Ok(());
+            }
+            // c5 D13 / D4: the farmer could not be found by listing, or the
+            // tracked supervisor had already exited — sweep SpaceAcres'
+            // images below so no farmer is left running.
         }
 
         // Kill any running space-acres process (adoption fallback)
@@ -1081,6 +1270,19 @@ impl Integration for SpaceAcresIntegration {
 
         info!("Stopped SpaceAcres (image-name sweep — no tracked child)");
         Ok(())
+    }
+
+    /// D-C5-1: a supervisor restart never closes the SpaceAcres setup window.
+    /// Running but unconfigured reads as the setup text, which the health
+    /// loop restarts; stopping here would kill the window the owner is filling
+    /// in, so it is left alone and start() finds it already running. Anything
+    /// else stops as before.
+    async fn stop_for_restart(&self) -> Result<()> {
+        if restart_spares_the_setup_window(space_acres_configured(), self.is_running()) {
+            info!("SpaceAcres setup is not finished — leaving its window open");
+            return Ok(());
+        }
+        self.stop().await
     }
 
     /// FAIL-6: FEM quitting is not the owner turning SpaceAcres off. Stop only
@@ -1119,11 +1321,9 @@ impl Integration for SpaceAcresIntegration {
                 "No SSD detected — SpaceAcres performance degraded".to_string(),
             );
         }
-        if self.is_running() {
-            HealthStatus::Healthy
-        } else {
-            HealthStatus::Stopped
-        }
+        // D-C5-1: Healthy only while running AND configured, re-read on
+        // every tick.
+        health_from(self.is_running(), space_acres_configured())
     }
 
     async fn check_update(&self) -> Result<Option<String>> {
@@ -1216,7 +1416,7 @@ impl Integration for SpaceAcresIntegration {
 
     fn collect_poc_data(&self) -> PocGateData {
         PocGateData {
-            poa: self.is_running(),
+            poa: poa_from(self.is_running(), space_acres_configured()),
             ..Default::default()
         }
     }
@@ -2088,3 +2288,40 @@ mod space_acres_tree_stop_tests;
 #[cfg(test)]
 #[path = "space_acres_gesture_flag_reset_tests.rs"]
 mod space_acres_gesture_flag_reset_tests;
+
+/// c5 pins: the installer spawn runs inside its own gate call (M10b), and the
+/// Automatic download precheck is not negated (M28c).
+#[cfg(test)]
+#[path = "space_acres_c5_install_pins_tests.rs"]
+mod space_acres_c5_install_pins_tests;
+
+/// c5 D5: the liveness probe sees every SpaceAcres image.
+#[cfg(test)]
+#[path = "space_acres_c5_probe_tests.rs"]
+mod space_acres_c5_probe_tests;
+
+/// c5 D13: stopping SpaceAcres ends only SpaceAcres' own processes.
+#[cfg(test)]
+#[path = "space_acres_c5_owned_kill_tests.rs"]
+mod space_acres_c5_owned_kill_tests;
+
+/// c5 D4: a stale tracked handle falls through to the image sweep.
+#[cfg(test)]
+#[path = "space_acres_c5_stale_handle_tests.rs"]
+mod space_acres_c5_stale_handle_tests;
+
+/// c5 D-C5-1: Healthy and poa only while SpaceAcres is configured and alive.
+#[cfg(test)]
+#[path = "space_acres_c5_setup_tests.rs"]
+mod space_acres_c5_setup_tests;
+
+/// c5: pins for MUT's surviving space_acres.rs mutants (RC17-ARG/FMT, RC18-K4/K5)
+/// and their analogues on the D13 owned-image kill path.
+#[cfg(test)]
+#[path = "space_acres_c5_survivor_pins_tests.rs"]
+mod space_acres_c5_survivor_pins_tests;
+
+/// c5 D6: launch arguments follow the configuration.
+#[cfg(test)]
+#[path = "space_acres_c5_launch_state_tests.rs"]
+mod space_acres_c5_launch_state_tests;
