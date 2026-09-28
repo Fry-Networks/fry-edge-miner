@@ -82,6 +82,47 @@ fn a_running_node_keeps_running_when_its_rule_disappears() {
     run_scenario_on_frynode_port(module_path!(), "running_rule_gone");
 }
 
+/// The wallet read can take up to ~40 s; the rule is read after it, right
+/// before the spawn, so a rule that disappears meanwhile still stops it.
+#[test]
+fn the_rule_is_read_after_the_wallet_right_before_the_spawn() {
+    run_scenario(module_path!(), "rule_gone_during_wallet_read");
+}
+
+/// Variant C: entering the setup state does not wipe a funding park and its
+/// notice that were already there.
+#[test]
+fn entering_the_setup_state_keeps_an_existing_funding_park() {
+    run_scenario(module_path!(), "keeps_funding_park");
+}
+
+/// Entering the setup state asks the elevation gate for the hardening banner;
+/// like the old per-start rule step, that runs off the async task.
+#[test]
+fn the_setup_state_is_entered_off_the_async_task() {
+    let code: String = include_str!("fryvpn.rs")
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let calls: Vec<usize> = code
+        .match_indices("park_for_firewall_rule(")
+        .map(|(at, _)| at)
+        .filter(|&at| !code[..at].ends_with("fn "))
+        .collect();
+    assert!(
+        !calls.is_empty(),
+        "control: the setup state is entered somewhere"
+    );
+    for at in calls {
+        let window = &code[at.saturating_sub(120)..at];
+        assert!(
+            window.contains("spawn_blocking(") || window.contains("block_in_place("),
+            "park_for_firewall_rule runs on the async task at byte {at}: {window}"
+        );
+    }
+}
+
 #[test]
 #[ignore = "scenario entry point: the tests above run it in a child process"]
 fn child() {
@@ -103,6 +144,8 @@ fn child() {
         "registered_without_rule" => registered_without_rule(),
         "short_without_rule" => short_without_rule(),
         "rule_appears" => rule_appears(),
+        "rule_gone_during_wallet_read" => rule_gone_during_wallet_read(),
+        "keeps_funding_park" => keeps_funding_park(),
         #[cfg(not(windows))]
         "toggle_no_elevation" => toggle_no_elevation(),
         #[cfg(unix)]
@@ -389,4 +432,68 @@ fn running_rule_gone() {
         "a start on the running node leaves it running"
     );
     assert_eq!(s.block_on(s.integ.health_check()), HealthStatus::Healthy);
+}
+
+fn rule_gone_during_wallet_read() {
+    let s = Scene::new(
+        World {
+            account_delay: Duration::from_secs(3),
+            ..World::new(400_000, RegistryBox::Present)
+        },
+        Endpoint::PortInline,
+        None,
+    );
+    set_rule(valid_rule());
+    // The rule is deleted while start() waits on the wallet read.
+    let deleter = std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(1));
+        set_rule(missing_rule());
+    });
+    let started = s.block_on(s.integ.start());
+    deleter.join().expect("deleter");
+    assert!(
+        started.is_ok() && !Scene::spawn_attempted(&started),
+        "D-C5-2: a rule gone by the time of the spawn must stop it: {started:?}"
+    );
+    assert_setup_state(&s, SETUP, "rule gone during the wallet read");
+    s.assert_nothing_submitted();
+}
+
+fn keeps_funding_park() {
+    let s = Scene::new(
+        World::new(110_000, RegistryBox::Absent),
+        Endpoint::PortInline,
+        None,
+    );
+    set_rule(valid_rule());
+    let started = s.block_on(s.integ.start());
+    let notice = registration_message(110_000);
+    assert_eq!(s.parked(), Some(notice.clone()), "{started:?}");
+
+    // The rule disappears and a start meets the parked node.
+    set_rule(missing_rule());
+    let again = s.block_on(s.integ.start());
+    assert!(
+        again.is_ok() && !Scene::spawn_attempted(&again),
+        "{again:?}"
+    );
+    assert_eq!(
+        s.parked(),
+        Some(notice.clone()),
+        "entering the setup state must not wipe the funding park and its notice"
+    );
+    assert_eq!(
+        s.block_on(s.integ.health_check()),
+        HealthStatus::Unhealthy(format!("{SETUP} · {notice}")),
+        "the setup text leads, the shortfall follows"
+    );
+
+    // The rule is back: the funding park is still there, notice unchanged.
+    set_rule(valid_rule());
+    assert_eq!(
+        s.block_on(s.integ.health_check()),
+        HealthStatus::Unhealthy(notice.clone())
+    );
+    assert_eq!(s.parked(), Some(notice));
+    s.assert_nothing_submitted();
 }

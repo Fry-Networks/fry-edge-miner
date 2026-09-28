@@ -531,12 +531,11 @@ fn frynode_rule_verdict(binary: &str) -> super::firewall::RuleVerdict {
     )
 }
 
-/// D-C5-2: enter the setup state. It replaces any funding park or registry
-/// wait (the rule comes first), and on entry publishes the banner the text
-/// points at. The health check adds a registration shortfall to the line.
+/// D-C5-2: enter the setup state, and on entry publish the banner the text
+/// points at. The health check adds a registration shortfall to the line. A
+/// funding park or registry wait already in place stays underneath, notice
+/// included (D-C5-6 variant C), and applies again once the rule is found.
 fn park_for_firewall_rule(verdict: super::firewall::RuleVerdict) {
-    *PARKED_FUNDING_REASON.lock().unwrap() = None;
-    *AWAITING_REGISTRY_READ.lock().unwrap() = false;
     let entering = PARKED_RULE_REASON
         .lock()
         .unwrap()
@@ -1047,16 +1046,6 @@ impl FryVpnIntegration {
     async fn start_inner(&self) -> Result<()> {
         let binary = Self::binary_path()?;
 
-        // D-C5-2: frynode is never spawned while Windows Firewall has no rule
-        // letting it accept connections; spawning it anyway is what showed the
-        // Windows Security Alert. The check only reads the rule. Offloaded: it
-        // blocks for up to PROBE_TIMEOUT, the slot the old per-start rule
-        // step held in the toggle's 60 s bound.
-        let rule_binary = binary.clone();
-        let rule = tokio::task::spawn_blocking(move || frynode_rule_verdict(&rule_binary))
-            .await
-            .unwrap_or(super::firewall::RuleVerdict::Unreadable);
-
         // Build CLI flags for frynode
         let mut args = vec![
             "-registry-app-id".to_string(),
@@ -1107,6 +1096,17 @@ impl FryVpnIntegration {
         // FAIL-2: that was a fresh wallet read; the health loop's backoff
         // counts from it.
         WALLET_WATCH.lock().unwrap().restart_backoff();
+
+        // D-C5-2: frynode is never spawned while Windows Firewall has no rule
+        // letting it accept connections; spawning it anyway is what showed the
+        // Windows Security Alert. The check only reads the rule, and it runs
+        // after the wallet read (which can take ~40 s), right before the spawn.
+        // Offloaded: it blocks for up to PROBE_TIMEOUT, the slot the old
+        // per-start rule step held in the toggle's 60 s bound.
+        let rule_binary = binary.clone();
+        let rule = tokio::task::spawn_blocking(move || frynode_rule_verdict(&rule_binary))
+            .await
+            .unwrap_or(super::firewall::RuleVerdict::Unreadable);
         if rule != super::firewall::RuleVerdict::Admitted {
             // The rule gates spawning only: a node already running keeps running.
             let running = {
@@ -1114,7 +1114,9 @@ impl FryVpnIntegration {
                 matches!(sup.get_status("fryvpn"), HealthStatus::Healthy)
             };
             if !running {
-                park_for_firewall_rule(rule);
+                // Off the async task: entering asks the elevation gate for the
+                // hardening banner.
+                let _ = tokio::task::spawn_blocking(move || park_for_firewall_rule(rule)).await;
             }
             return Ok(());
         }
