@@ -106,7 +106,7 @@ fn the_missing_token_state_expires_so_a_provisioned_token_is_picked_up() {
     let now = Instant::now();
     assert!(!super::token_missing_recently(None, now));
     assert!(super::token_missing_recently(
-        Some(now - Duration::from_secs(60)),
+        Some(now.checked_sub(Duration::from_secs(60)).unwrap_or(now)),
         now
     ));
     assert!(!super::token_missing_recently(
