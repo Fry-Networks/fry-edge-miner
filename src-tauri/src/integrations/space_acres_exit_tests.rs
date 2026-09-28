@@ -62,9 +62,51 @@ async fn quitting_fem_leaves_a_space_acres_it_did_not_start_running() {
     let integration: &dyn Integration = &sa;
 
     // Positive control: the image-name sweep in stop() does reach this decoy.
+    // D9: the sweep is machine-wide, so it runs only while no SpaceAcres this
+    // test binary did not start is visible; otherwise the control fails loudly
+    // instead of killing the host's own SpaceAcres.
     let mut control = decoy(dir.path());
     std::thread::sleep(Duration::from_millis(300));
-    integration.stop().await.unwrap();
+    #[cfg(not(target_os = "windows"))]
+    let foreign: Vec<u32> = std::fs::read_dir("/proc")
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| {
+                    let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
+                    let (name, rest) = stat.split_once(" (")?.1.rsplit_once(") ")?;
+                    let ppid: u32 = rest.split_whitespace().nth(1)?.parse().ok()?;
+                    let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+                    (name == "space-acres" && ppid != std::process::id()).then_some(pid)
+                })
+                .collect()
+        })
+        .unwrap_or_else(|_| vec![0]);
+    #[cfg(target_os = "windows")]
+    let foreign: Vec<u32> = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "Get-CimInstance Win32_Process | Where-Object {{ @('space-acres.exe','space-acres-modern.exe') -contains $_.Name -and $_.ParentProcessId -ne {} }} | ForEach-Object {{ $_.ProcessId }}",
+                std::process::id()
+            ),
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|l| l.trim().parse().ok())
+                .collect()
+        })
+        .unwrap_or_else(|| vec![0]);
+    if foreign.is_empty() {
+        integration.stop().await.unwrap();
+    } else {
+        eprintln!("D9: not sweeping; a SpaceAcres this test did not start is running: {foreign:?}");
+    }
     assert!(
         !alive_after(&mut control),
         "control: stop()'s image sweep must reach the decoy"
