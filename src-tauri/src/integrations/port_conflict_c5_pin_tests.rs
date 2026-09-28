@@ -19,11 +19,19 @@ fn code_only(src: &str) -> String {
         .join("\n")
 }
 
-/// port_conflict.rs without its trailing test wiring.
+/// Every line of port_conflict.rs except its test-module wiring (the tests
+/// live in their own files), wherever a `#[cfg(test)]` happens to sit.
 fn product_code() -> String {
-    let code = code_only(include_str!("port_conflict.rs"));
-    let end = code.find("#[cfg(test)]").unwrap_or(code.len());
-    code[..end].to_string()
+    code_only(include_str!("port_conflict.rs"))
+        .lines()
+        .filter(|l| {
+            let l = l.trim();
+            l != "#[cfg(test)]"
+                && !l.starts_with("#[path = ")
+                && !(l.starts_with("mod ") && l.ends_with("_tests;"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn bindable_body() -> String {

@@ -11,8 +11,9 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-/// `TOKEN_MISSING_SINCE` is process-wide, so these tests take turns. An
-/// async mutex, because the turn is held across `health_check().await`.
+/// `TOKEN_MISSING_SINCE` and `TOKEN_CLOCK_SKEW` are process-wide, so these
+/// tests take turns. An async mutex, because the turn is held across
+/// `health_check().await`.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Synthetic device key.
@@ -68,11 +69,16 @@ fn mysterium(base_url: String, dir: &std::path::Path) -> MysteriumIntegration {
     }
 }
 
-/// A missing-token state whose 10-minute window has already run out. `None`
-/// only where the monotonic clock cannot reach that far back (a Windows host
-/// booted less than ~10 minutes ago).
-fn expired_state() -> Option<Instant> {
-    Instant::now().checked_sub(TOKEN_RECHECK + Duration::from_secs(1))
+/// Puts the process-wide missing-token state and clock back, even when a
+/// scenario panics.
+struct ResetTokenState;
+impl Drop for ResetTokenState {
+    fn drop(&mut self) {
+        *TOKEN_MISSING_SINCE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *TOKEN_CLOCK_SKEW.lock().unwrap_or_else(|e| e.into_inner()) = Duration::ZERO;
+    }
 }
 
 fn setup_required(status: &HealthStatus) -> bool {
@@ -92,16 +98,15 @@ async fn from_an_expired_window(
     scenario: impl AsyncFnOnce(&MysteriumIntegration, &AtomicUsize),
 ) {
     let _turn = SERIAL.lock().await;
-    let Some(expired) = expired_state() else {
-        eprintln!("skipped: this host's monotonic clock cannot reach 601 s back");
-        return;
-    };
+    let _reset = ResetTokenState;
     let dir = tempfile::tempdir().unwrap();
     let (base_url, reads) = credentials_stub(status, body);
     let m = mysterium(base_url, dir.path());
-    *TOKEN_MISSING_SINCE.lock().unwrap() = Some(expired);
+    // A refusal recorded now, then the clock moved one second past its
+    // window: forward, never back, so this runs the same on any host.
+    *TOKEN_MISSING_SINCE.lock().unwrap() = Some(token_clock());
+    *TOKEN_CLOCK_SKEW.lock().unwrap() = TOKEN_RECHECK + Duration::from_secs(1);
     scenario(&m, &reads).await;
-    *TOKEN_MISSING_SINCE.lock().unwrap() = None;
 }
 
 /// Still no token after the window: SETUP REQUIRED again (RC16-G negates the
