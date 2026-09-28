@@ -62,8 +62,22 @@ pub struct ReleaseAsset {
 /// is what the old `--base-directory` did to every FEM start. With no
 /// arguments SpaceAcres starts exactly as its Start-menu entry does and keeps
 /// its own configuration in its default location.
+///
+/// c5 D6: once SpaceAcres is configured it launches with `--startup` (upstream
+/// 0.2.21 main.rs:143-145, "Used for startup to minimize the window"); until
+/// then with nothing, so its setup window is visible.
 pub(crate) fn launch_args() -> &'static [&'static str] {
-    &[]
+    launch_args_for(space_acres_configured())
+}
+
+/// c5 D6: the launch arguments for a configured / unconfigured SpaceAcres.
+/// Pure so the table is testable.
+fn launch_args_for(configured: bool) -> &'static [&'static str] {
+    if configured {
+        &["--startup"]
+    } else {
+        &[]
+    }
 }
 
 /// c4 BUG LOOP 8: `taskkill` arguments that stop `pid` and every process it
@@ -2306,3 +2320,8 @@ mod space_acres_c5_setup_tests;
 #[cfg(test)]
 #[path = "space_acres_c5_survivor_pins_tests.rs"]
 mod space_acres_c5_survivor_pins_tests;
+
+/// c5 D6: launch arguments follow the configuration.
+#[cfg(test)]
+#[path = "space_acres_c5_launch_state_tests.rs"]
+mod space_acres_c5_launch_state_tests;
