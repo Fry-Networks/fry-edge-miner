@@ -2059,3 +2059,8 @@ mod fryvpn_shortfall_gate_tests;
 #[cfg(test)]
 #[path = "fryvpn_shortfall_precision_tests.rs"]
 mod fryvpn_shortfall_precision_tests;
+
+/// Continuation #5, D10: the scenario port guard binds without listening.
+#[cfg(test)]
+#[path = "fryvpn_c5_d10_tripwire_tests.rs"]
+mod fryvpn_c5_d10_tripwire_tests;
