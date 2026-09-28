@@ -678,3 +678,8 @@ mod mysterium_token_state_tests;
 #[cfg(test)]
 #[path = "mysterium_token_recheck_tests.rs"]
 mod mysterium_token_recheck_tests;
+
+/// c5 F7: pins RC15-LE, RC15-RECHK and RC16-A..G, L, M (the token re-check).
+#[cfg(test)]
+#[path = "mysterium_c5_recheck_tests.rs"]
+mod mysterium_c5_recheck_tests;
