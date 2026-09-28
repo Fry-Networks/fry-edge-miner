@@ -133,7 +133,7 @@ pub(crate) fn awaits_user_action(reason: &str) -> bool {
 ///
 /// Adding a marker cannot change the verdict for any string that lacks it, so
 /// every existing test stays green.
-pub(crate) const AWAITING_MARKERS: [&str; 7] = [
+pub(crate) const AWAITING_MARKERS: [&str; 9] = [
     "Awaiting Storj setup",
     "needs your consent",
     "node token not provisioned",
@@ -141,6 +141,8 @@ pub(crate) const AWAITING_MARKERS: [&str; 7] = [
     "Awaiting fryDVPN funding",
     "Awaiting administrator action",
     "waiting for that program to release it",
+    "Click Retry on the Security hardening banner to allow fryDVPN through Windows Firewall.",
+    "Finish setup in the SpaceAcres window to start earning.",
 ];
 
 /// B16: does this reason describe an UPSTREAM condition rather than a fault on
@@ -877,3 +879,7 @@ mod titan_vc_redist_timeout_gate_tests;
 #[cfg(test)]
 #[path = "partner_exit_adoption_tests.rs"]
 mod partner_exit_adoption_tests;
+
+#[cfg(test)]
+#[path = "mod_c6_cs_marker_tests.rs"]
+mod mod_c6_cs_marker_tests;

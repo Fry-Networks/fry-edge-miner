@@ -12,7 +12,9 @@ export const AWAITING_MARKERS = [
   'node account not funded',
   'Awaiting fryDVPN funding',
   'Awaiting administrator action',
-  'waiting for that program to release it'
+  'waiting for that program to release it',
+  'Click Retry on the Security hardening banner to allow fryDVPN through Windows Firewall.',
+  'Finish setup in the SpaceAcres window to start earning.'
 ] as const
 
 // c5 D-C5-1: an unconfigured SpaceAcres waits on its own setup wizard.
