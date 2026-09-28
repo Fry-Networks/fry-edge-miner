@@ -504,8 +504,8 @@ fn underfunded_unknown() {
         assert_eq!(
             s.parked(),
             None,
-            "{registry_box:?}: a registry read that failed is never taken as registered — the \
-             registration gate stands (start returned {started:?})"
+            "{registry_box:?}: a registry read that failed is never taken as registered, and a \
+             node that has not started waits, unparked (D-C5-6 variant C; start returned {started:?})"
         );
         assert!(started.is_ok(), "{registry_box:?}: {started:?}");
         assert!(s.reads(&box_path()) <= 1, "{registry_box:?}");
