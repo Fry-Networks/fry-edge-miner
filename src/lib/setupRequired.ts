@@ -15,8 +15,14 @@ export const AWAITING_MARKERS = [
   'waiting for that program to release it'
 ] as const
 
+// c5 D-C5-1: an unconfigured SpaceAcres waits on its own setup wizard.
+// Deliberately NOT in AWAITING_MARKERS (the parity-tested mirror of the Rust
+// list); matched with `includes` because the supervisor may append
+// "— automatic restarts paused; …" to the reason.
+export const SPACE_ACRES_SETUP_TEXT = 'Finish setup in the SpaceAcres window to start earning.'
+
 export function reasonAwaitsUserSetup(reason: string | null): boolean {
-  return !!reason && AWAITING_MARKERS.some((m) => reason.includes(m))
+  return !!reason && (AWAITING_MARKERS.some((m) => reason.includes(m)) || reason.includes(SPACE_ACRES_SETUP_TEXT))
 }
 
 /**
