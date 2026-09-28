@@ -35,20 +35,38 @@ fn the_installer_spawns_run_inside_the_installers_own_gate_call() {
         "expected the Automatic precheck AND the installer's own gate call:\n{body}"
     );
     let call = &body[gates[1]..];
-    let closure = call
+    let open = call
         .find("move || {")
         .unwrap_or_else(|| panic!("the installer's gate call must take a closure:\n{call}"));
     assert!(
-        call[..closure].contains("&attempt_key,"),
+        call[..open].contains("&attempt_key,"),
         "the installer's gate call must track the installer's own attempt key:\n{call}"
     );
+    // The closure's own brace span: from its `{` to the matching `}`.
+    let start = open + "move || ".len();
+    let mut depth = 0usize;
+    let mut end = None;
+    for (i, c) in call[start..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(start + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end.unwrap_or_else(|| panic!("the installer's closure must close:\n{call}"));
     for spawn in ["command(\"msiexec\")", "command(&installer)"] {
         let at = call
             .find(spawn)
             .unwrap_or_else(|| panic!("{spawn} must be spawned by the gate's closure:\n{body}"));
         assert!(
-            at > closure,
-            "{spawn} runs outside the installer's run_elevated closure:\n{body}"
+            start < at && at < end,
+            "{spawn} runs outside the installer's run_elevated closure:\n{call}"
         );
     }
 }
