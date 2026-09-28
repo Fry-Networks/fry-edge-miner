@@ -55,11 +55,12 @@ fn a_registered_node_with_its_rule_keeps_only_the_dc42_notice() {
 /// The lab example (amount 100_999, min 100_000) as the card shows it.
 #[test]
 fn every_rust_matcher_treats_the_combined_line_as_the_setup_line() {
-    let combined = "Awaiting administrator action — Click Retry on the Security hardening \
-                    banner to allow fryDVPN through Windows Firewall. · This node's wallet \
-                    also cannot pay the 0.001 ALGO fee of its next heartbeat — send 0.000001 \
-                    ALGO to FZOSX4K5D3I5ILTF7KQ2K45JAX2HANZHCE23BKMV2HQQ4KSEMIRL5DVCQM.";
-    for line in [SETUP, combined] {
+    let combined = format!(
+        "Awaiting administrator action — Click Retry on the Security hardening banner to \
+         allow fryDVPN through Windows Firewall. · This node's wallet also cannot pay the \
+         0.001 ALGO fee of its next heartbeat — send 0.000001 ALGO to {ADDR}."
+    );
+    for line in [SETUP, combined.as_str()] {
         assert!(crate::integrations::awaits_user_action(line), "{line}");
         assert!(!crate::integrations::upstream_unreachable(line), "{line}");
         assert_eq!(
@@ -74,7 +75,7 @@ fn every_rust_matcher_treats_the_combined_line_as_the_setup_line() {
             .filter(|m| line.contains(*m))
             .count()
     };
-    assert_eq!(markers(combined), markers(SETUP));
+    assert_eq!(markers(&combined), markers(SETUP));
 }
 
 #[test]

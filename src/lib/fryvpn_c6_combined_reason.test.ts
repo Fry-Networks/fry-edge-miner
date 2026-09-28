@@ -13,7 +13,7 @@ const SETUP =
   'Awaiting administrator action — Click Retry on the Security hardening banner to allow fryDVPN through Windows Firewall.'
 const COMBINED =
   SETUP +
-  " · This node's wallet also cannot pay the 0.001 ALGO fee of its next heartbeat — send 0.000001 ALGO to FZOSX4K5D3I5ILTF7KQ2K45JAX2HANZHCE23BKMV2HQQ4KSEMIRL5DVCQM."
+  " · This node's wallet also cannot pay the 0.001 ALGO fee of its next heartbeat — send 0.000001 ALGO to YTC4NR6IZHFMXTGNZ3H5BUOS2PKNLVWX3DM5VW643XPN7YHB4LRUS2CHMA."
 
 function card(reason: string) {
   return {

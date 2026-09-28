@@ -2,27 +2,30 @@
 //! its firewall rule shows after the setup line — D-C4-2's figures, in
 //! D-C4-2's format.
 
+use super::fryvpn_c4_support::ADDR;
 use super::*;
-
-const LAB_ADDR: &str = "FZOSX4K5D3I5ILTF7KQ2K45JAX2HANZHCE23BKMV2HQQ4KSEMIRL5DVCQM";
 
 #[test]
 fn the_lab_example_reads_exactly_as_ruled() {
-    let suffix = rule_park_heartbeat_suffix(100_999, 100_000, LAB_ADDR);
+    let suffix = rule_park_heartbeat_suffix(100_999, 100_000, ADDR);
     assert_eq!(
         suffix.as_deref(),
         Some(
-            "This node's wallet also cannot pay the 0.001 ALGO fee of its next heartbeat \
-             — send 0.000001 ALGO to FZOSX4K5D3I5ILTF7KQ2K45JAX2HANZHCE23BKMV2HQQ4KSEMIRL5DVCQM."
+            format!(
+                "This node's wallet also cannot pay the 0.001 ALGO fee of its next heartbeat \
+                 — send 0.000001 ALGO to {ADDR}."
+            )
+            .as_str()
         )
     );
     let line = firewall_setup_reason(suffix);
     assert_eq!(
         line,
-        "Awaiting administrator action — Click Retry on the Security hardening banner to \
-         allow fryDVPN through Windows Firewall. · This node's wallet also cannot pay the \
-         0.001 ALGO fee of its next heartbeat — send 0.000001 ALGO to \
-         FZOSX4K5D3I5ILTF7KQ2K45JAX2HANZHCE23BKMV2HQQ4KSEMIRL5DVCQM."
+        format!(
+            "Awaiting administrator action — Click Retry on the Security hardening banner to \
+             allow fryDVPN through Windows Firewall. · This node's wallet also cannot pay the \
+             0.001 ALGO fee of its next heartbeat — send 0.000001 ALGO to {ADDR}."
+        )
     );
     assert_eq!(line.chars().filter(|&c| c == '\u{2014}').count(), 2);
     assert_eq!(line.chars().filter(|&c| c == '\u{00B7}').count(), 1);
@@ -34,7 +37,7 @@ fn the_lab_example_reads_exactly_as_ruled() {
 fn the_fee_renders_from_the_heartbeat_constant() {
     let fee = format!("{:.3}", HEARTBEAT_FEE_MICROALGOS as f64 / 1_000_000.0);
     assert_eq!(fee, "0.001");
-    let suffix = rule_park_heartbeat_suffix(0, 0, LAB_ADDR).expect("an empty wallet is short");
+    let suffix = rule_park_heartbeat_suffix(0, 0, ADDR).expect("an empty wallet is short");
     assert!(
         suffix.contains(&format!("pay the {fee} ALGO fee")),
         "{suffix}"
@@ -58,11 +61,11 @@ fn the_figures_match_the_dc42_notice() {
         (101_000, 100_000, None),
         (400_000, 100_000, None),
     ] {
-        let dc42 = heartbeat_shortfall_message(amount, min_balance, LAB_ADDR);
-        let suffix = rule_park_heartbeat_suffix(amount, min_balance, LAB_ADDR);
+        let dc42 = heartbeat_shortfall_message(amount, min_balance, ADDR);
+        let suffix = rule_park_heartbeat_suffix(amount, min_balance, ADDR);
         assert_eq!(dc42.is_some(), suffix.is_some(), "{amount}/{min_balance}");
         if let (Some(dc42), Some(suffix)) = (dc42, suffix) {
-            let expected = format!("send {} ALGO to {LAB_ADDR}.", short.unwrap());
+            let expected = format!("send {} ALGO to {ADDR}.", short.unwrap());
             assert_eq!(send_tail(&dc42), expected, "{amount}/{min_balance}");
             assert_eq!(send_tail(&suffix), expected, "{amount}/{min_balance}");
         } else {
@@ -74,6 +77,6 @@ fn the_figures_match_the_dc42_notice() {
 #[test]
 fn a_wallet_that_can_pay_gets_no_suffix() {
     // Exactly one heartbeat spendable, and an Affordable wallet.
-    assert_eq!(rule_park_heartbeat_suffix(101_000, 100_000, LAB_ADDR), None);
-    assert_eq!(rule_park_heartbeat_suffix(400_000, 100_000, LAB_ADDR), None);
+    assert_eq!(rule_park_heartbeat_suffix(101_000, 100_000, ADDR), None);
+    assert_eq!(rule_park_heartbeat_suffix(400_000, 100_000, ADDR), None);
 }
