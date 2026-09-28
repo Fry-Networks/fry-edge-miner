@@ -2070,3 +2070,9 @@ mod space_acres_tree_stop_tests;
 #[cfg(test)]
 #[path = "space_acres_gesture_flag_reset_tests.rs"]
 mod space_acres_gesture_flag_reset_tests;
+
+/// c5 pins: the installer spawn runs inside its own gate call (M10b), and the
+/// Automatic download precheck is not negated (M28c).
+#[cfg(test)]
+#[path = "space_acres_c5_install_pins_tests.rs"]
+mod space_acres_c5_install_pins_tests;
