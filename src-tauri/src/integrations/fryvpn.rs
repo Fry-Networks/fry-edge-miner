@@ -2294,3 +2294,8 @@ mod fryvpn_c5_unknown_registration_tests;
 #[cfg(test)]
 #[path = "fryvpn_c5_rule_gate_tests.rs"]
 mod fryvpn_c5_rule_gate_tests;
+
+/// Continuation #5, D-C5-5: the funding card's figures, as a case table.
+#[cfg(test)]
+#[path = "fryvpn_c5_dc55_table_tests.rs"]
+mod fryvpn_c5_dc55_table_tests;
