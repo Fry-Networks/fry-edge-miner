@@ -247,19 +247,27 @@ fn a_restart_spares_only_a_running_unconfigured_space_acres() {
     assert!(!restart_spares_the_setup_window(true, false));
 }
 
+/// A long-lived stand-in for the SpaceAcres process, on every CI platform.
+fn stand_in() -> std::process::Child {
+    #[cfg(not(target_os = "windows"))]
+    let child = std::process::Command::new("sleep").arg("30").spawn();
+    #[cfg(target_os = "windows")]
+    let child = std::process::Command::new("ping")
+        .args(["-n", "30", "127.0.0.1"])
+        .spawn();
+    child.expect("spawn a stand-in process")
+}
+
 /// F1: a configuration written while SpaceAcres runs turns it Healthy on the
-/// next evaluation — same process, no stop, no start.
+/// next evaluation — the supervisor then has nothing to restart, and while
+/// the owner was still in setup a restart left the process alone.
 #[test]
 fn a_configuration_written_while_space_acres_runs_turns_it_healthy_without_a_restart() {
+    use crate::supervisor::health::{recovery_action, RecoveryAction};
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.json");
     let sa = SpaceAcresIntegration::default();
-    let running = std::process::Command::new("sleep")
-        .arg("30")
-        .spawn()
-        .expect("spawn a stand-in process");
-    let pid = running.id();
-    *sa.child.lock().unwrap() = Some(running);
+    *sa.child.lock().unwrap() = Some(stand_in());
     assert!(sa.is_running(), "control: the tracked stand-in runs");
 
     // The owner is still in the setup window.
@@ -281,8 +289,20 @@ fn a_configuration_written_while_space_acres_runs_turns_it_healthy_without_a_res
     );
     assert!(poa_from(sa.is_running(), configured_at(&config)));
 
-    let same = sa.child.lock().unwrap().as_ref().map(|c| c.id());
-    assert_eq!(same, Some(pid), "the same process, never restarted");
+    assert_eq!(
+        recovery_action(
+            &health_from(sa.is_running(), configured_at(&config)),
+            true,
+            0,
+            6
+        ),
+        RecoveryAction::None,
+        "a configured, running SpaceAcres must give the supervisor nothing to restart"
+    );
+    assert!(
+        !restart_spares_the_setup_window(configured_at(&config), sa.is_running()),
+        "once configured, a restart is an ordinary one again"
+    );
     let tracked = sa.child.lock().unwrap().take();
     if let Some(mut c) = tracked {
         let _ = c.kill();
