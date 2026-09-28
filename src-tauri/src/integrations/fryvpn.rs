@@ -473,6 +473,13 @@ static PARKED_FUNDING_REASON: Mutex<Option<String>> = Mutex::new(None);
 /// `PARKED_FUNDING_REASON`.
 static AWAITING_REGISTRY_READ: Mutex<bool> = Mutex::new(false);
 
+/// Test-only seam for D-C5-2: the firewall rule listing a scenario hands the
+/// start path in place of Windows (outer `None`: not injected; `Some(None)`:
+/// the listing could not be read).
+#[cfg(test)]
+#[allow(dead_code)]
+pub(super) static FRYNODE_RULE_LISTING_FOR_TEST: Mutex<Option<Option<String>>> = Mutex::new(None);
+
 /// FAIL-2: the health loop reads the wallet at most every 10th check — 5 min
 /// at the supervisor's 30 s interval, which is also frynode's default
 /// heartbeat interval — so a funded wallet is seen within that bound.
