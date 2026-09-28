@@ -9,8 +9,6 @@
 //! free; and listening on the wildcard raises the Defender Firewall prompt.
 //! Neither is observable on Linux, so they are pinned on the code itself.
 
-use super::*;
-
 /// Comments stripped, so these pins read code and not prose.
 fn code_only(src: &str) -> String {
     src.lines()
@@ -50,6 +48,7 @@ fn bindable_body() -> String {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_holder_on_one_other_address_is_not_free() {
+    use super::*;
     let holder =
         std::net::TcpListener::bind("127.0.0.2:0").expect("127.0.0.2 is loopback on Linux");
     let port = holder.local_addr().unwrap().port();
