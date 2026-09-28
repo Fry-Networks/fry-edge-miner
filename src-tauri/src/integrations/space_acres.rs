@@ -2300,3 +2300,9 @@ mod space_acres_c5_stale_handle_tests;
 #[cfg(test)]
 #[path = "space_acres_c5_setup_tests.rs"]
 mod space_acres_c5_setup_tests;
+
+/// c5: pins for MUT's surviving space_acres.rs mutants (RC17-ARG/FMT, RC18-K4/K5)
+/// and their analogues on the D13 owned-image kill path.
+#[cfg(test)]
+#[path = "space_acres_c5_survivor_pins_tests.rs"]
+mod space_acres_c5_survivor_pins_tests;
