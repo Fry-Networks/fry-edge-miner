@@ -7,8 +7,11 @@
 //! The guard's body is Windows-only, so this reads its source: on Linux the
 //! body is never compiled, and a behavioural test could not see a listen.
 
-fn guard_body() -> String {
-    let src = include_str!("fryvpn_c4_support.rs");
+/// The guard's body, whitespace removed. The source is read with `\n` line
+/// ends first: a Windows checkout (core.autocrlf) hands `include_str!` CRLF,
+/// and the closing-brace search below is anchored on `\n`.
+fn guard_body_in(src: &str) -> String {
+    let src = src.replace("\r\n", "\n");
     let start = src
         .find("pub(super) fn require_frynode_port_free()")
         .expect("the scenario port guard still exists");
@@ -22,6 +25,24 @@ fn guard_body() -> String {
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect()
+}
+
+fn guard_body() -> String {
+    guard_body_in(include_str!("fryvpn_c4_support.rs"))
+}
+
+/// BL-C5-3: RC19's Windows CI checked the source out with CRLF line ends,
+/// and the scan never found the guard's closing brace.
+#[test]
+fn a_crlf_checkout_is_scanned_like_an_lf_one() {
+    let lf = include_str!("fryvpn_c4_support.rs").replace("\r\n", "\n");
+    let crlf = lf.replace('\n', "\r\n");
+    let body = guard_body_in(&lf);
+    assert!(
+        body.starts_with("pub(super)fnrequire_frynode_port_free()"),
+        "{body}"
+    );
+    assert_eq!(guard_body_in(&crlf), body);
 }
 
 #[test]
