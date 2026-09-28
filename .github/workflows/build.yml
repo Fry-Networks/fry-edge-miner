@@ -50,7 +50,7 @@ jobs:
         # re-resolves transitive deps against latest, and on 2026-08-07 a fresh
         # zune-jpeg failed to compile on the runner ("macro expansion ends with
         # an incomplete expression"), breaking a build whose app code was fine.
-        run: cargo install tauri-cli --version "^2" --locked
+        run: cargo install tauri-cli --version "=2.12.0" --locked
 
       # The repo's tripwire tests (MSI fail-closed gate, elevation hygiene,
       # bundle targets) only have value if something runs them. Gates run
