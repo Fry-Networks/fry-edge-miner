@@ -195,6 +195,14 @@ fn owned_tree_pids(root: u32, rows: &[(u32, u32, String)]) -> Vec<u32> {
     pids
 }
 
+/// c5 D4: whether stopping the tracked child finished the job, so stop() can
+/// skip the image sweep. Not when the supervisor had already exited (a stale
+/// handle: its farmer may be running on its own) and not when SpaceAcres'
+/// processes could not be listed. Pure so the rule is testable.
+fn tracked_stop_is_complete(already_exited: bool, tree_known: bool) -> bool {
+    !already_exited && tree_known
+}
+
 /// c5 D13: `taskkill` arguments that force-stop exactly `pids` — never `/T`.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn owned_kill_args(pids: &[u32]) -> Vec<String> {
@@ -1143,17 +1151,22 @@ impl Integration for SpaceAcresIntegration {
         // image-name sweep for an adopted/untracked instance.
         let tracked = self.child.lock().ok().and_then(|mut g| g.take());
         if let Some(mut child) = tracked {
+            // c5 D4: a supervisor that already exited leaves a stale handle,
+            // and the farmer it started may still be running on its own.
+            // Asked before the kill, while the answer still means that.
+            let exited = matches!(child.try_wait(), Ok(Some(_)));
             // c4 BUG LOOP 8: the tracked process is SpaceAcres' supervisor;
             // the farmer runs as its --child-process. Stop the whole tree.
             let tree_known = kill_tree(child.id());
             let _ = child.kill();
             let _ = tokio::task::spawn_blocking(move || child.wait()).await;
-            if tree_known {
+            if tracked_stop_is_complete(exited, tree_known) {
                 info!("Stopped SpaceAcres (tracked child)");
                 return Ok(());
             }
-            // c5 D13: the farmer could not be found by listing, so only the
-            // supervisor was stopped — sweep SpaceAcres' images below.
+            // c5 D13 / D4: the farmer could not be found by listing, or the
+            // tracked supervisor had already exited — sweep SpaceAcres'
+            // images below so no farmer is left running.
         }
 
         // Kill any running space-acres process (adoption fallback)
@@ -2199,3 +2212,8 @@ mod space_acres_c5_probe_tests;
 #[cfg(test)]
 #[path = "space_acres_c5_owned_kill_tests.rs"]
 mod space_acres_c5_owned_kill_tests;
+
+/// c5 D4: a stale tracked handle falls through to the image sweep.
+#[cfg(test)]
+#[path = "space_acres_c5_stale_handle_tests.rs"]
+mod space_acres_c5_stale_handle_tests;
