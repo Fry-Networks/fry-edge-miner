@@ -342,6 +342,13 @@ pub(crate) fn funding_notice() -> Option<String> {
     WALLET_WATCH.lock().unwrap().heartbeat_shortfall.clone()
 }
 
+/// Test-only: put D-C4-2's notice in place, for card tests that run in a
+/// child process of their own.
+#[cfg(test)]
+pub(crate) fn set_funding_notice_for_test(notice: Option<String>) {
+    WALLET_WATCH.lock().unwrap().heartbeat_shortfall = notice;
+}
+
 /// c4 BUG LOOP 4: a suppressed elevation's card line (`block`) with D-C4-2's
 /// shortfall appended while it is live. `applies` is the card's own gate for
 /// the notice — fryDVPN, enabled and Healthy — so a dead or disabled node's
