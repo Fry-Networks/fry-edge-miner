@@ -141,6 +141,29 @@ pub(crate) fn should_warn_on_spawn_failure(previous_spawn_failed: bool) -> bool 
     !previous_spawn_failed
 }
 
+/// The installed copy the previous CLI resolution picked (`None` = the bare
+/// name). Kept apart from `DOCKER_CLI_CACHE`, which the TTL and a failed spawn
+/// both drop.
+static DOCKER_CLI_LAST_RESOLVED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// D12: record this resolution, and WARN only when the installed copy in use
+/// is new since the previous one — first used, changed, or used again after
+/// the CLI was back on PATH. It used to WARN on every re-resolution, so a lab
+/// probe logged the same path once per 600 s cache refresh; a repeat is debug.
+fn note_resolved_cli(last: &std::sync::Mutex<Option<PathBuf>>, resolved: Option<&std::path::Path>) {
+    let previous = last
+        .lock()
+        .map(|mut l| std::mem::replace(&mut *l, resolved.map(std::path::Path::to_path_buf)))
+        .unwrap_or_default();
+    if let Some(path) = resolved {
+        if previous.as_deref() != Some(path) {
+            warn!(path = ?path, "Docker CLI is not on this process's PATH — using the installed copy");
+        } else {
+            tracing::debug!(path = ?path, "Docker CLI is not on this process's PATH (repeat)");
+        }
+    }
+}
+
 /// A `Command` for the docker CLI, resolved to an absolute path when the bare
 /// name is not spawnable. Drop-in for `platform::command("docker")`.
 pub fn docker_command() -> std::process::Command {
@@ -167,9 +190,7 @@ pub fn docker_command() -> std::process::Command {
         .unwrap_or(false);
 
     let resolved = pick_docker_cli(on_path, &docker_cli_candidates());
-    if let Some(path) = resolved.as_ref() {
-        warn!(path = ?path, "Docker CLI is not on this process's PATH — using the installed copy");
-    }
+    note_resolved_cli(&DOCKER_CLI_LAST_RESOLVED, resolved.as_deref());
     if let Ok(mut guard) = DOCKER_CLI_CACHE.lock() {
         *guard = Some((resolved.clone(), std::time::Instant::now()));
     }
@@ -1191,3 +1212,13 @@ mod docker_refusal_text_c5_tests;
 #[cfg(test)]
 #[path = "docker_guard_c5_tests.rs"]
 mod docker_guard_c5_tests;
+
+/// c5 D12: the "not on PATH" WARN fires once per state, not per refresh.
+#[cfg(test)]
+#[path = "docker_cli_warn_once_c5_tests.rs"]
+mod docker_cli_warn_once_c5_tests;
+
+/// c5 D12: docker_command routes every resolution through that gate.
+#[cfg(test)]
+#[path = "docker_cli_warn_wiring_c5_tests.rs"]
+mod docker_cli_warn_wiring_c5_tests;
