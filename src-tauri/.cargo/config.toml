@@ -15,3 +15,9 @@
 # fails the build if the linkage drifts again regardless of the reason.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# DIAGNOSTIC ONLY (continuation #5, BL-C5-4): ask tauri-build for the hybrid
+# CRT (static vcruntime, dynamic UCRT) that tauri-cli 2.11.x requested by
+# setting STATIC_VCRUNTIME=true and 2.12.0 no longer does. Not for merge.
+[env]
+STATIC_VCRUNTIME = "true"
