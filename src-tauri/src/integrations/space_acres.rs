@@ -68,7 +68,10 @@ pub(crate) fn launch_args() -> &'static [&'static str] {
 
 /// c4 BUG LOOP 8: `taskkill` arguments that stop `pid` and every process it
 /// started (the SpaceAcres supervisor and its `--child-process` farmer).
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+///
+/// c5 D13: no longer on the stop path — `/T` also ends a browser SpaceAcres
+/// opened. Kept, unchanged, because an existing test pins its shape.
+#[allow(dead_code)]
 pub(crate) fn kill_tree_args(pid: u32) -> [String; 4] {
     [
         "/PID".to_string(),
@@ -80,16 +83,36 @@ pub(crate) fn kill_tree_args(pid: u32) -> [String; 4] {
 
 /// Stop a FEM-spawned SpaceAcres tree. Off Windows the tracked kill alone
 /// applies (no shipped target there).
-fn kill_tree(pid: u32) {
+///
+/// c5 D13: only SpaceAcres' own images are ended. BL8's `taskkill /T` ended
+/// every descendant, including a browser SpaceAcres opened for the owner.
+/// Returns whether SpaceAcres' processes could be listed; `false` means only
+/// `pid` was stopped here, so the caller must fall back to the image sweep.
+fn kill_tree(pid: u32) -> bool {
     #[cfg(target_os = "windows")]
     {
-        let _ = crate::supervisor::platform::command("taskkill")
-            .args(kill_tree_args(pid))
-            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
+        let query = owned_process_query();
+        let rows = crate::supervisor::platform::command("powershell")
+            .args(["-NoProfile", "-Command", query.as_str()])
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| parse_owned_rows(&String::from_utf8_lossy(&o.stdout)));
+        let pids = match &rows {
+            Some(rows) => owned_tree_pids(pid, rows),
+            None => vec![pid],
+        };
+        if !pids.is_empty() {
+            let _ = crate::supervisor::platform::command("taskkill")
+                .args(owned_kill_args(&pids))
+                .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT);
+        }
+        rows.is_some()
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = pid;
+        true
     }
 }
 
@@ -110,6 +133,77 @@ fn tasklist_shows_space_acres(listing: &str) -> bool {
     SPACE_ACRES_IMAGES
         .iter()
         .any(|image| listing.contains(image))
+}
+
+/// c5 D13: PowerShell that lists every SpaceAcres process as `pid,ppid,image`
+/// (single quotes only, so nothing needs escaping on the command line).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn owned_process_query() -> String {
+    let images = SPACE_ACRES_IMAGES.map(|i| format!("'{i}'")).join(",");
+    format!(
+        "Get-CimInstance Win32_Process | Where-Object {{ @({images}) -contains $_.Name }} | ForEach-Object {{ '{{0}},{{1}},{{2}}' -f $_.ProcessId,$_.ParentProcessId,$_.Name }}"
+    )
+}
+
+/// c5 D13: parse `owned_process_query`'s `pid,ppid,image` lines, skipping
+/// anything malformed. Pure so it is testable off Windows.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn parse_owned_rows(listing: &str) -> Vec<(u32, u32, String)> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.trim().splitn(3, ',');
+            let pid = fields.next()?.trim().parse().ok()?;
+            let ppid = fields.next()?.trim().parse().ok()?;
+            let image = fields.next()?.trim();
+            (!image.is_empty()).then(|| (pid, ppid, image.to_string()))
+        })
+        .collect()
+}
+
+/// c5 D13: `root` (when it is still listed) and every process it started,
+/// directly or through another SpaceAcres process, whose image is
+/// SpaceAcres' own. Root first, so the supervisor is gone before it can
+/// restart its farmer. A process of any other image (a browser) is neither
+/// returned nor walked through. The parent link survives the parent's exit on
+/// Windows, so a farmer orphaned by an exited supervisor is still found.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn owned_tree_pids(root: u32, rows: &[(u32, u32, String)]) -> Vec<u32> {
+    let owned = |image: &str| {
+        SPACE_ACRES_IMAGES
+            .iter()
+            .any(|i| i.eq_ignore_ascii_case(image))
+    };
+    let mut pids = Vec::new();
+    if rows
+        .iter()
+        .any(|(pid, _, image)| *pid == root && owned(image))
+    {
+        pids.push(root);
+    }
+    let mut seen = vec![root];
+    let mut frontier = vec![root];
+    while let Some(parent) = frontier.pop() {
+        for (pid, ppid, image) in rows {
+            if *ppid == parent && owned(image) && !seen.contains(pid) {
+                seen.push(*pid);
+                pids.push(*pid);
+                frontier.push(*pid);
+            }
+        }
+    }
+    pids
+}
+
+/// c5 D13: `taskkill` arguments that force-stop exactly `pids` — never `/T`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn owned_kill_args(pids: &[u32]) -> Vec<String> {
+    let mut args = vec!["/F".to_string()];
+    for pid in pids {
+        args.push("/PID".to_string());
+        args.push(pid.to_string());
+    }
+    args
 }
 
 #[derive(Default)]
@@ -1051,11 +1145,15 @@ impl Integration for SpaceAcresIntegration {
         if let Some(mut child) = tracked {
             // c4 BUG LOOP 8: the tracked process is SpaceAcres' supervisor;
             // the farmer runs as its --child-process. Stop the whole tree.
-            kill_tree(child.id());
+            let tree_known = kill_tree(child.id());
             let _ = child.kill();
             let _ = tokio::task::spawn_blocking(move || child.wait()).await;
-            info!("Stopped SpaceAcres (tracked child)");
-            return Ok(());
+            if tree_known {
+                info!("Stopped SpaceAcres (tracked child)");
+                return Ok(());
+            }
+            // c5 D13: the farmer could not be found by listing, so only the
+            // supervisor was stopped — sweep SpaceAcres' images below.
         }
 
         // Kill any running space-acres process (adoption fallback)
@@ -2096,3 +2194,8 @@ mod space_acres_c5_install_pins_tests;
 #[cfg(test)]
 #[path = "space_acres_c5_probe_tests.rs"]
 mod space_acres_c5_probe_tests;
+
+/// c5 D13: stopping SpaceAcres ends only SpaceAcres' own processes.
+#[cfg(test)]
+#[path = "space_acres_c5_owned_kill_tests.rs"]
+mod space_acres_c5_owned_kill_tests;
