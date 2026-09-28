@@ -214,6 +214,73 @@ fn owned_kill_args(pids: &[u32]) -> Vec<String> {
     args
 }
 
+/// D-C5-1: what the SpaceAcres card says while SpaceAcres runs but its own
+/// setup is not finished. It earns nothing until then.
+pub(crate) const SETUP_REQUIRED_REASON: &str =
+    "Finish setup in the SpaceAcres window to start earning.";
+
+/// D-C5-1: where SpaceAcres keeps its own configuration — what upstream
+/// 0.2.21 resolves in src/backend/config.rs:96-114 (`dirs::config_local_dir()`
+/// joined with its package name and "config.json"), i.e.
+/// `%LOCALAPPDATA%\space-acres\config.json` on Windows.
+fn space_acres_config_path() -> Option<PathBuf> {
+    dirs::config_local_dir().map(|dir| dir.join("space-acres").join("config.json"))
+}
+
+/// D-C5-1: whether a SpaceAcres configuration holds a reward address and at
+/// least one farm (upstream 0.2.21 config.rs:67-81: JSON tagged
+/// `"version": "0"` with camelCase `rewardAddress` and `farms`). Anything
+/// unreadable counts as not configured. Pure so the rule is testable.
+fn configured_from(contents: &str) -> bool {
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(contents) else {
+        return false;
+    };
+    let address = config["rewardAddress"]
+        .as_str()
+        .is_some_and(|a| !a.trim().is_empty());
+    let farms = config["farms"].as_array().is_some_and(|f| !f.is_empty());
+    address && farms
+}
+
+/// D-C5-1: `configured_from` on the file at `path`; a missing file is not
+/// configured.
+fn configured_at(path: &std::path::Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|contents| configured_from(&contents))
+}
+
+/// D-C5-1: read fresh on every call — never cached — so an owner who finishes
+/// the setup window turns Healthy on the next health tick, with no restart.
+fn space_acres_configured() -> bool {
+    space_acres_config_path().is_some_and(|path| configured_at(&path))
+}
+
+/// D-C5-1: health once SpaceAcres is installed and its disk is fine. Not
+/// running is `Stopped`, so the supervisor starts it (with its setup window
+/// visible when it is not configured); running but not configured shows the
+/// setup text; only running and configured is Healthy. Pure so the table is
+/// testable.
+fn health_from(running: bool, configured: bool) -> HealthStatus {
+    if !running {
+        HealthStatus::Stopped
+    } else if !configured {
+        HealthStatus::Unhealthy(SETUP_REQUIRED_REASON.to_string())
+    } else {
+        HealthStatus::Healthy
+    }
+}
+
+/// D-C5-1: SpaceAcres proves activity only while it runs AND is configured.
+fn poa_from(running: bool, configured: bool) -> bool {
+    running && configured
+}
+
+/// D-C5-1: whether a supervisor restart must leave SpaceAcres alone: it is
+/// running its setup window (not configured yet), and stopping it would close
+/// the window the owner is filling in.
+fn restart_spares_the_setup_window(configured: bool, running: bool) -> bool {
+    !configured && running
+}
+
 #[derive(Default)]
 pub struct SpaceAcresIntegration {
     child: Mutex<Option<std::process::Child>>,
@@ -1191,6 +1258,19 @@ impl Integration for SpaceAcresIntegration {
         Ok(())
     }
 
+    /// D-C5-1: a supervisor restart never closes the SpaceAcres setup window.
+    /// Running but unconfigured reads as the setup text, which the health
+    /// loop restarts; stopping here would kill the window the owner is filling
+    /// in, so it is left alone and start() finds it already running. Anything
+    /// else stops as before.
+    async fn stop_for_restart(&self) -> Result<()> {
+        if restart_spares_the_setup_window(space_acres_configured(), self.is_running()) {
+            info!("SpaceAcres setup is not finished — leaving its window open");
+            return Ok(());
+        }
+        self.stop().await
+    }
+
     /// FAIL-6: FEM quitting is not the owner turning SpaceAcres off. Stop only
     /// the instance FEM spawned; an adopted one (Windows autostart, the owner)
     /// was never FEM's to kill, and 0.4.33 left it running.
@@ -1227,11 +1307,9 @@ impl Integration for SpaceAcresIntegration {
                 "No SSD detected — SpaceAcres performance degraded".to_string(),
             );
         }
-        if self.is_running() {
-            HealthStatus::Healthy
-        } else {
-            HealthStatus::Stopped
-        }
+        // D-C5-1: Healthy only while running AND configured, re-read on
+        // every tick.
+        health_from(self.is_running(), space_acres_configured())
     }
 
     async fn check_update(&self) -> Result<Option<String>> {
@@ -1324,7 +1402,7 @@ impl Integration for SpaceAcresIntegration {
 
     fn collect_poc_data(&self) -> PocGateData {
         PocGateData {
-            poa: self.is_running(),
+            poa: poa_from(self.is_running(), space_acres_configured()),
             ..Default::default()
         }
     }
@@ -2217,3 +2295,8 @@ mod space_acres_c5_owned_kill_tests;
 #[cfg(test)]
 #[path = "space_acres_c5_stale_handle_tests.rs"]
 mod space_acres_c5_stale_handle_tests;
+
+/// c5 D-C5-1: Healthy and poa only while SpaceAcres is configured and alive.
+#[cfg(test)]
+#[path = "space_acres_c5_setup_tests.rs"]
+mod space_acres_c5_setup_tests;
