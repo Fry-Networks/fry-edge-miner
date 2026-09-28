@@ -1300,12 +1300,6 @@ impl Integration for FryVpnIntegration {
             info!("The Windows Firewall rule for frynode is in place - starting fryDVPN");
         }
 
-        // B7/B8: while a funding instruction is parked, frynode was never
-        // spawned, so re-read the wallet instead of reporting a dead process.
-        // This is what makes "registers automatically on the next check" true:
-        // the moment the wallet is funded the park clears, the not-running
-        // branch below arms the supervisor's existing restart, and `start()`
-        // re-runs against a wallet that can pay — with no user toggling.
         // D-C5-6 (variant C): a node that has not started waits for a registry
         // read that works. Unknown, never a restart and never a notice: nothing
         // is wrong with the node, and nothing is known about its registration.
@@ -1332,6 +1326,12 @@ impl Integration for FryVpnIntegration {
             }
         }
 
+        // B7/B8: while a funding instruction is parked, frynode was never
+        // spawned, so re-read the wallet instead of reporting a dead process.
+        // This is what makes "registers automatically on the next check" true:
+        // the moment the wallet is funded the park clears, the not-running
+        // branch below arms the supervisor's existing restart, and `start()`
+        // re-runs against a wallet that can pay — with no user toggling.
         let parked = PARKED_FUNDING_REASON.lock().unwrap().clone();
         if let Some(reason) = parked {
             // FAIL-2: re-read on a bounded backoff, not on every check; in
