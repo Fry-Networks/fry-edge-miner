@@ -503,7 +503,7 @@ fn underfunded_unknown() {
         let started = s.block_on(s.integ.start());
         assert_eq!(
             s.parked(),
-            Some(registration_message(110_000)),
+            None,
             "{registry_box:?}: a registry read that failed is never taken as registered — the \
              registration gate stands (start returned {started:?})"
         );

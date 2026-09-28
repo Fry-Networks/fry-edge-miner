@@ -258,6 +258,9 @@ async fn request_graceful_shutdown(port: u16, budget: Duration) -> bool {
     }
 }
 
+/// What the card says when frynode is alive but reports itself unregistered.
+const NOT_REGISTERED_REASON: &str = "dVPN not registered on-chain";
+
 /// One HTTP probe of the local frynode `/health` endpoint. Extracted so the
 /// health check can retry across the warm-up window (F5).
 async fn probe_health_once() -> HealthStatus {
@@ -283,7 +286,7 @@ async fn probe_health_once() -> HealthStatus {
                     } else if !is_healthy {
                         HealthStatus::Unhealthy("dVPN health check: status != healthy".to_string())
                     } else {
-                        HealthStatus::Unhealthy("dVPN not registered on-chain".to_string())
+                        HealthStatus::Unhealthy(NOT_REGISTERED_REASON.to_string())
                     }
                 }
                 Err(e) => {
@@ -464,6 +467,12 @@ pub(crate) fn registration_affordability(
 /// process, so a module-level slot is the same state with a smaller diff.
 static PARKED_FUNDING_REASON: Mutex<Option<String>> = Mutex::new(None);
 
+/// D-C5-6 (variant C): a start found the wallet short of the registration
+/// price and could not read the registry box, so it did not spawn frynode and
+/// waits for a read that works. Process-global for the same reason as
+/// `PARKED_FUNDING_REASON`.
+static AWAITING_REGISTRY_READ: Mutex<bool> = Mutex::new(false);
+
 /// FAIL-2: the health loop reads the wallet at most every 10th check — 5 min
 /// at the supervisor's 30 s interval, which is also frynode's default
 /// heartbeat interval — so a funded wallet is seen within that bound.
@@ -479,6 +488,9 @@ struct WalletWatch {
     /// D-C4-2: the ONE notice a registered node shows while its wallet cannot
     /// pay the next heartbeat (see `funding_notice`).
     heartbeat_shortfall: Option<String>,
+    /// D-C5-6: FEM's last registry box read failed, so it knows nothing about
+    /// this node's registration.
+    registry_unknown: bool,
     /// Bounded backoff: health checks still to skip before the next read,
     /// and the reads that sized the skip.
     skip: u32,
@@ -490,6 +502,7 @@ impl WalletWatch {
         Self {
             address: None,
             heartbeat_shortfall: None,
+            registry_unknown: false,
             skip: 0,
             reads: 0,
         }
@@ -699,10 +712,26 @@ pub(crate) enum FundingState {
     /// there is no registration left to pay for and it starts whatever the
     /// balance. Carries D-C4-2's heartbeat shortfall state, if any.
     Registered(Option<String>),
+    /// D-C5-6 (variant C): measured and short of the registration price, but
+    /// the registry box read failed, so whether the node is registered is
+    /// unknown. It changes nothing: a running node keeps running, a node not
+    /// yet started waits for a read that works, and a park stays as it was.
+    RegistrationUnknown,
     /// Fail-open fix: the balance could not be read AND the registry box shows
     /// the node is NOT registered. Starting it would let frynode attempt the
     /// one paid call, registration, at a price nobody checked.
     UnmeasurableUnregistered(String),
+}
+
+/// Why a start does not spawn frynode (B7/B8, D-C5-6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StartHold {
+    /// Parked with the registration shortfall the wallet was measured at.
+    Shortfall(String),
+    /// Parked: an unregistered node whose wallet could not be read.
+    Unreadable(String),
+    /// D-C5-6 (variant C): the registry read failed; wait for one that works.
+    AwaitRegistryRead,
 }
 
 /// FAIL-2: the time one wallet measurement may spend on algod — the balance
@@ -862,7 +891,10 @@ impl FryVpnIntegration {
                                     &address,
                                 ))
                             }
-                            _ => FundingState::Underfunded(msg),
+                            // D-C5-6 (variant C): a failed read proves nothing,
+                            // so it changes nothing.
+                            Registration::Unknown(_) => FundingState::RegistrationUnknown,
+                            Registration::Unregistered => FundingState::Underfunded(msg),
                         },
                     },
                     Err(detail) => {
@@ -884,6 +916,10 @@ impl FryVpnIntegration {
                     // state; a failed read proves nothing either way.
                     let mut watch = WALLET_WATCH.lock().unwrap();
                     watch.address = Some(address);
+                    watch.registry_unknown = matches!(
+                        state,
+                        FundingState::RegistrationUnknown | FundingState::Unmeasurable(_)
+                    );
                     match &state {
                         FundingState::Registered(shortfall) if measured => {
                             watch.set_heartbeat_shortfall(shortfall.clone())
@@ -986,7 +1022,23 @@ impl FryVpnIntegration {
         let mnemonic = match funding {
             Ok(m) => {
                 *PARKED_FUNDING_REASON.lock().unwrap() = None;
+                *AWAITING_REGISTRY_READ.lock().unwrap() = false;
                 m
+            }
+            // D-C5-6 (variant C): nothing is known about the registration, so
+            // nothing changes. A running node keeps running and a park keeps
+            // its notice; a node not yet started waits, and `health_check`
+            // re-reads on the backoff until a read works.
+            Err(StartHold::AwaitRegistryRead) => {
+                let running = {
+                    let mut sup = self.supervisor.lock().unwrap();
+                    matches!(sup.get_status("fryvpn"), HealthStatus::Healthy)
+                };
+                if !running && PARKED_FUNDING_REASON.lock().unwrap().is_none() {
+                    info!("fryDVPN waits for a registry read that works before it starts");
+                    *AWAITING_REGISTRY_READ.lock().unwrap() = true;
+                }
+                return Ok(());
             }
             // B7/B8: an unaffordable wallet is a SETUP state, not a start
             // failure. Bailing here returned from `toggle_integration` BEFORE
@@ -998,12 +1050,13 @@ impl FryVpnIntegration {
             // nothing is submitted on chain, the integration stays enabled, and
             // `health_check` re-reads the wallet, on a bounded backoff, until it
             // is funded.
-            Err(reason) => {
+            Err(StartHold::Shortfall(reason) | StartHold::Unreadable(reason)) => {
                 warn!(
                     reason = %reason,
                     "fryDVPN registration deferred until the device wallet is funded"
                 );
                 *PARKED_FUNDING_REASON.lock().unwrap() = Some(reason);
+                *AWAITING_REGISTRY_READ.lock().unwrap() = false;
                 return Ok(());
             }
         };
@@ -1028,17 +1081,18 @@ impl FryVpnIntegration {
     /// Fetch the device's provisioned Algorand identity and confirm it can
     /// actually afford the on-chain registration (BUG 6).
     ///
-    /// Returns the mnemonic to hand frynode. Any failure is a user-facing
+    /// Returns the mnemonic to hand frynode. Any park carries a user-facing
     /// sentence, never a raw chain error.
-    async fn resolve_funded_identity(&self) -> Result<Option<String>, String> {
+    async fn resolve_funded_identity(&self) -> Result<Option<String>, StartHold> {
         match self.device_identity_and_funding().await {
             None => Ok(None),
-            Some((_, FundingState::Underfunded(msg))) => Err(msg),
+            Some((_, FundingState::Underfunded(msg))) => Err(StartHold::Shortfall(msg)),
             // Fail-open fix: an unregistered node whose wallet cannot be read
             // is not spawned, so frynode cannot register at an unchecked price.
             Some((_, FundingState::UnmeasurableUnregistered(detail))) => {
-                Err(balance_unreadable_message(&detail))
+                Err(StartHold::Unreadable(balance_unreadable_message(&detail)))
             }
+            Some((_, FundingState::RegistrationUnknown)) => Err(StartHold::AwaitRegistryRead),
             Some((mnemonic, _)) => Ok(Some(mnemonic)),
         }
     }
@@ -1082,6 +1136,7 @@ impl Integration for FryVpnIntegration {
         // drop it so re-enabling measures the wallet again rather than showing
         // a stale figure.
         *PARKED_FUNDING_REASON.lock().unwrap() = None;
+        *AWAITING_REGISTRY_READ.lock().unwrap() = false;
         // FAIL-2: nor does anything learned about the wallet survive a stop.
         *WALLET_WATCH.lock().unwrap() = WalletWatch::new();
         {
@@ -1126,6 +1181,32 @@ impl Integration for FryVpnIntegration {
         // the moment the wallet is funded the park clears, the not-running
         // branch below arms the supervisor's existing restart, and `start()`
         // re-runs against a wallet that can pay — with no user toggling.
+        // D-C5-6 (variant C): a node that has not started waits for a registry
+        // read that works. Unknown, never a restart and never a notice: nothing
+        // is wrong with the node, and nothing is known about its registration.
+        if *AWAITING_REGISTRY_READ.lock().unwrap() {
+            if !WALLET_WATCH.lock().unwrap().read_due() {
+                return HealthStatus::Unknown;
+            }
+            let park = match self.device_identity_and_funding().await {
+                Some((_, FundingState::RegistrationUnknown | FundingState::Unmeasurable(_))) => {
+                    return HealthStatus::Unknown
+                }
+                Some((_, FundingState::Underfunded(msg))) => Some(msg),
+                Some((_, FundingState::UnmeasurableUnregistered(detail))) => {
+                    Some(balance_unreadable_message(&detail))
+                }
+                // Registered, affordable, or no key to measure: the
+                // not-running branch below arms the supervisor's restart.
+                _ => None,
+            };
+            *AWAITING_REGISTRY_READ.lock().unwrap() = false;
+            if let Some(msg) = park {
+                *PARKED_FUNDING_REASON.lock().unwrap() = Some(msg.clone());
+                return HealthStatus::Unhealthy(msg);
+            }
+        }
+
         let parked = PARKED_FUNDING_REASON.lock().unwrap().clone();
         if let Some(reason) = parked {
             // FAIL-2: re-read on a bounded backoff, not on every check; in
@@ -1137,6 +1218,11 @@ impl Integration for FryVpnIntegration {
                 Some((_, FundingState::Underfunded(msg))) => {
                     *PARKED_FUNDING_REASON.lock().unwrap() = Some(msg.clone());
                     return HealthStatus::Unhealthy(msg);
+                }
+                // D-C5-6 (variant C): a failed registry read changes nothing;
+                // the park keeps its notice exactly as it was.
+                Some((_, FundingState::RegistrationUnknown)) => {
+                    return HealthStatus::Unhealthy(reason);
                 }
                 // Keep the park rather than churning frynode while algod is
                 // unreadable, and never quote a balance we could not measure.
@@ -1226,6 +1312,14 @@ impl Integration for FryVpnIntegration {
                 }
                 other => last = other,
             }
+        }
+        // D-C5-6: while FEM's own registry read is Unknown, frynode reporting
+        // itself unregistered proves nothing either (its own read fails the
+        // same way). Unknown, never a restart.
+        if last == HealthStatus::Unhealthy(NOT_REGISTERED_REASON.to_string())
+            && WALLET_WATCH.lock().unwrap().registry_unknown
+        {
+            return HealthStatus::Unknown;
         }
         last
     }
@@ -2064,3 +2158,9 @@ mod fryvpn_shortfall_precision_tests;
 #[cfg(test)]
 #[path = "fryvpn_c5_d10_tripwire_tests.rs"]
 mod fryvpn_c5_d10_tripwire_tests;
+
+/// Continuation #5, D-C5-6 (variant C): an Unknown registration never changes
+/// a node's state.
+#[cfg(test)]
+#[path = "fryvpn_c5_unknown_registration_tests.rs"]
+mod fryvpn_c5_unknown_registration_tests;
