@@ -52,6 +52,14 @@ fn frynode_reporting_itself_unregistered_is_not_restarted_while_the_registry_rea
     run_scenario_on_frynode_port(module_path!(), "unregistered_report_unknown");
 }
 
+/// The Unknown lasts only WHILE the registry read fails: once it resolves,
+/// the node gets the ordinary verdict again, with no toggle.
+#[cfg(unix)]
+#[test]
+fn the_unknown_ends_when_the_registry_read_works_again() {
+    run_scenario_on_frynode_port(module_path!(), "unknown_ends");
+}
+
 #[test]
 #[ignore = "scenario entry point: the tests above run it in a child process"]
 fn child() {
@@ -66,6 +74,8 @@ fn child() {
         "running_keeps_running" => running_keeps_running(),
         #[cfg(unix)]
         "unregistered_report_unknown" => unregistered_report_unknown(),
+        #[cfg(unix)]
+        "unknown_ends" => unknown_ends(),
         other => panic!("unknown scenario {other}"),
     }
     println!("{DONE} {scenario}");
@@ -335,4 +345,74 @@ fn unregistered_report_unknown() {
     );
     assert_eq!(supervisor_action(&status), RecoveryAction::Restart);
     s.assert_nothing_submitted();
+}
+
+/// Start with both reads failing (spawned under D-C4-9), frynode reporting
+/// itself unregistered: Unknown. Then algod recovers.
+#[cfg(unix)]
+fn unknown_ends() {
+    for (registry_box, then) in [
+        (RegistryBox::Present, "registered"),
+        (RegistryBox::Absent, "unregistered"),
+    ] {
+        let s = Scene::new(
+            World {
+                account: Account::Html503,
+                ..World::new(110_000, RegistryBox::Html503)
+            },
+            Endpoint::PortInline,
+            None,
+        );
+        install_decoy_frynode(&s);
+        let health = frynode_unregistered_decoy();
+        let started = s.block_on(s.integ.start());
+        assert!(started.is_ok(), "{started:?}");
+        assert_eq!(
+            s.block_on(s.integ.health_check()),
+            HealthStatus::Unknown,
+            "{then}: Unknown while the registry read fails"
+        );
+
+        s.set_world(|w| {
+            w.account = Account::Balance;
+            w.registry_box = registry_box;
+        });
+        let reads_before = s.reads(&box_path());
+        let resolved_at =
+            (2..=8).find(|_| s.block_on(s.integ.health_check()) != HealthStatus::Unknown);
+        assert!(
+            resolved_at.is_some(),
+            "{then}: the Unknown must end once the registry read works — it stayed Unknown"
+        );
+        assert!(
+            s.reads(&box_path()) > reads_before,
+            "{then}: the health check re-read the registry"
+        );
+        // From here the ordinary verdict holds on every check: frynode says it
+        // is not registered, so the supervisor restarts it.
+        for check in 1..=3 {
+            let status = s.block_on(s.integ.health_check());
+            assert_eq!(
+                status,
+                HealthStatus::Unhealthy("dVPN not registered on-chain".to_string()),
+                "{then}, check {check} after the read resolved"
+            );
+            assert_eq!(
+                supervisor_action(&status),
+                RecoveryAction::Restart,
+                "{then}"
+            );
+        }
+        if registry_box == RegistryBox::Absent {
+            // The restart then meets the ordinary gate: unregistered and short
+            // parks with the exact shortfall notice.
+            s.block_on(s.integ.stop()).expect("stop");
+            let restarted = s.block_on(s.integ.start());
+            assert!(restarted.is_ok(), "{restarted:?}");
+            assert_eq!(s.parked(), Some(registration_message(110_000)));
+        }
+        s.assert_nothing_submitted();
+        drop(health);
+        drop(s);
+    }
 }

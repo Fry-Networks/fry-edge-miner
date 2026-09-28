@@ -1447,11 +1447,26 @@ impl Integration for FryVpnIntegration {
         }
         // D-C5-6: while FEM's own registry read is Unknown, frynode reporting
         // itself unregistered proves nothing either (its own read fails the
-        // same way). Unknown, never a restart.
-        if last == HealthStatus::Unhealthy(NOT_REGISTERED_REASON.to_string())
-            && WALLET_WATCH.lock().unwrap().registry_unknown
-        {
-            return HealthStatus::Unknown;
+        // same way): Unknown, never a restart. The registry is re-read on the
+        // wallet backoff, and the first read that resolves ends the Unknown;
+        // from then on the ordinary verdict applies.
+        if last == HealthStatus::Unhealthy(NOT_REGISTERED_REASON.to_string()) {
+            let pending = {
+                let mut watch = WALLET_WATCH.lock().unwrap();
+                match watch.address.clone() {
+                    Some(address) if watch.registry_unknown => Some((address, watch.read_due())),
+                    _ => None,
+                }
+            };
+            if let Some((address, due)) = pending {
+                if !due {
+                    return HealthStatus::Unknown;
+                }
+                match Self::read_registration(&address, ALGOD_READ_BUDGET).await {
+                    Registration::Unknown(_) => return HealthStatus::Unknown,
+                    _ => WALLET_WATCH.lock().unwrap().registry_unknown = false,
+                }
+            }
         }
         last
     }
