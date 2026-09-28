@@ -359,3 +359,9 @@ mod code_integrity_recency_tests;
 #[cfg(test)]
 #[path = "code_integrity_b15_capture_tests.rs"]
 mod code_integrity_b15_capture_tests;
+
+/// c5 F7: pins survivor M18b (an attribute value equal to a block id).
+/// Separate file so the three files above stay byte-identical.
+#[cfg(test)]
+#[path = "code_integrity_c5_attr_tests.rs"]
+mod code_integrity_c5_attr_tests;
