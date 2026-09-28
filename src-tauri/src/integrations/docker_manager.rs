@@ -1186,3 +1186,8 @@ mod docker_trigger_passthrough_tests;
 #[cfg(test)]
 #[path = "docker_refusal_text_c5_tests.rs"]
 mod docker_refusal_text_c5_tests;
+
+/// c5 F7: pins RC14-X7 (a refusal that can never fire).
+#[cfg(test)]
+#[path = "docker_guard_c5_tests.rs"]
+mod docker_guard_c5_tests;
