@@ -437,7 +437,7 @@ fn running_rule_gone() {
 fn rule_gone_during_wallet_read() {
     let s = Scene::new(
         World {
-            account_delay: Duration::from_secs(3),
+            account_delay: Duration::from_secs(8),
             ..World::new(400_000, RegistryBox::Present)
         },
         Endpoint::PortInline,
