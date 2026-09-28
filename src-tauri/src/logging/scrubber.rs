@@ -702,3 +702,8 @@ mod scrubber_bl3_url_key_tests;
 #[cfg(test)]
 #[path = "scrubber_bl3_joined_name_tests.rs"]
 mod scrubber_bl3_joined_name_tests;
+
+/// c5 F7: pins RC13-SCR-a/b/c (the request-path key rule).
+#[cfg(test)]
+#[path = "scrubber_c5_pin_tests.rs"]
+mod scrubber_c5_pin_tests;
