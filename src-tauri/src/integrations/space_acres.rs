@@ -93,6 +93,25 @@ fn kill_tree(pid: u32) {
     }
 }
 
+/// c5 D5: every image a running SpaceAcres shows — its supervisor and the
+/// farmer it runs as `--child-process` (upstream 0.2.21 names that child
+/// `space-acres-modern.exe` on CPUs with xsavec and reuses `space-acres.exe`
+/// otherwise).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const SPACE_ACRES_IMAGES: [&str; 2] = ["space-acres.exe", "space-acres-modern.exe"];
+
+/// c5 D5: whether a `tasklist` listing shows any SpaceAcres process. The
+/// probe matched only the supervisor, so a farmer left running without it
+/// read as stopped and FEM started a second one. Pure so it is testable off
+/// Windows.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn tasklist_shows_space_acres(listing: &str) -> bool {
+    let listing = listing.to_lowercase();
+    SPACE_ACRES_IMAGES
+        .iter()
+        .any(|image| listing.contains(image))
+}
+
 #[derive(Default)]
 pub struct SpaceAcresIntegration {
     child: Mutex<Option<std::process::Child>>,
@@ -679,11 +698,7 @@ impl SpaceAcresIntegration {
         {
             crate::supervisor::platform::command("tasklist")
                 .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
-                .map(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .to_lowercase()
-                        .contains("space-acres.exe")
-                })
+                .map(|o| tasklist_shows_space_acres(&String::from_utf8_lossy(&o.stdout)))
                 .unwrap_or(true)
         }
         #[cfg(not(target_os = "windows"))]
@@ -2076,3 +2091,8 @@ mod space_acres_gesture_flag_reset_tests;
 #[cfg(test)]
 #[path = "space_acres_c5_install_pins_tests.rs"]
 mod space_acres_c5_install_pins_tests;
+
+/// c5 D5: the liveness probe sees every SpaceAcres image.
+#[cfg(test)]
+#[path = "space_acres_c5_probe_tests.rs"]
+mod space_acres_c5_probe_tests;
