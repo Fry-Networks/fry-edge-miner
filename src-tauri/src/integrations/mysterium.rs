@@ -475,7 +475,10 @@ impl Integration for MysteriumIntegration {
         if !process_alive {
             // c4 BUG LOOP 5: no process because start() refused to spawn it
             // without a token is a setup state, not a crash.
-            if token_missing_recently(*TOKEN_MISSING_SINCE.lock().unwrap(), token_clock()) {
+            if token_missing_recently(
+                *TOKEN_MISSING_SINCE.lock().unwrap(),
+                std::time::Instant::now(),
+            ) {
                 return HealthStatus::Unhealthy(TOKEN_NOT_PROVISIONED_REASON.to_string());
             }
             // c4 BUG LOOP 6: the window expired. Re-read the credentials here
@@ -484,7 +487,7 @@ impl Integration for MysteriumIntegration {
             let expired = TOKEN_MISSING_SINCE.lock().unwrap().is_some();
             if expired {
                 if still_missing_after_recheck(self.token_present().await) {
-                    *TOKEN_MISSING_SINCE.lock().unwrap() = Some(token_clock());
+                    *TOKEN_MISSING_SINCE.lock().unwrap() = Some(std::time::Instant::now());
                     return HealthStatus::Unhealthy(TOKEN_NOT_PROVISIONED_REASON.to_string());
                 }
                 *TOKEN_MISSING_SINCE.lock().unwrap() = None;
@@ -576,16 +579,6 @@ impl Integration for MysteriumIntegration {
 /// c4 BUG LOOP 5: when `start()` last refused to spawn sdk_client because the
 /// device credentials carry no Mysterium token. Cleared by a successful spawn.
 static TOKEN_MISSING_SINCE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-
-/// How far a test has moved `token_clock` forward; always zero in the product.
-/// Moving the clock forward works on any host, where reaching 10 minutes back
-/// from `Instant::now()` does not on one that booted less than 10 minutes ago.
-static TOKEN_CLOCK_SKEW: Mutex<Duration> = Mutex::new(Duration::ZERO);
-
-/// The clock `health_check` measures the missing-token window on.
-fn token_clock() -> std::time::Instant {
-    std::time::Instant::now() + *TOKEN_CLOCK_SKEW.lock().unwrap()
-}
 
 /// How long a missing token is reported as such. Afterwards health_check falls
 /// back to the plain not-running reason, which lets the supervisor run

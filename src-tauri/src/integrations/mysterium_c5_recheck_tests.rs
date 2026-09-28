@@ -11,9 +11,8 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-/// `TOKEN_MISSING_SINCE` and `TOKEN_CLOCK_SKEW` are process-wide, so these
-/// tests take turns. An async mutex, because the turn is held across
-/// `health_check().await`.
+/// `TOKEN_MISSING_SINCE` is process-wide, so these tests take turns. An
+/// async mutex, because the turn is held across `health_check().await`.
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Synthetic device key.
@@ -69,15 +68,29 @@ fn mysterium(base_url: String, dir: &std::path::Path) -> MysteriumIntegration {
     }
 }
 
-/// Puts the process-wide missing-token state and clock back, even when a
-/// scenario panics.
+/// A missing-token state whose 10-minute window has already run out, taken
+/// from the real monotonic clock. A host booted less than ~601 s ago cannot
+/// reach that far back yet (Windows' clock starts at boot), so this WAITS
+/// until it can (1 s steps, at most 11 minutes): slow on such a host but
+/// always asserted, and a panic if the clock still cannot reach back.
+async fn expired_state() -> Instant {
+    for _ in 0..11 * 60 {
+        if let Some(at) = Instant::now().checked_sub(TOKEN_RECHECK + Duration::from_secs(1)) {
+            return at;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    panic!("the monotonic clock still cannot reach 601 s back after waiting 11 minutes");
+}
+
+/// Puts the process-wide missing-token state back, even when a scenario
+/// panics.
 struct ResetTokenState;
 impl Drop for ResetTokenState {
     fn drop(&mut self) {
         *TOKEN_MISSING_SINCE
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
-        *TOKEN_CLOCK_SKEW.lock().unwrap_or_else(|e| e.into_inner()) = Duration::ZERO;
     }
 }
 
@@ -99,13 +112,11 @@ async fn from_an_expired_window(
 ) {
     let _turn = SERIAL.lock().await;
     let _reset = ResetTokenState;
+    let expired = expired_state().await;
     let dir = tempfile::tempdir().unwrap();
     let (base_url, reads) = credentials_stub(status, body);
     let m = mysterium(base_url, dir.path());
-    // A refusal recorded now, then the clock moved one second past its
-    // window: forward, never back, so this runs the same on any host.
-    *TOKEN_MISSING_SINCE.lock().unwrap() = Some(token_clock());
-    *TOKEN_CLOCK_SKEW.lock().unwrap() = TOKEN_RECHECK + Duration::from_secs(1);
+    *TOKEN_MISSING_SINCE.lock().unwrap() = Some(expired);
     scenario(&m, &reads).await;
 }
 
