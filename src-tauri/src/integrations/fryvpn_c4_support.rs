@@ -641,8 +641,12 @@ pub(super) fn frynode_health_decoy() -> Decoy {
 pub(super) fn require_frynode_port_free() {
     #[cfg(target_os = "windows")]
     {
+        // D10: bind only, never listen; a wildcard listen raises the firewall dialog.
         fn bindable(addr: (&str, u16)) -> bool {
-            TcpListener::bind(addr).is_ok()
+            let addr = std::net::SocketAddr::new(addr.0.parse().expect("an IP literal"), addr.1);
+            tokio::net::TcpSocket::new_v4()
+                .and_then(|s| s.bind(addr))
+                .is_ok()
         }
         let free = (0..50).any(|_| {
             let ok = bindable(("0.0.0.0", FRYNODE_API_PORT))

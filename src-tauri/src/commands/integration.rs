@@ -961,3 +961,8 @@ mod integration_card_notice_order_tests;
 #[cfg(test)]
 #[path = "integration_block_line_pins_tests.rs"]
 mod integration_block_line_pins_tests;
+
+/// Continuation #5: behavioural pins for the fryDVPN card-line survivors.
+#[cfg(test)]
+#[path = "fryvpn_c5_card_notice_pins_tests.rs"]
+mod fryvpn_c5_card_notice_pins_tests;
