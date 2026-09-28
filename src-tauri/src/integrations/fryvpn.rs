@@ -477,8 +477,103 @@ static AWAITING_REGISTRY_READ: Mutex<bool> = Mutex::new(false);
 /// start path in place of Windows (outer `None`: not injected; `Some(None)`:
 /// the listing could not be read).
 #[cfg(test)]
-#[allow(dead_code)]
 pub(super) static FRYNODE_RULE_LISTING_FOR_TEST: Mutex<Option<Option<String>>> = Mutex::new(None);
+
+/// D-C5-2: the setup line a start parked because Windows Firewall does not let
+/// frynode accept connections. Process-global for the same reason as
+/// `PARKED_FUNDING_REASON`.
+static PARKED_RULE_REASON: Mutex<Option<String>> = Mutex::new(None);
+
+/// D-C5-2: the instruction the card shows while frynode has no firewall rule.
+pub(crate) const FIREWALL_SETUP_TEXT: &str =
+    "Click Retry on the Security hardening banner to allow fryDVPN through Windows Firewall.";
+
+/// PURE (D-C5-2): the card line. The "Awaiting administrator action" marker
+/// in front is what makes the card read "Setup required" and keeps the
+/// supervisor from restarting (`integrations::awaits_user_action`). A
+/// registration shortfall follows on the same line (BL4-C layout).
+pub(crate) fn firewall_setup_reason(registration_shortfall: Option<String>) -> String {
+    join_shortfall(
+        format!(
+            "{} — {FIREWALL_SETUP_TEXT}",
+            super::code_integrity::AWAITING_ADMIN_MARKER
+        ),
+        registration_shortfall,
+    )
+}
+
+/// PURE (D-C5-2): the gate is Windows Firewall's, and it guards the installed
+/// frynode.exe, so an explicit FRYNODE_BIN developer override skips it.
+pub(crate) fn rule_gate_applies(windows: bool, binary_override: bool) -> bool {
+    windows && !binary_override
+}
+
+/// D-C5-2: what Windows Firewall says about the rule for `binary`.
+fn frynode_rule_verdict(binary: &str) -> super::firewall::RuleVerdict {
+    #[cfg(test)]
+    if let Some(listing) = FRYNODE_RULE_LISTING_FOR_TEST.lock().unwrap().clone() {
+        return super::firewall::rule_verdict(listing.as_deref(), binary);
+    }
+    let binary_override = std::env::var("FRYNODE_BIN").is_ok_and(|b| !b.trim().is_empty());
+    if !rule_gate_applies(cfg!(target_os = "windows"), binary_override) {
+        return super::firewall::RuleVerdict::Admitted;
+    }
+    super::firewall::rule_verdict(
+        super::firewall::rule_listing(FRYNODE_RULE_NAME).as_deref(),
+        binary,
+    )
+}
+
+/// D-C5-2: enter the setup state. It replaces any funding park or registry
+/// wait (the rule comes first), and on entry publishes the banner the text
+/// points at. The health check adds a registration shortfall to the line.
+fn park_for_firewall_rule(verdict: super::firewall::RuleVerdict) {
+    *PARKED_FUNDING_REASON.lock().unwrap() = None;
+    *AWAITING_REGISTRY_READ.lock().unwrap() = false;
+    let entering = PARKED_RULE_REASON
+        .lock()
+        .unwrap()
+        .replace(firewall_setup_reason(None))
+        .is_none();
+    if entering {
+        warn!(
+            ?verdict,
+            "fryDVPN waits for its Windows Firewall rule - frynode is not started without it"
+        );
+        request_hardening_banner();
+    }
+}
+
+/// D-C5-2: publish the Security hardening banner. `Automatic`, so the
+/// elevation gate refuses it before any prompt: what it leaves is the
+/// "hardening" block `get_hardening_status` serves when the window mounts,
+/// plus one `elevation-required` event for a window already open.
+fn request_hardening_banner() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(install_dir) = exe.parent() else {
+        return;
+    };
+    let frynode_path = install_dir.join("resources").join("frynode.exe");
+    let exe_names = ["fry-edge-miner.exe", "frynode.exe"];
+    if let Err(skipped) = crate::security_setup::run_hardening_elevated(
+        install_dir,
+        &exe_names,
+        &frynode_path,
+        env!("CARGO_PKG_VERSION"),
+        crate::elevation_gate::ElevationTrigger::Automatic,
+    ) {
+        crate::events::emit(
+            "elevation-required",
+            serde_json::json!({
+                "purpose": "hardening",
+                "reason": skipped.to_string(),
+                "manualCommand": crate::security_setup::manual_hardening_command(install_dir, &exe_names),
+            }),
+        );
+    }
+}
 
 /// FAIL-2: the health loop reads the wallet at most every 10th check — 5 min
 /// at the supervisor's 30 s interval, which is also frynode's default
@@ -940,41 +1035,20 @@ impl FryVpnIntegration {
         }
     }
 
-    /// The real start. `trigger` decides whether the firewall rule may
-    /// raise a UAC prompt: only a user gesture ever may.
-    async fn start_inner(&self, trigger: crate::elevation_gate::ElevationTrigger) -> Result<()> {
+    /// The real start. It raises no UAC prompt, whatever started it: the
+    /// firewall rule comes only from the Security hardening banner (D-C5-2).
+    async fn start_inner(&self) -> Result<()> {
         let binary = Self::binary_path()?;
 
-        // BUG 6: pre-create firewall rules for this exact binary path so
-        // Windows never shows the firewall prompt at all (georgeparis 8/28
-        // worked around this by hand with `New-NetFirewallRule`). Non-fatal:
-        // a declined UAC just means Windows prompts as before. Only when the
-        // resolved path is absolute — a bare PATH-lookup name has nothing
-        // concrete to bind the rule to.
-        //
-        // Offloaded: at UAC_ANSWER_TIMEOUT this blocks on a HUMAN answering a
-        // consent dialog for up to three minutes. Left on the async task it
-        // pins a tokio worker for that whole time AND silently voids the 60 s
-        // toggle bound, because a timeout cannot fire while the worker is
-        // blocked. titan.rs already does this for its redist install.
-        let binary_path = std::path::PathBuf::from(&binary);
-        if binary_path.is_absolute() {
-            let rule_path = binary_path.clone();
-            let outcome = tokio::task::spawn_blocking(move || {
-                super::firewall::ensure_program_rules(
-                    FRYNODE_RULE_NAME,
-                    &rule_path,
-                    "fryvpn",
-                    trigger,
-                )
-            })
-            .await;
-            match outcome {
-                Ok(Err(e)) => warn!(error = %e, "Fry dVPN firewall rule setup failed — continuing"),
-                Err(e) => warn!(error = %e, "Fry dVPN firewall rule task panicked — continuing"),
-                Ok(Ok(())) => {}
-            }
-        }
+        // D-C5-2: frynode is never spawned while Windows Firewall has no rule
+        // letting it accept connections; spawning it anyway is what showed the
+        // Windows Security Alert. The check only reads the rule. Offloaded: it
+        // blocks for up to PROBE_TIMEOUT, the slot the old per-start rule
+        // step held in the toggle's 60 s bound.
+        let rule_binary = binary.clone();
+        let rule = tokio::task::spawn_blocking(move || frynode_rule_verdict(&rule_binary))
+            .await
+            .unwrap_or(super::firewall::RuleVerdict::Unreadable);
 
         // Build CLI flags for frynode
         let mut args = vec![
@@ -1026,6 +1100,17 @@ impl FryVpnIntegration {
         // FAIL-2: that was a fresh wallet read; the health loop's backoff
         // counts from it.
         WALLET_WATCH.lock().unwrap().restart_backoff();
+        if rule != super::firewall::RuleVerdict::Admitted {
+            // The rule gates spawning only: a node already running keeps running.
+            let running = {
+                let mut sup = self.supervisor.lock().unwrap();
+                matches!(sup.get_status("fryvpn"), HealthStatus::Healthy)
+            };
+            if !running {
+                park_for_firewall_rule(rule);
+            }
+            return Ok(());
+        }
         let mnemonic = match funding {
             Ok(m) => {
                 *PARKED_FUNDING_REASON.lock().unwrap() = None;
@@ -1128,14 +1213,13 @@ impl Integration for FryVpnIntegration {
     }
 
     async fn start(&self) -> Result<()> {
-        self.start_inner(crate::elevation_gate::ElevationTrigger::Automatic)
-            .await
+        self.start_inner().await
     }
 
-    /// B3: only a real click may raise UAC.
+    /// D-C5-2: a click raises no UAC prompt either. The firewall rule comes
+    /// only from the Security hardening banner's Retry.
     async fn start_for_user(&self) -> Result<()> {
-        self.start_inner(crate::elevation_gate::ElevationTrigger::UserClick)
-            .await
+        self.start_inner().await
     }
 
     async fn stop(&self) -> Result<()> {
@@ -1144,6 +1228,7 @@ impl Integration for FryVpnIntegration {
         // a stale figure.
         *PARKED_FUNDING_REASON.lock().unwrap() = None;
         *AWAITING_REGISTRY_READ.lock().unwrap() = false;
+        *PARKED_RULE_REASON.lock().unwrap() = None;
         // FAIL-2: nor does anything learned about the wallet survive a stop.
         *WALLET_WATCH.lock().unwrap() = WalletWatch::new();
         {
@@ -1182,6 +1267,39 @@ impl Integration for FryVpnIntegration {
     }
 
     async fn health_check(&self) -> HealthStatus {
+        // D-C5-2: re-check the rule on every tick. The tick that finds it
+        // falls through to the not-running branch below, which arms the
+        // supervisor's ordinary restart, and `start()` spawns frynode.
+        let rule_parked = PARKED_RULE_REASON.lock().unwrap().clone();
+        if let Some(reason) = rule_parked {
+            let Ok(binary) = Self::binary_path() else {
+                return HealthStatus::Unhealthy(reason);
+            };
+            let rule = tokio::task::spawn_blocking(move || frynode_rule_verdict(&binary))
+                .await
+                .unwrap_or(super::firewall::RuleVerdict::Unreadable);
+            if rule != super::firewall::RuleVerdict::Admitted {
+                // An unregistered node short of the registration price shows
+                // that shortfall after the setup text; a registered node's
+                // heartbeat notice is not appended, as it describes a running
+                // node. The start just reset the backoff, so the first check
+                // reads the wallet, and later ones re-read it on the backoff
+                // (B7/B8: a figure on the card never freezes).
+                if !WALLET_WATCH.lock().unwrap().read_due() {
+                    return HealthStatus::Unhealthy(reason);
+                }
+                let shortfall = match self.resolve_funded_identity().await {
+                    Err(StartHold::Shortfall(msg)) => Some(msg),
+                    _ => None,
+                };
+                let line = firewall_setup_reason(shortfall);
+                *PARKED_RULE_REASON.lock().unwrap() = Some(line.clone());
+                return HealthStatus::Unhealthy(line);
+            }
+            *PARKED_RULE_REASON.lock().unwrap() = None;
+            info!("The Windows Firewall rule for frynode is in place - starting fryDVPN");
+        }
+
         // B7/B8: while a funding instruction is parked, frynode was never
         // spawned, so re-read the wallet instead of reporting a dead process.
         // This is what makes "registers automatically on the next check" true:
@@ -2171,3 +2289,8 @@ mod fryvpn_c5_d10_tripwire_tests;
 #[cfg(test)]
 #[path = "fryvpn_c5_unknown_registration_tests.rs"]
 mod fryvpn_c5_unknown_registration_tests;
+
+/// Continuation #5, D-C5-2: frynode is never spawned without its firewall rule.
+#[cfg(test)]
+#[path = "fryvpn_c5_rule_gate_tests.rs"]
+mod fryvpn_c5_rule_gate_tests;
