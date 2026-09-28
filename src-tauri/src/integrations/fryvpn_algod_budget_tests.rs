@@ -68,12 +68,9 @@ fn slow_balance_then_slow_box() {
     );
     assert_eq!(
         s.parked(),
-        Some(
-            registration_funding_message(110_000, MIN_BALANCE, REGISTRATION_MIN_MICROALGOS, ADDR)
-                .expect_err("fixture: 110_000 cannot afford registration")
-        ),
-        "a box read cut short proves nothing, so the registration gate stands (start \
-         returned {started:?})"
+        None,
+        "a box read cut short proves nothing, so a node that has not started waits, unparked \
+         (D-C5-6 variant C; start returned {started:?})"
     );
     s.assert_nothing_submitted();
 }
