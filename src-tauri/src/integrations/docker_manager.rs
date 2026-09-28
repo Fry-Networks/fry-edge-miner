@@ -834,19 +834,13 @@ async fn ensure_docker_core(
         }
         DockerStatus::NotInstalled => {
             if !allow_install {
-                anyhow::bail!(
-                    "Docker Desktop is not installed — enable this integration once (or use \
-                     its Settings action) to install it"
-                );
+                anyhow::bail!("Install Docker Desktop, then turn this on again.");
             }
             // FAIL-13 (c4 BUG LOOP 4): `allow_install` alone is not a gesture —
             // `ensure_docker()` passes it on every automatic path, and this
             // arm fetched the installer before the gate refused to run it.
             if !may_fetch_docker_installer(trigger) {
-                anyhow::bail!(
-                    "Docker Desktop is not installed — enable this integration once (or use \
-                     its Settings action) to install it"
-                );
+                anyhow::bail!("Install Docker Desktop, then turn this on again.");
             }
             info!("Docker Desktop not installed — downloading installer");
             let installer_path = download_docker_installer().await?;
@@ -1187,3 +1181,8 @@ mod docker_gesture_download_tests;
 #[cfg(test)]
 #[path = "docker_trigger_passthrough_tests.rs"]
 mod docker_trigger_passthrough_tests;
+
+/// c5 D7: both Docker-absent refusals carry the one ruled text.
+#[cfg(test)]
+#[path = "docker_refusal_text_c5_tests.rs"]
+mod docker_refusal_text_c5_tests;
