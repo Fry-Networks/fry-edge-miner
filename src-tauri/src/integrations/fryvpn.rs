@@ -2323,3 +2323,9 @@ mod fryvpn_c5_rule_gate_tests;
 #[cfg(test)]
 #[path = "fryvpn_c5_dc55_table_tests.rs"]
 mod fryvpn_c5_dc55_table_tests;
+
+/// Continuation #6, D-C6-1: a registered node waiting on its firewall rule
+/// also shows its heartbeat shortfall.
+#[cfg(test)]
+#[path = "fryvpn_c6_rule_park_heartbeat_tests.rs"]
+mod fryvpn_c6_rule_park_heartbeat_tests;

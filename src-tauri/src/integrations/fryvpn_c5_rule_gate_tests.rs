@@ -250,8 +250,12 @@ fn registered_without_rule() {
             started.is_ok() && !Scene::spawn_attempted(&started),
             "{amount}: {started:?}"
         );
+        let expected = match amount {
+            100_014 => format!("{SETUP} · This node's wallet also cannot pay the 0.001 ALGO fee of its next heartbeat — send 0.000986 ALGO to {ADDR}."),
+            _ => SETUP.to_string(),
+        };
         for check in 1..=3 {
-            assert_setup_state(&s, SETUP, &format!("{amount}, check {check}"));
+            assert_setup_state(&s, &expected, &format!("{amount}, check {check}"));
         }
         assert!(
             s.log_lines("registration deferred").is_empty(),
