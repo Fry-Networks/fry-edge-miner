@@ -41,6 +41,13 @@ impl ConfigStore {
     pub fn new(config_dir: PathBuf, roaming_path: Option<PathBuf>) -> Self {
         let path = config_dir.join("fem_config.json");
         let backup_path = config_dir.join("fem_config.backup.json");
+        // BL-C6-3: before this process writes anything.
+        for p in [Some(&path), Some(&backup_path), roaming_path.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            Self::remove_stale_temps(p);
+        }
 
         tracing::info!(
             config_dir = %config_dir.display(),
@@ -241,6 +248,41 @@ impl ConfigStore {
             .unwrap_or(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         path.with_file_name(format!("{name}.tmp.{}.{nanos}.{seq}", std::process::id()))
+    }
+
+    /// BL-C6-3: remove the temps (`tmp_path_for`) that EARLIER processes left
+    /// next to `path` when they were killed mid-save; each is a complete
+    /// config, miner key included, and nothing else ever removed them. Only
+    /// another pid's temps go: a store in this process may be writing its own
+    /// right now, and the single-instance guard is registered before the store
+    /// is built, so no other live FEM process writes here.
+    fn remove_stale_temps(path: &Path) {
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+            return;
+        };
+        let prefix = format!("{}.tmp.", name.to_string_lossy());
+        let own = std::process::id().to_string();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let file = entry.file_name().to_string_lossy().into_owned();
+            let Some(rest) = file.strip_prefix(&prefix) else {
+                continue;
+            };
+            let parts: Vec<&str> = rest.split('.').collect();
+            let is_temp = parts.len() == 3
+                && parts
+                    .iter()
+                    .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+            if is_temp
+                && parts[0] != own
+                && entry.file_type().is_ok_and(|t| t.is_file())
+                && std::fs::remove_file(entry.path()).is_ok()
+            {
+                tracing::info!(file = %file, "ConfigStore: removed a temp left by an interrupted save");
+            }
+        }
     }
 
     /// Write via tmp-file + flush + rename so a crash mid-write can never
@@ -564,3 +606,8 @@ mod atomic_write_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// BL-C6-3: temps left by a save that was killed never accumulate.
+#[cfg(test)]
+#[path = "store_c6_bl3_tests.rs"]
+mod store_c6_bl3_tests;
