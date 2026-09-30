@@ -35,6 +35,13 @@ fn other_pid(offset: u32) -> u32 {
 
 const CONFIG: &str = r#"{"miner_key":"FEM-BL3-TEST-KEY","wallet_address":"W"}"#;
 
+/// D-C7-1: the sweep only takes files at least 60 s old; 120 s clears that.
+fn backdate(path: &Path) {
+    let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120))
+        .unwrap();
+}
+
 /// What a killed save leaves behind: a complete config under a temp name.
 fn leave_temp(target: &Path, pid: u32, n: u32) -> PathBuf {
     let name = target.file_name().unwrap().to_string_lossy().to_string();
@@ -43,6 +50,7 @@ fn leave_temp(target: &Path, pid: u32, n: u32) -> PathBuf {
         1_790_694_283_162_692_900u128 + n as u128
     ));
     std::fs::write(&tmp, CONFIG).unwrap();
+    backdate(&tmp);
     tmp
 }
 
@@ -148,7 +156,8 @@ fn a_temp_of_this_process_is_never_removed() {
     let _ = std::fs::remove_dir_all(&roaming_dir);
 }
 
-/// Only exact `<name>.tmp.<pid>.<nanos>.<seq>` siblings of a config path go.
+/// Only exact `<name>.tmp.<pid>.<nanos>.<seq>` siblings of a config path go,
+/// and v0.4.33's fixed `<name>.tmp` (D-C7-1).
 #[test]
 fn nothing_but_those_temps_is_touched() {
     let dir = unique_dir("decoys");
@@ -156,10 +165,14 @@ fn nothing_but_those_temps_is_touched() {
     std::fs::write(&primary, CONFIG).unwrap();
     let pid = other_pid(0);
     let stale = leave_temp(&primary, pid, 0);
+    let legacy = dir.join("fem_config.json.tmp");
+    std::fs::write(&legacy, CONFIG).unwrap();
+    backdate(&legacy);
     let decoys = [
         "fem_config.backup.json".to_string(),
         "fem_config.corrupt.1790694283.json".to_string(),
-        "fem_config.json.tmp".to_string(),
+        "fem_config.backup.corrupt.1790694283.json".to_string(),
+        "update-state.json".to_string(),
         "fem_config.json.tmp.notes".to_string(),
         format!("fem_config.json.tmp.{pid}.12"),
         format!("fem_config.json.tmp.{pid}.12.3.4"),
@@ -170,9 +183,11 @@ fn nothing_but_those_temps_is_touched() {
     ];
     for d in &decoys {
         std::fs::write(dir.join(d), "{}").unwrap();
+        backdate(&dir.join(d));
     }
     let _store = ConfigStore::new(dir.clone(), None);
     assert!(!stale.exists(), "control: the sweep ran");
+    assert!(!legacy.exists(), "the aged v0.4.33 temp was not removed");
     for d in &decoys {
         assert!(dir.join(d).exists(), "{d} was removed");
     }

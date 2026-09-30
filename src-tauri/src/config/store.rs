@@ -611,3 +611,12 @@ mod atomic_write_tests {
 #[cfg(test)]
 #[path = "store_c6_bl3_tests.rs"]
 mod store_c6_bl3_tests;
+
+/// D-C7-1: the sweep's age rule, v0.4.33 names, pre-write sweep and warn line.
+#[cfg(test)]
+#[path = "store_c7_c1_tests.rs"]
+mod store_c7_c1_tests;
+
+#[cfg(test)]
+#[path = "store_c7_c1_age_tests.rs"]
+mod store_c7_c1_age_tests;
