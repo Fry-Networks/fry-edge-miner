@@ -210,6 +210,10 @@ impl ConfigStore {
     }
 
     fn save_to_disk(&self, config: &FemConfig) -> Result<()> {
+        let targets = [&self.path, &self.backup_path]; // D-C7-1: the load sweep, again
+        for p in targets.into_iter().chain(&self.roaming_path) {
+            Self::remove_stale_temps(p);
+        }
         let data = crate::config::migrate::to_disk_string(config)?;
         Self::write_atomic(&self.path, &data)?;
         // Redundant copies only once a real registration exists.
@@ -265,24 +269,35 @@ impl ConfigStore {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
+        let mut failed = 0u32; // D-C7-1: one warn per sweep, never an error
         for entry in entries.flatten() {
             let file = entry.file_name().to_string_lossy().into_owned();
-            let Some(rest) = file.strip_prefix(&prefix) else {
-                continue;
-            };
+            let rest = file.strip_prefix(&prefix).unwrap_or_default();
             let parts: Vec<&str> = rest.split('.').collect();
             let is_temp = parts.len() == 3
                 && parts
                     .iter()
                     .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
-            if is_temp
+            if (is_temp || file == prefix.trim_end_matches('.')) // or v0.4.33's fixed name
                 && parts[0] != own
                 && entry.file_type().is_ok_and(|t| t.is_file())
-                && std::fs::remove_file(entry.path()).is_ok()
+                && Self::is_aged(&entry.path())
+                && std::fs::remove_file(entry.path())
+                    .inspect_err(|_| failed += 1)
+                    .is_ok()
             {
                 tracing::info!(file = %file, "ConfigStore: removed a temp left by an interrupted save");
             }
         }
+        if failed > 0 {
+            tracing::warn!(failed, dir = %dir.display(), "ConfigStore: stale temps not removed");
+        }
+    }
+
+    /// D-C7-1: under 60 s old may be a live writer's; an unreadable or future mtime keeps it.
+    fn is_aged(path: &Path) -> bool {
+        let modified = std::fs::metadata(path).and_then(|m| m.modified());
+        modified.is_ok_and(|t| t.elapsed().is_ok_and(|age| age.as_secs() >= 60))
     }
 
     /// Write via tmp-file + flush + rename so a crash mid-write can never
@@ -611,3 +626,12 @@ mod atomic_write_tests {
 #[cfg(test)]
 #[path = "store_c6_bl3_tests.rs"]
 mod store_c6_bl3_tests;
+
+/// D-C7-1: the sweep's age rule, v0.4.33 names, pre-write sweep and warn line.
+#[cfg(test)]
+#[path = "store_c7_c1_tests.rs"]
+mod store_c7_c1_tests;
+
+#[cfg(test)]
+#[path = "store_c7_c1_age_tests.rs"]
+mod store_c7_c1_age_tests;

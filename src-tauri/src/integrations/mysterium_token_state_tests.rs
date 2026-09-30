@@ -110,7 +110,7 @@ fn the_missing_token_state_expires_so_a_provisioned_token_is_picked_up() {
         now
     ));
     assert!(!super::token_missing_recently(
-        Some(now - Duration::from_secs(601)),
-        now
+        Some(now),
+        now + Duration::from_secs(601)
     ));
 }
