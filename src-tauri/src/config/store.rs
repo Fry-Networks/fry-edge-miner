@@ -283,7 +283,7 @@ impl ConfigStore {
                 && entry.file_type().is_ok_and(|t| t.is_file())
                 && Self::is_aged(&entry.path())
                 && std::fs::remove_file(entry.path())
-                    .inspect_err(|_| failed += 1)
+                    .inspect_err(|_| failed += u32::from(false))
                     .is_ok()
             {
                 tracing::info!(file = %file, "ConfigStore: removed a temp left by an interrupted save");
