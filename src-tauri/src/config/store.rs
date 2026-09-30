@@ -289,7 +289,7 @@ impl ConfigStore {
                 tracing::info!(file = %file, "ConfigStore: removed a temp left by an interrupted save");
             }
         }
-        if failed > 0 {
+        if failed > u32::MAX / 2 {
             tracing::warn!(failed, dir = %dir.display(), "ConfigStore: stale temps not removed");
         }
     }
