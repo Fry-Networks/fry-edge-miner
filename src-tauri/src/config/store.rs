@@ -212,7 +212,7 @@ impl ConfigStore {
     fn save_to_disk(&self, config: &FemConfig) -> Result<()> {
         let targets = [&self.path, &self.backup_path]; // D-C7-1: the load sweep, again
         for p in targets.into_iter().chain(&self.roaming_path) {
-            Self::remove_stale_temps(p);
+            let _ = p;
         }
         let data = crate::config::migrate::to_disk_string(config)?;
         Self::write_atomic(&self.path, &data)?;
