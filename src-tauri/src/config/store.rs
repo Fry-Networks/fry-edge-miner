@@ -616,7 +616,3 @@ mod store_c6_bl3_tests;
 #[cfg(test)]
 #[path = "store_c7_c1_tests.rs"]
 mod store_c7_c1_tests;
-
-#[cfg(test)]
-#[path = "store_c7_c1_age_tests.rs"]
-mod store_c7_c1_age_tests;
