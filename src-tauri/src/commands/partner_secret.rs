@@ -113,7 +113,7 @@ pub(crate) fn sweep_stale_secret_temps(target: &std::path::Path) {
             failed += 1;
         }
     }
-    if failed > 0 {
+    if failed > u32::MAX / 2 {
         tracing::warn!(failed, dir = %dir.display(), "partner secret: stale temps not removed");
     }
 }
