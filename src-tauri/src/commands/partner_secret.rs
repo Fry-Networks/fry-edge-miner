@@ -78,13 +78,55 @@ pub async fn set_partner_secret(id: String, value: String) -> Result<(), String>
 
     let (path, key) =
         secret_target(&id).ok_or_else(|| format!("'{id}' does not take a single-value key."))?;
+    save_secret_at(&path, key, &trimmed)?;
 
+    // The KEY NAME and the PATH are safe to log; the value is not, and is not
+    // in scope here by construction.
+    tracing::info!(
+        integration = %id,
+        key,
+        path = %path.display(),
+        "Saved a partner key entered in the app"
+    );
+    Ok(())
+}
+
+/// D-C8-1: remove `<name>.tmp.<pid>` temps a killed save left next to `target` (each holds the
+/// secret): another pid's file, >= 60 s old (future/unreadable mtime keeps it). Failures: one warn.
+pub(crate) fn sweep_stale_secret_temps(target: &std::path::Path) {
+    let (Some(dir), Some(name)) = (target.parent(), target.file_name()) else {
+        return;
+    };
+    let prefix = format!("{}.tmp.", name.to_string_lossy());
+    let mut failed = 0u32;
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        let pid = file.strip_prefix(&prefix).unwrap_or_default();
+        let modified = entry.metadata().and_then(|m| m.modified());
+        if !pid.is_empty()
+            && pid.bytes().all(|b| b.is_ascii_digit())
+            && pid != std::process::id().to_string()
+            && entry.file_type().is_ok_and(|t| t.is_file())
+            && modified.is_ok_and(|t| t.elapsed().is_ok_and(|age| age.as_secs() >= 60))
+            && std::fs::remove_file(entry.path()).is_err()
+        {
+            failed += 1;
+        }
+    }
+    if failed > 0 {
+        tracing::warn!(failed, dir = %dir.display(), "partner secret: stale temps not removed");
+    }
+}
+
+/// Merge `key = value` into the JSON file at `path` via temp + rename, sweeping first.
+pub(crate) fn save_secret_at(path: &std::path::Path, key: &str, value: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Could not create {}: {e}", parent.display()))?;
     }
-    let existing = std::fs::read_to_string(&path).ok();
-    let merged = merge_secret(existing.as_deref(), key, &trimmed);
+    sweep_stale_secret_temps(path);
+    let existing = std::fs::read_to_string(path).ok();
+    let merged = merge_secret(existing.as_deref(), key, value);
 
     // Same temp + rename discipline as the config store, so a crash mid-write
     // cannot leave the integration reading a truncated file. The temp name
@@ -100,19 +142,10 @@ pub async fn set_partner_secret(id: String, value: String) -> Result<(), String>
         let _ = std::fs::remove_file(&tmp);
         format!("Could not write {}: {e}", path.display())
     })?;
-    std::fs::rename(&tmp, &path).map_err(|e| {
+    std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("Could not save to {}: {e}", path.display())
     })?;
-
-    // The KEY NAME and the PATH are safe to log; the value is not, and is not
-    // in scope here by construction.
-    tracing::info!(
-        integration = %id,
-        key,
-        path = %path.display(),
-        "Saved a partner key entered in the app"
-    );
     Ok(())
 }
 
