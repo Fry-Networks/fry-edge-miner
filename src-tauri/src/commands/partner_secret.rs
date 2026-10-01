@@ -124,7 +124,6 @@ pub(crate) fn save_secret_at(path: &std::path::Path, key: &str, value: &str) -> 
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Could not create {}: {e}", parent.display()))?;
     }
-    sweep_stale_secret_temps(path);
     let existing = std::fs::read_to_string(path).ok();
     let merged = merge_secret(existing.as_deref(), key, value);
 
