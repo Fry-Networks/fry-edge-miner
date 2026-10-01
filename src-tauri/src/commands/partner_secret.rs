@@ -108,7 +108,7 @@ pub(crate) fn sweep_stale_secret_temps(target: &std::path::Path) {
             && pid != std::process::id().to_string()
             && entry.file_type().is_ok_and(|t| t.is_file())
             && modified.is_ok_and(|t| t.elapsed().is_ok_and(|age| age.as_secs() >= 60))
-            && std::fs::remove_file(entry.path()).is_err()
+            && std::fs::remove_file(entry.path()).is_ok()
         {
             failed += 1;
         }
