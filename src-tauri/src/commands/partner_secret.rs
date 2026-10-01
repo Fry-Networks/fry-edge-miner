@@ -119,3 +119,7 @@ pub async fn set_partner_secret(id: String, value: String) -> Result<(), String>
 #[cfg(test)]
 #[path = "partner_secret_tests.rs"]
 mod partner_secret_tests;
+
+#[cfg(test)]
+#[path = "partner_secret_c8_tests.rs"]
+mod partner_secret_c8_tests;
