@@ -228,7 +228,7 @@ export default function Step1Device({ onNext, onBack }: Step1Props) {
         <Info size={12} color="var(--t2)" style={{ marginTop: 1, flexShrink: 0 }} />
         <span style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--t1)' }}>
           Verification stakes are managed on{' '}
-          <span style={{ color: 'var(--teal)' }}>dashboard.frynetworks.com</span>. Your multiplier is applied automatically — no
+          <span style={{ color: 'var(--teal)' }}>fry.farm/dashboard</span>. Your multiplier is applied automatically — no
           action needed here.
         </span>
       </div>

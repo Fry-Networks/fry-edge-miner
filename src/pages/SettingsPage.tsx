@@ -439,7 +439,7 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
               Networks dashboard account — change it there to change where you get paid.
             </div>
             <a
-              href="https://dashboard.frynetworks.com/devices"
+              href="https://fry.farm/dashboard/devices"
               target="_blank"
               rel="noreferrer"
               style={{

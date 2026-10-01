@@ -505,7 +505,7 @@ pub async fn register_device(
                     }
                 }
                 crate::api::client::ApiError::HttpStatus(code @ (401 | 403), _) => {
-                    format!("Server rejected the request (HTTP {}). Your saved registration was NOT changed. If this persists, check your network/VPN or dashboard.frynetworks.com status, then retry.", code)
+                    format!("Server rejected the request (HTTP {}). Your saved registration was NOT changed. If this persists, check your network/VPN or fry.farm/dashboard status, then retry.", code)
                 }
                 _ => format!("API registration failed: {}", format_error_chain(&e)),
             };
