@@ -75,6 +75,9 @@ impl IagonIntegration {
     /// Read fresh on every call so a user can paste their key and toggle the
     /// integration without restarting the whole app.
     fn node_token() -> Option<String> {
+        use crate::commands::partner_secret::sweep_stale_secret_temps;
+        static SWEEP: std::sync::Once = std::sync::Once::new();
+        SWEEP.call_once(|| sweep_stale_secret_temps(&Self::config_path()));
         if let Some(t) = std::env::var("IAGON_NODE_TOKEN")
             .ok()
             .filter(|s| !s.is_empty())
