@@ -10,17 +10,14 @@ import { useRewards } from '../hooks/useRewards'
 import { useReporting } from '../hooks/useReporting'
 import { condenseError } from '../lib/error'
 import { activeFraction } from '../lib/integrationCount'
+import { integrationBadge } from '../lib/integrationBadge'
 import { REQUIRED_INTEGRATIONS, type IntegrationTier } from '../lib/integrationMeta'
-import {
-  SECOND_REQUIRED_BOOST,
-  boostDisplayPct,
-  countActive,
-  isActive,
-  requiredComponent
-} from '../lib/rewardModel'
+import { SECOND_REQUIRED_BOOST, countActive, isActive } from '../lib/rewardModel'
+import { rewardBreakdown } from '../lib/rewardBreakdown'
 import { SDK_REPORT_LINE } from '../lib/support'
 import { sdkActiveLine, sdkCounts, splitByRewardRole, splitByTier, tierCounts } from '../lib/tierSplit'
 import { deriveRewardDisplay } from '../lib/rewardReadiness'
+import type { HealthStatus, LifecycleState, SystemStatus } from '../lib/types'
 
 interface DashboardIntegration {
   id: string
@@ -29,12 +26,23 @@ interface DashboardIntegration {
   col: string
   enabled: boolean
   healthy: boolean
+  health: HealthStatus
+  lifecycle: LifecycleState
+  version: string | null
   tier: IntegrationTier
   unavailable_reason?: string | null
+  /** G4 review finding 15: needed to compute dockerBlocked the same way
+   *  Integrations.tsx does, so a docker-requiring, uninstalled, disabled
+   *  integration reads 'Unavailable' here too, not 'Not installed'. */
+  requires_docker: boolean
 }
 
 interface DashboardProps {
   intgs: DashboardIntegration[]
+  /** G4 review finding 15: without this the tile could never know docker
+   *  wasn't ready, so it could never agree with the card's 'Unavailable'
+   *  state — the one input B14's original fix didn't thread through. */
+  system?: SystemStatus | null
 }
 
 /**
@@ -42,9 +50,28 @@ interface DashboardProps {
  * hierarchy between the two tiers is carried by density, not by a second
  * accent colour, so the official partners stay the thing you read first.
  */
-function MiniCard({ intg, compact }: { intg: DashboardIntegration; compact: boolean }) {
-  const { name, Icon, col, enabled, healthy } = intg
-  const st = !enabled ? 'stopped' : healthy ? 'run' : 'err'
+function MiniCard({
+  intg,
+  compact,
+  dockerNotReady
+}: {
+  intg: DashboardIntegration
+  compact: boolean
+  dockerNotReady: boolean
+}) {
+  const { id, name, Icon, col, enabled } = intg
+  // G4 review finding 15: same input Integrations.tsx computes
+  // (dockerNote={intg.requires_docker && dockerNotReady ? ... : null},
+  // dockerBlocked = !!dockerNote) — without it this tile could read 'Not
+  // installed' while the card reads 'Unavailable' for the same integration.
+  const dockerBlocked = intg.requires_docker && dockerNotReady
+  // B14 D2: same shared ladder the Integrations card uses — see
+  // ../lib/integrationBadge.ts — so the two pages can never disagree.
+  const badge = integrationBadge({ ...intg, dockerBlocked })
+  // Dot only knows 4 statuses (no 'info'); the badge's 'info' states
+  // (Installing/Starting/Setup required) read as attention-amber here, same
+  // as the sidebar's convention for "needs a look, not a failure".
+  const dotStatus = badge.dot === 'info' ? 'warn' : badge.dot
   const box = compact ? 24 : 30
   return (
     <div
@@ -88,18 +115,22 @@ function MiniCard({ intg, compact }: { intg: DashboardIntegration; compact: bool
         >
           {name}
         </div>
-        <div style={{ fontFamily: 'var(--fb)', fontSize: compact ? 10 : 11, color: 'var(--t2)' }}>
-          {!enabled ? 'Disabled' : healthy ? 'Running' : 'Unhealthy'}
+        <div data-testid={`tile-status-${id}`} style={{ fontFamily: 'var(--fb)', fontSize: compact ? 10 : 11, color: 'var(--t2)' }}>
+          {badge.label}
         </div>
       </div>
-      <Dot status={st} />
+      <Dot status={dotStatus} />
     </div>
   )
 }
 
-export default function Dashboard({ intgs }: DashboardProps) {
+export default function Dashboard({ intgs, system }: DashboardProps) {
   const { rewards } = useRewards()
   const reporting = useReporting()
+  // G4 review finding 15: same formula as Integrations.tsx's dockerNotReady,
+  // so a tile can agree with the card on whether a docker-requiring
+  // integration is 'Unavailable' rather than merely 'Not installed'.
+  const dockerNotReady = !!system && system.docker !== 'ready'
   // B2: truthful reporting banner — red when PoC/lease is persistently
   // failing, amber during transient retries.
   const notReporting =
@@ -115,8 +146,12 @@ export default function Dashboard({ intgs }: DashboardProps) {
   // server never pays (E7: "2/2 · 100%" beside a red Fry dVPN card).
   const counts = countActive(intgs)
   const requiredActive = counts.required
-  const requiredPct = Math.round(requiredComponent(counts.required) * 100)
-  const boostPercent = boostDisplayPct(counts)
+  // B22 D2: prefer the summary's own breakdown — the numbers the "Daily
+  // Estimate" figure beside this label was actually computed from — over
+  // the live list, which polls independently and can be a snapshot newer
+  // or older than the summary. Falls back to the live-list computation when
+  // the summary has none (older backend / not ready / browser preview).
+  const { requiredPct, boostPct: boostPercent, optionalActive, secondRequired } = rewardBreakdown(summary, counts)
   const pct = String(requiredPct)
   // F2: presentation split only — `available`/`pct` above still feed the
   // reward breakdown from the full list, exactly as before. The official tier
@@ -214,7 +249,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(185px,1fr))', gap: 8 }}>
               {requiredIntgs.map((i) => (
-                <MiniCard key={i.id} intg={i} compact={false} />
+                <MiniCard key={i.id} intg={i} compact={false} dockerNotReady={dockerNotReady} />
               ))}
             </div>
           </div>
@@ -229,7 +264,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(185px,1fr))', gap: 8 }}>
               {partnerIntgs.map((i) => (
-                <MiniCard key={i.id} intg={i} compact={false} />
+                <MiniCard key={i.id} intg={i} compact={false} dockerNotReady={dockerNotReady} />
               ))}
             </div>
           </div>
@@ -258,7 +293,7 @@ export default function Dashboard({ intgs }: DashboardProps) {
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(160px,1fr))', gap: 7 }}>
                 {sdkIntgs.map((i) => (
-                  <MiniCard key={i.id} intg={i} compact />
+                  <MiniCard key={i.id} intg={i} compact dockerNotReady={dockerNotReady} />
                 ))}
               </div>
             </div>
@@ -342,12 +377,12 @@ export default function Dashboard({ intgs }: DashboardProps) {
             ['Required proportion', `${requiredPct}%`, 'var(--txt)'],
             [
               'Second required boost',
-              counts.required >= 2 ? `+${Math.round(SECOND_REQUIRED_BOOST * 100)}%` : '—',
-              counts.required >= 2 ? 'var(--teal)' : 'var(--t1)'
+              secondRequired ? `+${Math.round(SECOND_REQUIRED_BOOST * 100)}%` : '—',
+              secondRequired ? 'var(--teal)' : 'var(--t1)'
             ],
             [
               'Boost',
-              `+${boostPercent}% (${counts.partner + counts.community} optional active)`,
+              `+${boostPercent}% (${optionalActive} optional active)`,
               'var(--teal)'
             ],
             ['BYOD factor', '1.0×', 'var(--t1)']

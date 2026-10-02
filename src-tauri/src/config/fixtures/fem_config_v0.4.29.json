@@ -1,0 +1,27 @@
+{
+  "miner_key": "FEM-15CCB0C7A857E62200373CCF72EAA7D4",
+  "wallet_address": "TESTWALLETADDRESSTESTWALLETADDRESSTESTWALLETADDRESSTESTWA",
+  "install_id": "install-9f2c3d4e-0429",
+  "initial_setup_done": true,
+  "integrations_enabled": {
+    "titan": true,
+    "mysterium": true,
+    "fryvpn": true,
+    "space_acres": false
+  },
+  "integration_versions": {
+    "titan": "0.1.20",
+    "mysterium": "1.4.2",
+    "fryvpn": "0.4.29"
+  },
+  "api_base_url": "https://hardwareapi.frynetworks.com",
+  "device_token": "dev-token-abc123",
+  "device_name": "GEORGE-RIG-01",
+  "start_on_boot": true,
+  "minimize_to_tray": true,
+  "auto_update": true,
+  "notifications": true,
+  "myst_lan_override": false,
+  "last_reported_version": "0.4.29",
+  "hardening_applied_version": "0.4.29"
+}

@@ -155,6 +155,14 @@ pub struct StorageLocation {
     pub is_default: bool,
     /// Configured != active, i.e. a restart is needed for it to take effect.
     pub pending_restart: bool,
+    /// B4: where partner files are being written RIGHT NOW. Equal to `path`
+    /// unless the configured root was rejected at startup, in which case the
+    /// two disagree and this is the one that is true.
+    pub active_path: String,
+    /// B4: why the configured root was not used, if it was not. When this is
+    /// set, `pending_restart` is true but a restart alone will NOT help, so the
+    /// UI must show this instead of the restart banner.
+    pub fallback_reason: Option<String>,
 }
 
 fn describe_storage(configured: Option<&str>) -> StorageLocation {
@@ -167,6 +175,8 @@ fn describe_storage(configured: Option<&str>) -> StorageLocation {
         is_default: resolved == default,
         pending_restart: resolved != active,
         path: resolved.to_string_lossy().into_owned(),
+        active_path: active.to_string_lossy().into_owned(),
+        fallback_reason: crate::integrations::download::storage_fallback_reason(),
     }
 }
 

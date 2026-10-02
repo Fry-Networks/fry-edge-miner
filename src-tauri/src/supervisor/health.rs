@@ -22,6 +22,15 @@ pub struct HealthCheckConfig {
     /// Consecutive `Starting` checks tolerated before startup is called failed.
     /// 0 disables the timeout. Default 6 ≈ 3 minutes at a 30s interval.
     pub starting_timeout_ticks: u32,
+    /// B10: checks to wait after the restart budget is spent before granting
+    /// one fresh attempt.
+    ///
+    /// This was a `const` in the body of `health_check_loop`, so the resume
+    /// was bounded in code but unreachable from any test and unsettable by any
+    /// caller — the Done-when asks for "a bounded, documented, tested resume"
+    /// and only the first of those three was true. Default 10 is byte-identical
+    /// to the shipped behaviour.
+    pub rearm_ticks: u32,
 }
 
 impl Default for HealthCheckConfig {
@@ -31,8 +40,33 @@ impl Default for HealthCheckConfig {
             max_restarts: 3,
             backoff_base: Duration::from_secs(5),
             starting_timeout_ticks: 6,
+            rearm_ticks: 10,
         }
     }
+}
+
+/// B10: what the card says while automatic restarts are paused.
+///
+/// The shipped text was "… — automatic restarts paused, retrying periodically",
+/// which names no period, so a user watching a red card had no way to tell a
+/// bounded pause from a dead one. The literal substring "automatic restarts
+/// paused" is deliberately preserved: it is what anything downstream greps for.
+///
+/// The figure is derived, not hard-coded, so it stays true if any of the three
+/// inputs is retuned: `rearm_ticks` further checks at `check_interval`, then
+/// one more check, then the backoff the re-armed attempt sleeps through.
+pub(crate) fn pause_reason(reason: &str, config: &HealthCheckConfig) -> String {
+    // The pause is emitted on the FIRST exhausted tick and re-arms on the
+    // `rearm_ticks`-th, so `rearm_ticks - 1` further checks elapse, then one
+    // more check acts on the re-armed budget: `rearm_ticks * check_interval`
+    // in total. The re-armed attempt then sleeps its backoff before running.
+    let rearm_secs = config.rearm_ticks as u64 * config.check_interval.as_secs();
+    let backoff_secs =
+        (config.backoff_base * 3u32.pow(config.max_restarts.saturating_sub(1))).as_secs();
+    format!(
+        "{reason} — automatic restarts paused; the next automatic attempt is in {}s",
+        rearm_secs + backoff_secs
+    )
 }
 
 /// What the loop should do about this tick's status.
@@ -60,6 +94,14 @@ pub(crate) fn recovery_action(
     match status {
         // BUG 5/8: waiting on the user is not a fault to recover from.
         HealthStatus::Unhealthy(reason) if crate::integrations::awaits_user_action(reason) => {
+            RecoveryAction::None
+        }
+        // B16: an upstream network condition is not a fault FEM can restart
+        // its way out of. Killing a live titan-edge over an unreachable
+        // scheduler is what stopped it staying up; the health loop keeps
+        // polling, so recovery is automatic the moment upstream returns.
+        // Placed ABOVE the catch-all, so it can only remove restarts.
+        HealthStatus::Unhealthy(reason) if crate::integrations::upstream_unreachable(reason) => {
             RecoveryAction::None
         }
         HealthStatus::Unhealthy(_) => RecoveryAction::Restart,
@@ -97,10 +139,6 @@ pub async fn health_check_loop<C, R, E>(
     R: Fn() -> bool + Send + 'static,
     E: Fn() -> bool + Send + 'static,
 {
-    // Grant one fresh restart attempt every N checks after the budget is
-    // spent (N * check_interval ≈ 5 minutes with defaults).
-    const REARM_TICKS: u32 = 10;
-
     let mut restart_count: u32 = 0;
     let mut last_status = HealthStatus::Unknown;
     let mut ticks_since_exhausted: u32 = 0;
@@ -197,14 +235,11 @@ pub async fn health_check_loop<C, R, E>(
                     let _ = tx
                         .send(HealthEvent {
                             integration_id: integration_id.clone(),
-                            status: HealthStatus::Unhealthy(format!(
-                                "{} — automatic restarts paused, retrying periodically",
-                                reason
-                            )),
+                            status: HealthStatus::Unhealthy(pause_reason(&reason, &config)),
                             restart_count,
                         })
                         .await;
-                } else if ticks_since_exhausted >= REARM_TICKS {
+                } else if ticks_since_exhausted >= config.rearm_ticks {
                     ticks_since_exhausted = 0;
                     restart_count = config.max_restarts - 1; // grant one attempt
                 }

@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use anyhow::Result;
@@ -40,6 +41,13 @@ impl ConfigStore {
     pub fn new(config_dir: PathBuf, roaming_path: Option<PathBuf>) -> Self {
         let path = config_dir.join("fem_config.json");
         let backup_path = config_dir.join("fem_config.backup.json");
+        // BL-C6-3: before this process writes anything.
+        for p in [Some(&path), Some(&backup_path), roaming_path.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            Self::remove_stale_temps(p);
+        }
 
         tracing::info!(
             config_dir = %config_dir.display(),
@@ -135,12 +143,25 @@ impl ConfigStore {
             return None;
         }
         match std::fs::read_to_string(path) {
-            Ok(data) => match serde_json::from_str::<FemConfig>(&data) {
+            Ok(data) => match crate::config::migrate::parse(&data) {
                 Ok(cfg) => Some(cfg),
                 Err(e) => {
                     tracing::error!(file = %path.display(), error = %e, "ConfigStore: corrupt config ({label})");
+                    // B5: derive the stem from the file being quarantined. The
+                    // name used to be a constant, so the primary and the backup
+                    // — which live in the SAME directory and are tried
+                    // microseconds apart — produced one identical path, and
+                    // `rename` replaces an existing destination on both Windows
+                    // and Unix: the backup's quarantine DESTROYED the primary's,
+                    // the only surviving copy of the identity. The primary's
+                    // artifact name is byte-identical to before, so no support
+                    // doc changes; the backup now lands beside it.
+                    let stem = path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "fem_config".to_string());
                     let quarantine = path.with_file_name(format!(
-                        "fem_config.corrupt.{}.json",
+                        "{stem}.corrupt.{}.json",
                         chrono::Utc::now().timestamp()
                     ));
                     if let Err(qe) = std::fs::rename(path, &quarantine) {
@@ -189,7 +210,11 @@ impl ConfigStore {
     }
 
     fn save_to_disk(&self, config: &FemConfig) -> Result<()> {
-        let data = serde_json::to_string_pretty(config)?;
+        let targets = [&self.path, &self.backup_path]; // D-C7-1: the load sweep, again
+        for p in targets.into_iter().chain(&self.roaming_path) {
+            Self::remove_stale_temps(p);
+        }
+        let data = crate::config::migrate::to_disk_string(config)?;
         Self::write_atomic(&self.path, &data)?;
         // Redundant copies only once a real registration exists.
         if config.miner_key.is_some() {
@@ -205,15 +230,104 @@ impl ConfigStore {
         Ok(())
     }
 
-    /// Write via tmp-file + rename so a crash mid-write can never leave a
-    /// truncated config behind.
+    /// The temp file one `write_atomic` call writes through. Pure, so the
+    /// uniqueness invariant is directly testable.
+    ///
+    /// B2: the old name was `path.with_extension("json.tmp")` — a pure function
+    /// of the TARGET, so `fem_config.json` always became
+    /// `fem_config.json.tmp`. With no single-instance guard two FEM processes
+    /// wrote that same temp file, and B's `CREATE_ALWAYS` truncation landing
+    /// between A's write and A's rename publishes a truncated config. The pid
+    /// makes the name unique across processes, and the counter makes it unique
+    /// across calls even where the clock's resolution would not.
+    fn tmp_path_for(path: &Path) -> PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "fem_config.json".to_string());
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        path.with_file_name(format!("{name}.tmp.{}.{nanos}.{seq}", std::process::id()))
+    }
+
+    /// BL-C6-3: remove the temps (`tmp_path_for`) that EARLIER processes left
+    /// next to `path` when they were killed mid-save; each is a complete
+    /// config, miner key included, and nothing else ever removed them. Only
+    /// another pid's temps go: a store in this process may be writing its own
+    /// right now, and the single-instance guard is registered before the store
+    /// is built, so no other live FEM process writes here.
+    fn remove_stale_temps(path: &Path) {
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+            return;
+        };
+        let prefix = format!("{}.tmp.", name.to_string_lossy());
+        let own = std::process::id().to_string();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut failed = 0u32; // D-C7-1: one warn per sweep, never an error
+        for entry in entries.flatten() {
+            let file = entry.file_name().to_string_lossy().into_owned();
+            let rest = file.strip_prefix(&prefix).unwrap_or_default();
+            let parts: Vec<&str> = rest.split('.').collect();
+            let is_temp = parts.len() == 3
+                && parts
+                    .iter()
+                    .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+            if (is_temp || file == prefix.trim_end_matches('.')) // or v0.4.33's fixed name
+                && parts[0] != own
+                && entry.file_type().is_ok_and(|t| t.is_file())
+                && Self::is_aged(&entry.path())
+                && std::fs::remove_file(entry.path())
+                    .inspect_err(|_| failed += 1)
+                    .is_ok()
+            {
+                tracing::info!(file = %file, "ConfigStore: removed a temp left by an interrupted save");
+            }
+        }
+        if failed > 0 {
+            tracing::warn!(failed, dir = %dir.display(), "ConfigStore: stale temps not removed");
+        }
+    }
+
+    /// D-C7-1: under 60 s old may be a live writer's; an unreadable or future mtime keeps it.
+    fn is_aged(path: &Path) -> bool {
+        let modified = std::fs::metadata(path).and_then(|m| m.modified());
+        modified.is_ok_and(|t| t.elapsed().is_ok_and(|age| age.as_secs() >= 60))
+    }
+
+    /// Write via tmp-file + flush + rename so a crash mid-write can never
+    /// leave a truncated config behind, and a power cut can never leave a
+    /// durable rename pointing at bytes that never reached the disk.
     fn write_atomic(path: &PathBuf, data: &str) -> Result<()> {
+        use std::io::Write;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, data)?;
-        std::fs::rename(&tmp, path)?;
+        let tmp = Self::tmp_path_for(path);
+        let mut file = std::fs::File::create(&tmp)?;
+        let mut outcome = file.write_all(data.as_bytes());
+        if outcome.is_ok() {
+            outcome = file.sync_all();
+        }
+        drop(file);
+        if let Err(e) = outcome {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
         Ok(())
     }
 }
@@ -338,3 +452,186 @@ mod isolation_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 }
+
+/// B2 defect 2: `write_atomic` was neither cross-process safe nor crash
+/// durable, and the Done-when spells out what it has to be — "config writes
+/// atomic (temp + flush + rename)".
+///
+/// The old implementation derived the temp name from the target
+/// (`fem_config.json` -> `fem_config.json.tmp`), so two FEM processes wrote the
+/// same file, and it used `std::fs::write`, which opens/writes/closes with no
+/// `sync_all` — the "flush" step of the Done-when did not exist at all. This
+/// function is byte-identical at v0.4.12, v0.4.25, v0.4.29, v0.4.31 and
+/// v0.4.33, so it is a standing defect rather than a 0.4.29->0.4.33 regression.
+#[cfg(test)]
+mod atomic_write_tests {
+    use super::*;
+
+    fn unique_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fem_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The deterministic RED. `path.with_extension("json.tmp")` is a pure
+    /// function of the target, so two calls for the same target returned the
+    /// same path — which is exactly what let two processes collide.
+    #[test]
+    fn the_temp_file_name_is_unique_per_call() {
+        let target = PathBuf::from("/tmp/fem-unique-test/fem_config.json");
+        let first = ConfigStore::tmp_path_for(&target);
+        let second = ConfigStore::tmp_path_for(&target);
+        assert_ne!(
+            first, second,
+            "two writes to the same config must not share one temp file"
+        );
+        let name = first.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            name.contains(&std::process::id().to_string()),
+            "the temp name must carry the pid so a second FEM process cannot \
+             collide with this one: {name}"
+        );
+        assert!(
+            name.starts_with("fem_config.json.tmp."),
+            "the temp file must stay recognisably a temp of its target: {name}"
+        );
+        assert_eq!(
+            first.parent(),
+            target.parent(),
+            "the temp must be written next to its target so the rename stays \
+             within one filesystem and therefore stays atomic"
+        );
+    }
+
+    /// The other deterministic RED, asserted against the real source: the
+    /// bytes have to be on disk BEFORE the rename publishes them, or a power
+    /// cut leaves a durable rename pointing at a hole.
+    #[test]
+    fn the_atomic_write_flushes_before_it_renames() {
+        let src = include_str!("store.rs");
+        let code: String = src
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let at = code
+            .find("fn write_atomic")
+            .expect("write_atomic must still exist");
+        let body_end = code[at..]
+            .find("#[cfg(test)]")
+            .map(|e| at + e)
+            .unwrap_or(code.len());
+        let body = &code[at..body_end];
+        let flush = body.find("sync_all").expect(
+            "write_atomic must flush the file to disk before it renames — \
+             std::fs::write does not, and the Done-when requires temp + flush + rename",
+        );
+        let rename = body
+            .find("rename")
+            .expect("write_atomic must still publish by rename");
+        assert!(
+            flush < rename,
+            "the flush must happen BEFORE the rename, not after"
+        );
+    }
+
+    /// INVARIANT PIN, not a RED->GREEN proof: v0.4.33's `write_atomic` also
+    /// left no `.tmp` behind on its SUCCESS path, so this passes pre-fix. It
+    /// guards the new error paths, which remove the temp on every failure. The
+    /// deterministic REDs for B2 defect 2 are `the_temp_file_name_is_unique_per_call`
+    /// and `the_atomic_write_flushes_before_it_renames`.
+    #[test]
+    fn no_temp_files_survive_a_successful_save() {
+        let dir = unique_dir("atomic_no_orphans");
+        let store = ConfigStore::new(dir.clone(), None);
+        for i in 0..25 {
+            store
+                .update(|cfg| cfg.miner_key = Some(format!("FEM-ORPHAN-TEST-{i}")))
+                .unwrap();
+        }
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a successful save must leave no temp file behind: {leftovers:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Corroborating, not the RED/GREEN gate: the two tests above are the
+    /// deterministic ones. This is the shape of the real-world failure — two
+    /// FEM processes writing one config directory — and it must never publish
+    /// a `fem_config.json` that does not parse.
+    #[test]
+    fn two_concurrent_writers_never_publish_an_unparseable_config() {
+        use std::sync::Arc;
+
+        let dir = unique_dir("atomic_two_writers");
+        let primary = dir.join("fem_config.json");
+        let a = Arc::new(ConfigStore::new(dir.clone(), None));
+        let b = Arc::new(ConfigStore::new(dir.clone(), None));
+
+        let writer = |store: Arc<ConfigStore>, tag: &'static str, pad: usize| {
+            std::thread::spawn(move || {
+                for i in 0..150 {
+                    store
+                        .update(|cfg| {
+                            cfg.miner_key = Some(format!("FEM-{tag}-{i}"));
+                            cfg.wallet_address = Some("W".repeat(pad));
+                        })
+                        .unwrap();
+                }
+            })
+        };
+        let ha = writer(Arc::clone(&a), "A", 8);
+        let hb = writer(Arc::clone(&b), "B", 512);
+
+        // Sampled rather than spun: a hot read loop would contend with the
+        // writers' renames on Windows and turn a real invariant into a flake.
+        let mut checked = 0usize;
+        while !ha.is_finished() || !hb.is_finished() {
+            if let Ok(text) = std::fs::read_to_string(&primary) {
+                serde_json::from_str::<FemConfig>(&text).unwrap_or_else(|e| {
+                    panic!("published a config that does not parse ({e}): {text}")
+                });
+                checked += 1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        ha.join().unwrap();
+        hb.join().unwrap();
+
+        let text = std::fs::read_to_string(&primary).unwrap();
+        serde_json::from_str::<FemConfig>(&text).expect("final config must parse");
+        assert!(
+            checked > 0,
+            "the reader never observed the config while both writers were running"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// BL-C6-3: temps left by a save that was killed never accumulate.
+#[cfg(test)]
+#[path = "store_c6_bl3_tests.rs"]
+mod store_c6_bl3_tests;
+
+/// D-C7-1: the sweep's age rule, v0.4.33 names, pre-write sweep and warn line.
+#[cfg(test)]
+#[path = "store_c7_c1_tests.rs"]
+mod store_c7_c1_tests;
+
+#[cfg(test)]
+#[path = "store_c7_c1_age_tests.rs"]
+mod store_c7_c1_age_tests;

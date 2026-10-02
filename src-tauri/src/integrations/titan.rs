@@ -47,7 +47,8 @@ pub(crate) fn vc_redist_missing() -> bool {
 /// redistributable install (`/quiet` still commonly takes well over 20s),
 /// and that budget also has to absorb however long the user takes to notice
 /// and click the UAC prompt. Bounded but materially longer: 10 minutes.
-const VC_REDIST_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+pub(crate) const VC_REDIST_INSTALL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(600);
 
 /// Outcome of one elevated VC++ redist install attempt. A dedicated enum
 /// rather than folding everything into `Result` because `StillInstalling`
@@ -97,7 +98,33 @@ fn vc_redist_install_outcome(
 /// unexpected failures (download failed, task panicked); a completed-but-declined
 /// install and a still-in-progress one are both `Ok` with a distinguishing
 /// `VcRedistInstallOutcome` — see that type's docs for why timeout ≠ failure.
-pub(crate) async fn install_vc_redist_elevated() -> Result<VcRedistInstallOutcome> {
+pub(crate) async fn install_vc_redist_elevated(
+    trigger: crate::elevation_gate::ElevationTrigger,
+) -> Result<VcRedistInstallOutcome> {
+    // B3 / G4 BLOCKER: this raised `Start-Process -Verb RunAs` directly, with
+    // no reference to the elevation gate at all — while the gate's own module
+    // doc listed this function as one of the five sites it covered. The boot
+    // recovery pass calls `install()` for every enabled-but-not-installed
+    // integration, `installed_version()` is None whenever titan-edge.exe is
+    // absent (the B4 wiped-partner-files population), and `vc_redist_missing()`
+    // is true on a redist-free machine (the B1 population) — so a UAC dialog
+    // appeared at app start, unprompted, for exactly the users who filed those
+    // two bugs. Refusing an Automatic trigger is the whole point of B3.
+    if trigger == crate::elevation_gate::ElevationTrigger::Automatic {
+        // Asked BEFORE downloading 25 MB we are not going to be allowed to run.
+        // The gate refuses every Automatic trigger and publishes the
+        // needs-approval reason against this integration's card.
+        let skipped = crate::elevation_gate::run_elevated(
+            "titan",
+            "vc-redist|needs-approval",
+            trigger,
+            || Ok::<(), anyhow::Error>(()),
+        )
+        .expect_err("the gate always refuses an Automatic trigger");
+        warn!(reason = %skipped, "VC++ redist install needs administrator approval");
+        anyhow::bail!("{skipped}");
+    }
+
     let installer_path = std::env::temp_dir().join("vc_redist.x64.exe");
     download_file_with_options(VC_REDIST_DOWNLOAD_URL, &installer_path, USER_AGENT, None).await?;
 
@@ -107,13 +134,35 @@ pub(crate) async fn install_vc_redist_elevated() -> Result<VcRedistInstallOutcom
         installer_str.replace('\'', "''")
     );
 
-    let result = tokio::task::spawn_blocking(move || {
-        crate::supervisor::platform::command("powershell")
+    // Identity-bearing, so a different redist build re-arms the one allowed
+    // attempt instead of being silently suppressed.
+    let attempt_key = format!("vc-redist|{}", installer_str.to_lowercase());
+    let gated = crate::elevation_gate::run_elevated("titan", &attempt_key, trigger, move || {
+        match crate::supervisor::platform::command("powershell")
             .args(["-NoProfile", "-Command", &outer])
             .output_bounded(VC_REDIST_INSTALL_TIMEOUT)
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("VC++ redist installer task panicked: {e}"))?;
+        {
+            // NB-2: a timeout is the "still installing in the background" case
+            // below, not a decline. Hand it back INSIDE Ok: in the gate's error
+            // channel every TimedOut is classified as declined and replaced by
+            // the needs-approval message, so an approved-but-slow install was
+            // told to approve again.
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(Err(e)),
+            other => other.map(Ok).map_err(anyhow::Error::new),
+        }
+    });
+
+    let result: std::io::Result<std::process::Output> = match gated {
+        Ok(result) => result,
+        Err(crate::elevation_gate::ElevationSkipped::Failed(reason)) => {
+            warn!(reason = %reason, "VC++ redist install did not complete");
+            return Ok(vc_redist_install_outcome(false, false, None));
+        }
+        Err(skipped) => {
+            warn!(reason = %skipped, "VC++ redist install skipped by the elevation gate");
+            anyhow::bail!("{skipped}")
+        }
+    };
 
     let outcome = match &result {
         Ok(out) => vc_redist_install_outcome(false, out.status.success(), out.status.code()),
@@ -140,6 +189,149 @@ pub(crate) async fn install_vc_redist_elevated() -> Result<VcRedistInstallOutcom
         VcRedistInstallOutcome::Failed(code) => {
             anyhow::bail!("VC++ redist install declined or failed (exit {:?})", code)
         }
+    }
+}
+
+/// Unpacking a partner release is an INSTALL step, not a probe.
+///
+/// This used to be `PROBE_TIMEOUT` — the repo's own 20 s deadline for
+/// short-lived CLI queries, whose doc comment says as much. On a slow disk or
+/// a custom storage root on a second drive, `tar` was KILLED mid-extract and
+/// the `?` aborted install after extraction and before the archive cleanup,
+/// leaving exactly the reported layout: the extracted subdirectory and the
+/// archive still on disk, and no titan-edge.exe at the partner-dir level. The
+/// repo already recorded this same anti-pattern for the VC++ redist.
+const EXTRACT_TIMEOUT: std::time::Duration = crate::supervisor::platform::LONG_TIMEOUT;
+
+// A runtime assert over two compile-time constants can never fail, so this is a
+// build-time invariant instead: unpacking a partner release must never be
+// bounded by the short-lived-CLI-probe deadline again.
+const _: () = assert!(
+    EXTRACT_TIMEOUT.as_secs() > crate::supervisor::platform::PROBE_TIMEOUT.as_secs(),
+    "the extraction deadline must outlast the generic probe deadline"
+);
+
+/// Per-file sha256 pins for the v0.1.20 release.
+///
+/// Measured from the published archive, which itself verifies against
+/// `EXPECTED_SHA256` — so these are derived from the same artifact the install
+/// already trusts, not from a separate download.
+///
+/// B15's Done-when asks for partner files to be verified against a pinned
+/// manifest BEFORE EVERY SPAWN, with automatic repair on mismatch. The archive
+/// hash alone cannot do that: it is checked once at install time and says
+/// nothing about what is on disk at spawn time, which is exactly the window in
+/// which an antivirus quarantine or a partial update corrupts a file.
+const PINNED_FILES: [(&str, &str, u64); 2] = [
+    (
+        "titan-edge.exe",
+        "a9e4a521343a1ce6800ba15178d7da403cd48ccf15e3df4adc464969dcf95e8b",
+        162_912_779,
+    ),
+    (
+        "goworkerd.dll",
+        "997cd9439ed79ea22c311dcca7308604755517e15c2c3ee17ce96f41412609e6",
+        177_544_704,
+    ),
+];
+
+/// Files already verified in this process run, keyed by path, with the size and
+/// mtime they had when they passed.
+///
+/// Hashing 340 MB on every spawn would make a restart cycle expensive, and the
+/// supervisor can restart several times in a row. A file whose size AND mtime
+/// are unchanged since it last verified has not been swapped, so re-hashing it
+/// buys nothing; anything that touches the file invalidates the entry.
+static VERIFIED_FILES: std::sync::Mutex<
+    Option<std::collections::HashMap<PathBuf, (u64, std::time::SystemTime)>>,
+> = std::sync::Mutex::new(None);
+
+/// PURE: does this file's metadata match what it had when it last verified?
+pub(crate) fn metadata_unchanged(
+    recorded: Option<(u64, std::time::SystemTime)>,
+    now: (u64, std::time::SystemTime),
+) -> bool {
+    recorded == Some(now)
+}
+
+/// Verify the pinned partner files, returning the names that are missing or do
+/// not match. Empty means the tree is trustworthy.
+fn unverified_pinned_files(partner_dir: &std::path::Path) -> Vec<String> {
+    let mut bad = Vec::new();
+    for (name, expected, expected_len) in PINNED_FILES {
+        let path = partner_dir.join(name);
+        let Ok(meta) = std::fs::metadata(&path) else {
+            bad.push(format!("{name} is missing"));
+            continue;
+        };
+        if meta.len() != expected_len {
+            bad.push(format!(
+                "{name} is {} bytes, expected {expected_len}",
+                meta.len()
+            ));
+            continue;
+        }
+        let stamp = match meta.modified() {
+            Ok(m) => Some((meta.len(), m)),
+            Err(_) => None,
+        };
+        let cached = stamp.and_then(|s| {
+            VERIFIED_FILES
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().and_then(|m| m.get(&path).copied()))
+                .filter(|recorded| metadata_unchanged(Some(*recorded), s))
+        });
+        if cached.is_some() {
+            continue;
+        }
+        match TitanIntegration::compute_sha256(&path) {
+            Ok(actual) if actual.eq_ignore_ascii_case(expected) => {
+                if let (Some(s), Ok(mut guard)) = (stamp, VERIFIED_FILES.lock()) {
+                    guard.get_or_insert_with(Default::default).insert(path, s);
+                }
+            }
+            Ok(actual) => bad.push(format!("{name} hashes to {actual}, expected {expected}")),
+            Err(e) => bad.push(format!("{name} could not be read: {e}")),
+        }
+    }
+    bad
+}
+
+/// Move a partner file that does not match its pin out of the way.
+///
+/// Renamed, never deleted: the displaced file is the only evidence of what was
+/// actually on disk, and a quarantined-then-restored antivirus artefact is
+/// exactly the thing worth keeping.
+fn quarantine_unverified(partner_dir: &std::path::Path) {
+    for (name, _, _) in PINNED_FILES {
+        let path = partner_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let dest = partner_dir.join(format!("{name}.untrusted"));
+        match std::fs::rename(&path, &dest) {
+            Ok(()) => warn!(moved_to = ?dest, "Quarantined a Titan file that failed verification"),
+            Err(e) => warn!(error = %e, file = name, "Could not quarantine a Titan file"),
+        }
+    }
+    if let Ok(mut guard) = VERIFIED_FILES.lock() {
+        if let Some(map) = guard.as_mut() {
+            map.clear();
+        }
+    }
+}
+
+/// Remove an extracted release directory and everything inside it.
+///
+/// Recursive on purpose: `remove_dir` fails the moment the archive carries any
+/// third file, and the leftover `titan-edge_v0.1.20_…` directory is exactly
+/// what users photographed. A directory that is already gone is not an error.
+async fn clear_extracted_dir(dir: &std::path::Path) {
+    match tokio::fs::remove_dir_all(dir).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!(error = %e, path = ?dir, "Could not clear the extracted Titan directory"),
     }
 }
 
@@ -248,17 +440,89 @@ pub(crate) fn should_report_unhealthy(consecutive_failures: u32) -> bool {
 /// PURE: the first genuinely-failing line in a log tail, or None.
 /// Reuses the existing `line_indicates_error` contract so benign lines that
 /// merely contain "error" (errors=0, error=<nil>, a docs URL) stay benign.
+/// Kept, not deleted: `mod bug3_daemon_error_tests` pins this and must stay
+/// byte-identical, and it remains the correct whole-log entry point. Production
+/// now selects its line with `first_recent_error_line` instead, so this is
+/// reachable only from tests.
+#[allow(dead_code)]
 pub(crate) fn first_error_line(log: &str) -> Option<&str> {
     log.lines().map(str::trim).find(|l| line_indicates_error(l))
+}
+
+/// How far back a titan-edge log line may be stamped and still count as a
+/// reason the CURRENT tick is failing.
+pub(crate) const ERROR_RECENCY_WINDOW_MINUTES: i64 = 5;
+
+/// PURE: is this log line recent enough to describe the current state?
+///
+/// The tail is a LINE window (last 50), never a time window, and the failure
+/// counter only resets when the whole tail is clean — so on a quiet log one
+/// historical ERROR was re-counted on every tick forever, holding the card
+/// UNHEALTHY (and, before the recovery exemption, restarting a live daemon)
+/// long after the condition had cleared.
+///
+/// titan-edge stamps `2026-09-18T19:56:30.482-0500`: an offset with no colon,
+/// so this is NOT rfc3339 and `parse_from_rfc3339` will not read it.
+///
+/// Fails OPEN: a line with no parseable timestamp counts as recent, which is
+/// exactly today's behaviour for every line that is not titan-shaped.
+pub(crate) fn error_line_is_recent(
+    line: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    window: chrono::Duration,
+) -> bool {
+    let Some(token) = line.split_whitespace().next() else {
+        return true;
+    };
+    let Ok(stamped) = chrono::DateTime::parse_from_str(token, "%Y-%m-%dT%H:%M:%S%.f%z") else {
+        return true;
+    };
+    now.signed_duration_since(stamped.with_timezone(&chrono::Utc)) <= window
+}
+
+/// PURE: the first genuinely-failing line that is also recent enough to be
+/// describing now.
+pub(crate) fn first_recent_error_line(
+    log: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    window: chrono::Duration,
+) -> Option<&str> {
+    log.lines()
+        .map(str::trim)
+        .find(|l| line_indicates_error(l) && error_line_is_recent(l, now, window))
 }
 
 /// PURE: the user-facing reason for a daemon that is running but logging
 /// failures. Carries the REAL error through instead of the old fixed
 /// placeholder, and explains the common connectivity case in plain language.
+/// Kept for the same reason as `first_error_line`: the existing
+/// `bug3_daemon_error_tests` exercise this whole-log entry point, and those
+/// tests must not be edited. Production calls
+/// `daemon_log_failure_reason_for_line` with the line the gate selected.
+#[allow(dead_code)]
 pub(crate) fn daemon_log_failure_reason(log: &str) -> String {
-    let Some(line) = first_error_line(log) else {
-        return "Titan Network: the daemon reported a problem".to_string();
-    };
+    match first_error_line(log) {
+        Some(line) => daemon_log_failure_reason_for_line(line),
+        None => "Titan Network: the daemon reported a problem".to_string(),
+    }
+}
+
+/// PURE: the user-facing reason for ONE specific failing line.
+///
+/// Split out because the health check selects its line with a recency filter
+/// (`first_recent_error_line`) while this used to re-scan with
+/// `first_error_line`, which ignores recency — two different predicates over
+/// the same text, free to pick different lines. Reproduced against the real
+/// functions: a fresh local `{"level":"fatal","msg":"cannot open datastore"}`
+/// fired the gate while an hour-old connectivity line became the REASON, which
+/// `upstream_unreachable` then matched, so `recovery_action` returned None and
+/// a genuine device-side fault was never restarted and was painted as a
+/// network problem.
+///
+/// D-14 chose None on the premise that the reason really describes an upstream
+/// condition. Building the reason from the line that actually fired the gate is
+/// what makes that premise true; it does not weaken the exemption.
+pub(crate) fn daemon_log_failure_reason_for_line(line: &str) -> String {
     let lower = line.to_lowercase();
     let is_connectivity = lower.contains("timeout")
         || lower.contains("i/o timeout")
@@ -290,6 +554,134 @@ fn process_not_running_reason(vc_redist_missing: bool, stderr_tail: &str) -> Str
 }
 
 impl TitanIntegration {
+    /// The real install. `trigger` decides whether the VC++ redistributable
+    /// installer may raise a UAC prompt: only a user gesture ever may (B3).
+    async fn install_inner(&self, trigger: crate::elevation_gate::ElevationTrigger) -> Result<()> {
+        let binary = Self::binary_path();
+        let partner_dir = Self::partner_dir();
+        if Self::install_is_complete(&partner_dir) {
+            info!(path = ?binary, "titan-edge is installed and complete");
+            return Ok(());
+        }
+        if binary.exists() {
+            // Exe present, DLL missing: a half-install that used to report
+            // "already present" forever. Clear the exe so the reinstall below
+            // is a full one rather than a no-op.
+            warn!(path = ?binary, "titan-edge is present but goworkerd.dll is missing — reinstalling");
+            let _ = tokio::fs::remove_file(&binary).await;
+        }
+
+        info!("Installing Titan Network from GitHub release");
+
+        tokio::fs::create_dir_all(&partner_dir).await?;
+
+        let archive_path = partner_dir.join("titan-edge.tar.gz");
+        let extracted_dir = partner_dir.join("titan-edge_v0.1.20_246b9dd_widnows_amd64");
+
+        // Clear the residue a previously-killed extraction left behind, so a
+        // retry starts from a known state instead of unpacking over it.
+        let _ = tokio::fs::remove_file(&archive_path).await;
+        clear_extracted_dir(&extracted_dir).await;
+
+        // Download the archive
+        download_file_with_options(DOWNLOAD_URL, &archive_path, USER_AGENT, None).await?;
+        info!(archive = ?archive_path, "Downloaded Titan release archive");
+
+        // Verify SHA256
+        let computed_sha256 = Self::compute_sha256(&archive_path)?;
+        if computed_sha256 != EXPECTED_SHA256 {
+            let _ = tokio::fs::remove_file(&archive_path).await;
+            anyhow::bail!(
+                "SHA256 mismatch for titan-edge.tar.gz: expected {}, got {}",
+                EXPECTED_SHA256,
+                computed_sha256
+            );
+        }
+        info!("SHA256 verification passed");
+
+        // Extract using tar command (Windows 10+ includes bsdtar)
+        let output = crate::supervisor::platform::command("tar")
+            .args([
+                "-xzf",
+                &archive_path.to_string_lossy(),
+                "-C",
+                &partner_dir.to_string_lossy(),
+            ])
+            .output_bounded(EXTRACT_TIMEOUT)?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(stderr = %stderr, "tar extraction failed");
+            anyhow::bail!("Failed to extract titan-edge.tar.gz: {}", stderr);
+        }
+        info!("Extracted archive");
+
+        // The archive contains titan-edge_v0.1.20_246b9dd_widnows_amd64/ with titan-edge.exe and goworkerd.dll
+        // Move both files to the parent directory
+        if extracted_dir.exists() {
+            let exe_in_subdir = extracted_dir.join("titan-edge.exe");
+            let dll_in_subdir = extracted_dir.join("goworkerd.dll");
+
+            if exe_in_subdir.exists() {
+                tokio::fs::rename(&exe_in_subdir, &binary).await?;
+                info!(path = ?binary, "Moved titan-edge.exe to partner dir");
+            }
+
+            if dll_in_subdir.exists() {
+                tokio::fs::rename(&dll_in_subdir, &Self::dll_path()).await?;
+                info!(path = ?Self::dll_path(), "Moved goworkerd.dll to partner dir");
+            }
+
+            clear_extracted_dir(&extracted_dir).await;
+        }
+
+        // Clean up archive
+        let _ = tokio::fs::remove_file(&archive_path).await;
+
+        // BUG 8: titan-edge.exe needs the VC++ 2015-2022 x64 runtime to even
+        // launch. Install it now (one elevated prompt) rather than waiting
+        // for the daemon to fail fast on first start — best-effort: a
+        // decline/failure here must not fail the whole integration install,
+        // since `health_check()` still reports the concrete reason if it
+        // turns out to be missing at start time.
+        if vc_redist_missing() {
+            match install_vc_redist_elevated(trigger).await {
+                Ok(VcRedistInstallOutcome::Installed) => {}
+                Ok(VcRedistInstallOutcome::StillInstalling) => {
+                    // H2 review fix: not a failure — health_check() re-checks
+                    // vc_redist_missing() on the next tick once the process
+                    // has had more time to finish.
+                    info!("VC++ redist install still in progress — will confirm on a later health check");
+                }
+                // `install_vc_redist_elevated` currently always converts a
+                // Failed outcome into an Err before returning to the caller
+                // (see its own match), but VcRedistInstallOutcome is part of
+                // the public return type — handle this defensively the same
+                // as Err rather than relying on that internal detail.
+                Ok(VcRedistInstallOutcome::Failed(code)) => {
+                    warn!(exit_code = ?code, "VC++ redist install declined or failed — titan-edge may fail to start until it is installed manually");
+                }
+                Err(e) => {
+                    warn!(error = %e, "VC++ redist install declined or failed — titan-edge may fail to start until it is installed manually");
+                }
+            }
+        }
+
+        // Success used to be logged and returned with zero verification, so
+        // an install that moved nothing still reported Ok(()) and the failure
+        // only surfaced one step later, at start(), as "binary not found".
+        if !Self::install_is_complete(&partner_dir) {
+            anyhow::bail!(
+                "Titan install finished but {} / {} are missing",
+                binary.display(),
+                Self::dll_path().display()
+            );
+        }
+
+        info!(binary = ?binary, "Titan Network installed successfully");
+        Ok(())
+    }
+
     fn partner_dir() -> PathBuf {
         partners_base_dir().join("titan")
     }
@@ -303,6 +695,21 @@ impl TitanIntegration {
 
     fn dll_path() -> PathBuf {
         Self::partner_dir().join("goworkerd.dll")
+    }
+
+    /// PURE: is the partner directory a COMPLETE titan install?
+    ///
+    /// The entry guard used to check only titan-edge.exe, so a half-install —
+    /// the exe moved out of the extracted subdirectory but goworkerd.dll left
+    /// behind — reported "already present", returned Ok(()) and was never
+    /// repaired. titan-edge.exe cannot run without that DLL.
+    pub(crate) fn install_is_complete(partner_dir: &std::path::Path) -> bool {
+        let exe = if cfg!(target_os = "windows") {
+            partner_dir.join("titan-edge.exe")
+        } else {
+            partner_dir.join("titan-edge")
+        };
+        exe.exists() && partner_dir.join("goworkerd.dll").exists()
     }
 
     fn compute_sha256(path: &PathBuf) -> Result<String> {
@@ -334,113 +741,49 @@ impl Integration for TitanIntegration {
     }
 
     async fn install(&self) -> Result<()> {
-        let binary = Self::binary_path();
-        if binary.exists() {
-            info!(path = ?binary, "titan-edge binary already present");
-            return Ok(());
-        }
+        self.install_inner(crate::elevation_gate::ElevationTrigger::Automatic)
+            .await
+    }
 
-        info!("Installing Titan Network from GitHub release");
-
-        let partner_dir = Self::partner_dir();
-        tokio::fs::create_dir_all(&partner_dir).await?;
-
-        let archive_path = partner_dir.join("titan-edge.tar.gz");
-
-        // Download the archive
-        download_file_with_options(DOWNLOAD_URL, &archive_path, USER_AGENT, None).await?;
-        info!(archive = ?archive_path, "Downloaded Titan release archive");
-
-        // Verify SHA256
-        let computed_sha256 = Self::compute_sha256(&archive_path)?;
-        if computed_sha256 != EXPECTED_SHA256 {
-            let _ = tokio::fs::remove_file(&archive_path).await;
-            anyhow::bail!(
-                "SHA256 mismatch for titan-edge.tar.gz: expected {}, got {}",
-                EXPECTED_SHA256,
-                computed_sha256
-            );
-        }
-        info!("SHA256 verification passed");
-
-        // Extract using tar command (Windows 10+ includes bsdtar)
-        let output = crate::supervisor::platform::command("tar")
-            .args([
-                "-xzf",
-                &archive_path.to_string_lossy(),
-                "-C",
-                &partner_dir.to_string_lossy(),
-            ])
-            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(stderr = %stderr, "tar extraction failed");
-            anyhow::bail!("Failed to extract titan-edge.tar.gz: {}", stderr);
-        }
-        info!("Extracted archive");
-
-        // The archive contains titan-edge_v0.1.20_246b9dd_widnows_amd64/ with titan-edge.exe and goworkerd.dll
-        // Move both files to the parent directory
-        let extracted_dir = partner_dir.join("titan-edge_v0.1.20_246b9dd_widnows_amd64");
-        if extracted_dir.exists() {
-            let exe_in_subdir = extracted_dir.join("titan-edge.exe");
-            let dll_in_subdir = extracted_dir.join("goworkerd.dll");
-
-            if exe_in_subdir.exists() {
-                tokio::fs::rename(&exe_in_subdir, &binary).await?;
-                info!(path = ?binary, "Moved titan-edge.exe to partner dir");
-            }
-
-            if dll_in_subdir.exists() {
-                tokio::fs::rename(&dll_in_subdir, &Self::dll_path()).await?;
-                info!(path = ?Self::dll_path(), "Moved goworkerd.dll to partner dir");
-            }
-
-            // Clean up the extracted subdirectory
-            let _ = tokio::fs::remove_dir(&extracted_dir).await;
-        }
-
-        // Clean up archive
-        let _ = tokio::fs::remove_file(&archive_path).await;
-
-        // BUG 8: titan-edge.exe needs the VC++ 2015-2022 x64 runtime to even
-        // launch. Install it now (one elevated prompt) rather than waiting
-        // for the daemon to fail fast on first start — best-effort: a
-        // decline/failure here must not fail the whole integration install,
-        // since `health_check()` still reports the concrete reason if it
-        // turns out to be missing at start time.
-        if vc_redist_missing() {
-            match install_vc_redist_elevated().await {
-                Ok(VcRedistInstallOutcome::Installed) => {}
-                Ok(VcRedistInstallOutcome::StillInstalling) => {
-                    // H2 review fix: not a failure — health_check() re-checks
-                    // vc_redist_missing() on the next tick once the process
-                    // has had more time to finish.
-                    info!("VC++ redist install still in progress — will confirm on a later health check");
-                }
-                // `install_vc_redist_elevated` currently always converts a
-                // Failed outcome into an Err before returning to the caller
-                // (see its own match), but VcRedistInstallOutcome is part of
-                // the public return type — handle this defensively the same
-                // as Err rather than relying on that internal detail.
-                Ok(VcRedistInstallOutcome::Failed(code)) => {
-                    warn!(exit_code = ?code, "VC++ redist install declined or failed — titan-edge may fail to start until it is installed manually");
-                }
-                Err(e) => {
-                    warn!(error = %e, "VC++ redist install declined or failed — titan-edge may fail to start until it is installed manually");
-                }
-            }
-        }
-
-        info!(binary = ?binary, "Titan Network installed successfully");
-        Ok(())
+    /// B3: only a real click may raise UAC.
+    async fn install_for_user(&self) -> Result<()> {
+        self.install_inner(crate::elevation_gate::ElevationTrigger::UserClick)
+            .await
     }
 
     async fn start(&self) -> Result<()> {
         let binary = Self::binary_path();
         if !binary.exists() {
             anyhow::bail!("titan-edge binary not found at {}", binary.display());
+        }
+
+        // B15: verify the pinned files BEFORE handing anything to the loader.
+        // Offloaded, because hashing is blocking work and the bound around
+        // start() has to be able to fire. One repair attempt, then refuse
+        // rather than spawn an image we know is wrong.
+        let partner_dir = Self::partner_dir();
+        let check_dir = partner_dir.clone();
+        let bad = tokio::task::spawn_blocking(move || unverified_pinned_files(&check_dir))
+            .await
+            .map_err(|e| anyhow::anyhow!("Titan verification task panicked: {e}"))?;
+        if !bad.is_empty() {
+            warn!(problems = ?bad, "Titan partner files failed verification — repairing");
+            let repair_dir = partner_dir.clone();
+            tokio::task::spawn_blocking(move || quarantine_unverified(&repair_dir))
+                .await
+                .map_err(|e| anyhow::anyhow!("Titan quarantine task panicked: {e}"))?;
+            self.install().await?;
+            let recheck_dir = partner_dir.clone();
+            let still_bad =
+                tokio::task::spawn_blocking(move || unverified_pinned_files(&recheck_dir))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Titan verification task panicked: {e}"))?;
+            if !still_bad.is_empty() {
+                anyhow::bail!(
+                    "Titan Network files could not be restored to their pinned versions: {}",
+                    still_bad.join("; ")
+                );
+            }
         }
 
         let binary_str = binary.to_string_lossy().to_string();
@@ -484,6 +827,18 @@ impl Integration for TitanIntegration {
             // with no reason. titan-edge is a cgo binary, so a missing VC++
             // runtime is the single most common cause and is directly
             // verifiable (no exit-code plumbing needed).
+            // B15: before blaming the usual suspects, ask whether Windows
+            // REFUSED to load the image. A Smart App Control / WDAC block kills
+            // the child instantly and leaves nothing in the logs (spawn_full
+            // truncates both on every attempt), so without this the reason is
+            // wrong AND the health loop keeps respawning through a refusal it
+            // can never satisfy. The returned message carries the
+            // awaits-user-action marker, which is what stops that loop.
+            if let Some(blocked) = super::code_integrity::recent_block(&Self::binary_path())
+                .or_else(|| super::code_integrity::recent_block(&Self::dll_path()))
+            {
+                return HealthStatus::Unhealthy(blocked);
+            }
             let stderr_path = self.log_dir.join("titan").join("titan_stderr.log");
             let stderr_content = tokio::fs::read_to_string(&stderr_path)
                 .await
@@ -519,10 +874,17 @@ impl Integration for TitanIntegration {
             "
 ",
         );
-        if first_error_line(&combined).is_some() {
+        // Bind the line the gate selected, so the REASON describes the same
+        // failure that fired it. Re-scanning here with a different predicate is
+        // what let a stale network error be reported for a fresh local fatal.
+        if let Some(recent) = first_recent_error_line(
+            &combined,
+            chrono::Utc::now(),
+            chrono::Duration::minutes(ERROR_RECENCY_WINDOW_MINUTES),
+        ) {
             let failures = TITAN_CONSECUTIVE_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
             if should_report_unhealthy(failures) {
-                return HealthStatus::Unhealthy(daemon_log_failure_reason(&combined));
+                return HealthStatus::Unhealthy(daemon_log_failure_reason_for_line(recent));
             }
             // Not yet persistent: report the transient state honestly rather
             // than claiming health we cannot demonstrate.
@@ -549,7 +911,19 @@ impl Integration for TitanIntegration {
     }
 
     fn installed_version(&self) -> Option<String> {
-        if Self::binary_path().exists() {
+        // G4 finding 7: this checked ONLY titan-edge.exe, and every production
+        // caller of install() gates on it — the toggle, the boot recovery pass
+        // and the Docker watcher. So the half-install repair added for B13 was
+        // unreachable: with the exe present and goworkerd.dll missing or
+        // quarantined (the reported "Bad Image … goworkerd.dll" case) this
+        // returned Some, install() was skipped, start() spawned anyway, the
+        // loader failed, and the health loop restarted the same broken tree
+        // forever with no in-app repair.
+        //
+        // Existence checks only, deliberately: this runs inside the registry
+        // snapshot on a 30 s poll, so it must stay cheap. The sha256 work lives
+        // in start(), once per spawn.
+        if Self::install_is_complete(&Self::partner_dir()) {
             Some("v0.1.20".into())
         } else {
             None
@@ -801,3 +1175,11 @@ mod bug3_daemon_error_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "titan_layout_tests.rs"]
+mod titan_layout_tests;
+
+#[cfg(test)]
+#[path = "titan_recency_tests.rs"]
+mod titan_recency_tests;

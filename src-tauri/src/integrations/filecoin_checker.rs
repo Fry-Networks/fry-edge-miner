@@ -5,10 +5,17 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 fn deploy_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .expect("no local data dir")
-        .join("FryEdgeMiner")
-        .join("filecoin_checker")
+    // B13: this used to resolve `dirs::data_local_dir()` directly and never
+    // consult the storage root, so a user who moved storage left this
+    // deployment stranded at the old location. An existing legacy directory is
+    // grandfathered, so nothing live moves and no migration is needed.
+    super::download::resolve_deploy_dir(
+        dirs::data_local_dir()
+            .expect("no local data dir")
+            .join("FryEdgeMiner")
+            .join("filecoin_checker"),
+        super::download::partners_base_dir().join("filecoin_checker"),
+    )
 }
 
 fn compose_file() -> PathBuf {
@@ -39,6 +46,20 @@ impl Integration for FilecoinCheckerIntegration {
         "Filecoin / Checker"
     }
 
+    /// B3: a user who clicked the toggle may be asked to approve the Docker
+    /// Desktop install once. Satisfying Docker first with that authority leaves
+    /// the ordinary install path below untouched — `ensure_docker` is
+    /// idempotent, so its call inside `install()` then finds Docker ready.
+    /// Every other caller of `install()` (boot recovery, the Docker watcher)
+    /// keeps getting Automatic, which the gate refuses without prompting.
+    async fn install_for_user(&self) -> Result<()> {
+        super::docker_manager::ensure_docker_with(
+            crate::elevation_gate::ElevationTrigger::UserClick,
+        )
+        .await?;
+        self.install().await
+    }
+
     async fn install(&self) -> Result<()> {
         // Ensure Docker is available, auto-installing if needed
         super::docker_manager::ensure_docker().await?;
@@ -55,7 +76,7 @@ impl Integration for FilecoinCheckerIntegration {
 
         // Pull latest image
         info!("Pulling Filecoin Checker image");
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["compose", "-f", &compose_file().to_string_lossy(), "pull"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -91,7 +112,7 @@ impl Integration for FilecoinCheckerIntegration {
         .await?;
 
         info!("Starting Filecoin Checker containers");
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["compose", "-f", &compose.to_string_lossy(), "up", "-d"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -110,7 +131,7 @@ impl Integration for FilecoinCheckerIntegration {
     async fn stop(&self) -> Result<()> {
         let compose = compose_file();
         if compose.exists() {
-            crate::supervisor::platform::command("docker")
+            crate::integrations::docker_manager::docker_command()
                 .args(["compose", "-f", &compose.to_string_lossy(), "stop"])
                 .output()?;
             info!("Stopped Filecoin Checker containers");
@@ -129,7 +150,7 @@ impl Integration for FilecoinCheckerIntegration {
         }
 
         // Check if container is running via docker ps
-        let output = match crate::supervisor::platform::command("docker")
+        let output = match crate::integrations::docker_manager::docker_command()
             .args(["ps", "--filter", "label=com.docker.compose.project=filecoin_checker"])
             .output()
         {
@@ -145,7 +166,7 @@ impl Integration for FilecoinCheckerIntegration {
         }
 
         // Container is running — check logs for health markers
-        let logs_output = match crate::supervisor::platform::command("docker")
+        let logs_output = match crate::integrations::docker_manager::docker_command()
             .args(["compose", "-f", &compose.to_string_lossy(), "logs", "--tail", "50"])
             .output()
         {

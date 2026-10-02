@@ -3,6 +3,7 @@ use crate::supervisor::platform::BoundedOutput;
 use anyhow::Result;
 use serde::Serialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -66,13 +67,146 @@ pub enum DockerProbe {
     CliMissing,
 }
 
+/// PURE: which `docker` executable to spawn.
+///
+/// `None` means "keep using the bare name". Every one of the 25 docker spawn
+/// sites resolved `docker` by bare name against the PATH this PROCESS was
+/// launched with, and Windows does not refresh a running process's
+/// environment. Installing Docker — or fixing its PATH entry — while FEM was
+/// already running therefore left it permanently CliMissing, and the only
+/// cure was restarting the app, which is exactly what users found.
+pub(crate) fn pick_docker_cli(on_path: bool, candidates: &[PathBuf]) -> Option<PathBuf> {
+    if on_path {
+        return None;
+    }
+    candidates.iter().find(|p| p.exists()).cloned()
+}
+
+/// `...\Docker\Docker\Docker Desktop.exe` -> `...\Docker\Docker\resources\bin\docker.exe`
+pub(crate) fn cli_beside_desktop_exe(desktop: &std::path::Path) -> Option<PathBuf> {
+    desktop
+        .parent()
+        .map(|dir| dir.join("resources").join("bin").join("docker.exe"))
+}
+
+/// Absolute `docker.exe` locations worth trying, derived from the SAME install
+/// paths the installed-check already uses.
+#[cfg(target_os = "windows")]
+fn docker_cli_candidates() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for p in DOCKER_PATHS {
+        if let Some(cli) = cli_beside_desktop_exe(std::path::Path::new(p)) {
+            out.push(cli);
+        }
+    }
+    for (var, rel) in DOCKER_USER_SCOPE_PATHS {
+        if let Ok(base) = std::env::var(var) {
+            if let Some(cli) = cli_beside_desktop_exe(&PathBuf::from(base).join(rel)) {
+                out.push(cli);
+            }
+        }
+    }
+    out.dedup();
+    out
+}
+
+#[cfg(not(target_os = "windows"))]
+fn docker_cli_candidates() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+static DOCKER_CLI_CACHE: std::sync::Mutex<Option<(Option<PathBuf>, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// Forget the resolved CLI so the next spawn re-resolves it. Called whenever a
+/// spawn fails, so a path that stops working is not cached until the TTL.
+fn invalidate_docker_cli() {
+    if let Ok(mut guard) = DOCKER_CLI_CACHE.lock() {
+        *guard = None;
+    }
+}
+
+/// Whether the PREVIOUS `docker_bounded_probe` CLI-spawn attempt also failed.
+/// Read-and-reset around each attempt so a run of identical failures logs the
+/// fact once, not once per health tick (FAIL-14).
+static DOCKER_SPAWN_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// PURE: should THIS spawn failure be logged at WARN, given whether the
+/// previous probe's spawn also failed?
+///
+/// Only the transition INTO failure earns a WARN — a run of N consecutive
+/// failures logs exactly one. A success in between means the NEXT failure is
+/// a new fact, not a repeat, and must warn again.
+pub(crate) fn should_warn_on_spawn_failure(previous_spawn_failed: bool) -> bool {
+    !previous_spawn_failed
+}
+
+/// The installed copy the previous CLI resolution picked (`None` = the bare
+/// name). Kept apart from `DOCKER_CLI_CACHE`, which the TTL and a failed spawn
+/// both drop.
+static DOCKER_CLI_LAST_RESOLVED: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// D12: record this resolution, and WARN only when the installed copy in use
+/// is new since the previous one — first used, changed, or used again after
+/// the CLI was back on PATH. It used to WARN on every re-resolution, so a lab
+/// probe logged the same path once per 600 s cache refresh; a repeat is debug.
+fn note_resolved_cli(last: &std::sync::Mutex<Option<PathBuf>>, resolved: Option<&std::path::Path>) {
+    let previous = last
+        .lock()
+        .map(|mut l| std::mem::replace(&mut *l, resolved.map(std::path::Path::to_path_buf)))
+        .unwrap_or_default();
+    if let Some(path) = resolved {
+        if previous.as_deref() != Some(path) {
+            warn!(path = ?path, "Docker CLI is not on this process's PATH — using the installed copy");
+        } else {
+            tracing::debug!(path = ?path, "Docker CLI is not on this process's PATH (repeat)");
+        }
+    }
+}
+
+/// A `Command` for the docker CLI, resolved to an absolute path when the bare
+/// name is not spawnable. Drop-in for `platform::command("docker")`.
+pub fn docker_command() -> std::process::Command {
+    if let Ok(guard) = DOCKER_CLI_CACHE.lock() {
+        if let Some((resolved, at)) = guard.as_ref() {
+            if cache_is_fresh(Some(*at), std::time::Instant::now(), VIRT_CACHE_TTL) {
+                return match resolved {
+                    Some(p) => crate::supervisor::platform::command(p),
+                    None => crate::supervisor::platform::command("docker"),
+                };
+            }
+        }
+    }
+
+    let on_path = crate::supervisor::platform::command("docker")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|mut c| {
+            let _ = c.wait();
+            true
+        })
+        .unwrap_or(false);
+
+    let resolved = pick_docker_cli(on_path, &docker_cli_candidates());
+    note_resolved_cli(&DOCKER_CLI_LAST_RESOLVED, resolved.as_deref());
+    if let Ok(mut guard) = DOCKER_CLI_CACHE.lock() {
+        *guard = Some((resolved.clone(), std::time::Instant::now()));
+    }
+    match resolved {
+        Some(p) => crate::supervisor::platform::command(p),
+        None => crate::supervisor::platform::command("docker"),
+    }
+}
+
 /// Spawn a bounded `docker <args...>` probe, polling every 100ms up to
 /// `timeout_secs`, killing and reaping the child on timeout.
 fn docker_bounded_probe(args: &[&str], timeout_secs: u64) -> DockerProbe {
     const POLL_INTERVAL_MS: u64 = 100;
     let max_polls = (timeout_secs * 1000) / POLL_INTERVAL_MS;
 
-    let mut cmd = crate::supervisor::platform::command("docker");
+    let mut cmd = docker_command();
     for a in args {
         cmd.arg(a);
     }
@@ -81,9 +215,26 @@ fn docker_bounded_probe(args: &[&str], timeout_secs: u64) -> DockerProbe {
         .stderr(std::process::Stdio::null())
         .spawn()
     {
-        Ok(c) => c,
+        Ok(c) => {
+            // A spawn that works is a state change from a prior failure —
+            // the NEXT failure (if any) is a new fact again, so re-arm the
+            // warning.
+            DOCKER_SPAWN_FAILED.store(false, Ordering::Relaxed);
+            c
+        }
         Err(e) => {
-            tracing::debug!(error = %e, "Docker CLI could not be spawned");
+            // FAIL-14: this used to warn on EVERY failed probe — 175
+            // identical "Docker CLI could not be spawned" lines in a single
+            // 76-minute soak, one per health tick. Only the transition INTO
+            // failure is worth a WARN; a run of repeats is downgraded to
+            // debug so the fact isn't lost, just not repeated.
+            let previously_failed = DOCKER_SPAWN_FAILED.swap(true, Ordering::Relaxed);
+            if should_warn_on_spawn_failure(previously_failed) {
+                warn!(error = %e, "Docker CLI could not be spawned");
+            } else {
+                tracing::debug!(error = %e, "Docker CLI could not be spawned (repeat)");
+            }
+            invalidate_docker_cli();
             return DockerProbe::CliMissing;
         }
     };
@@ -155,8 +306,46 @@ fn docker_running() -> bool {
 /// Cached: the CIM query costs ~1-2s and firmware state can't change while
 /// the app is running.
 pub fn virtualization_supported() -> bool {
-    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CACHE.get_or_init(|| {
+    if let Ok(guard) = VIRT_CACHE.lock() {
+        if let Some((value, at)) = *guard {
+            if cache_is_fresh(Some(at), std::time::Instant::now(), VIRT_CACHE_TTL) {
+                return value;
+            }
+        }
+    }
+    let value = probe_virtualization_supported();
+    if let Ok(mut guard) = VIRT_CACHE.lock() {
+        *guard = Some((value, std::time::Instant::now()));
+    }
+    value
+}
+
+/// How long a virtualization reading is trusted. Same shape and duration as
+/// the SSD probe cache in `space_acres.rs`.
+const VIRT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+static VIRT_CACHE: std::sync::Mutex<Option<(bool, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// PURE: is a cached reading still good?
+///
+/// The old cache was a process-lifetime `OnceLock`, so a single sample taken
+/// before WSL2/Hyper-V had finished coming up was never re-probed for the life
+/// of the app — and that reading is serialised straight to the UI. A TTL can
+/// only turn a stale `false` into a fresh `true`, so nothing tightens.
+pub(crate) fn cache_is_fresh(
+    recorded: Option<std::time::Instant>,
+    now: std::time::Instant,
+    ttl: std::time::Duration,
+) -> bool {
+    match recorded {
+        Some(at) => now.duration_since(at) < ttl,
+        None => false,
+    }
+}
+
+fn probe_virtualization_supported() -> bool {
+    {
         #[cfg(target_os = "windows")]
         {
             let out = crate::supervisor::platform::command("powershell")
@@ -193,7 +382,7 @@ pub fn virtualization_supported() -> bool {
         {
             true
         }
-    })
+    }
 }
 
 /// Whether this Windows install is itself a VM guest (Proxmox/KVM, VMware,
@@ -269,12 +458,21 @@ pub fn resolve_docker_status(
             }
         }
         DockerProbe::CliMissing => {
-            if !virtualization {
-                DockerStatus::VirtualizationDisabled
-            } else if installed {
+            if installed {
                 // Installed but not on this process's PATH (common right after
                 // an install, before the environment is refreshed).
+                //
+                // Checked BEFORE the firmware probe on purpose: `installed` is
+                // hard evidence — the engine's named pipe, or Docker Desktop's
+                // uninstall key — while the probe is a CIM query that fails
+                // open and can be stale. Testing the probe first let a machine
+                // with Docker demonstrably present be reported as
+                // "Docker unavailable", which also made ensure_docker bail
+                // with BIOS guidance and left the watcher's auto-start
+                // unarmed.
                 DockerStatus::DaemonStopped
+            } else if !virtualization {
+                DockerStatus::VirtualizationDisabled
             } else {
                 DockerStatus::NotInstalled
             }
@@ -419,7 +617,22 @@ pub(crate) fn try_start_docker_desktop() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Docker Desktop not found in standard paths"))?;
 
     info!(path = ?docker_exe, "Starting Docker Desktop");
-    crate::supervisor::platform::command(&docker_exe).spawn()?;
+    // B15 (D-13): Docker Desktop is a full third-party desktop app that owns
+    // its own UI and spawns an engine/WSL tree. FEM now sets a PROCESS error
+    // mode that children inherit, which is right for FEM-managed partners but
+    // must not silence Docker's own dialogs — CREATE_DEFAULT_ERROR_MODE opts
+    // this one launch out. It is the ONLY exemption: OlostepBrowser and
+    // space-acres are FEM-managed partners and SHOULD inherit, which is the
+    // Done-when's "spawned partners never raise system modal dialogs".
+    let mut cmd = crate::supervisor::platform::command(&docker_exe);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_DEFAULT_ERROR_MODE: u32 = 0x0400_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_DEFAULT_ERROR_MODE);
+    }
+    cmd.spawn()?;
     Ok(())
 }
 
@@ -481,7 +694,10 @@ async fn download_docker_installer() -> Result<PathBuf> {
 }
 
 /// Run Docker Desktop installer with elevation and silent flags.
-async fn run_docker_installer(installer_path: &std::path::Path) -> Result<()> {
+async fn run_docker_installer(
+    installer_path: &std::path::Path,
+    trigger: crate::elevation_gate::ElevationTrigger,
+) -> Result<()> {
     info!(path = ?installer_path, "Running Docker Desktop installer with elevation");
     emit_progress(
         "installing",
@@ -502,11 +718,32 @@ Exit $LASTEXITCODE
         installer_path.display()
     );
 
-    let output = crate::supervisor::platform::command("powershell")
-        .arg("-NoProfile")
-        .arg("-Command")
-        .arg(&ps_script)
-        .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
+    // B3 / G4: this raised `Start-Process -Verb RunAs` directly, exactly like
+    // titan's redist installer did, and referenced the elevation gate nowhere —
+    // while the gate's own module doc listed this function as one of the five
+    // sites it covered. `ensure_docker()` reaches it whenever Docker Desktop is
+    // absent, and both the boot recovery pass and the Docker watcher call into
+    // install()/start(), so a UAC dialog could appear with no user gesture.
+    let attempt_key = format!(
+        "docker-desktop|{}",
+        installer_path.to_string_lossy().to_lowercase()
+    );
+    let gated =
+        crate::elevation_gate::run_elevated("docker-desktop", &attempt_key, trigger, move || {
+            crate::supervisor::platform::command("powershell")
+                .arg("-NoProfile")
+                .arg("-Command")
+                .arg(&ps_script)
+                .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)
+                .map_err(anyhow::Error::new)
+        });
+    let output = match gated {
+        Ok(out) => out,
+        Err(skipped) => {
+            warn!(reason = %skipped, "Docker Desktop install skipped by the elevation gate");
+            anyhow::bail!("{skipped}")
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -540,6 +777,55 @@ Exit $LASTEXITCODE
 ///
 /// Only call on an explicit user action (toggle/install) — never at app boot.
 pub async fn ensure_docker() -> Result<()> {
+    // Automatic by default: every existing caller is reachable from the boot
+    // recovery pass, a health tick or the Docker watcher, none of which is a
+    // user gesture. A user-initiated enable calls `ensure_docker_with` first.
+    ensure_docker_with(crate::elevation_gate::ElevationTrigger::Automatic).await
+}
+
+/// `ensure_docker`, with the elevation authority of whatever asked for it.
+///
+/// Idempotent: once Docker Desktop is installed and its engine is running this
+/// returns immediately, which is what lets a user-initiated install satisfy
+/// Docker with `UserClick` authority and then run the ordinary install path
+/// unchanged.
+pub async fn ensure_docker_with(trigger: crate::elevation_gate::ElevationTrigger) -> Result<()> {
+    ensure_docker_core(trigger, true).await
+}
+
+/// FAIL-13: like `ensure_docker_with`, but NEVER downloads or installs Docker
+/// Desktop — for automatic paths (a supervisor restart, a health tick) that
+/// must not put a gesture-less network fetch on the wire, let alone an
+/// elevated install.
+///
+/// `ensure_docker_with`'s `NotInstalled` branch downloaded the installer
+/// BEFORE the elevation gate was ever consulted — only the install/elevate
+/// step was gated, the download was not. A Pawns supervisor restart
+/// (`stop_for_restart` -> `start()` -> this) with Docker absent therefore
+/// reached a real network fetch with nobody at the keyboard. `Ready` /
+/// `VirtualizationDisabled` / `DaemonStopped` are unaffected — none of them
+/// ever downloads anything (`DaemonStopped` only launches the
+/// ALREADY-INSTALLED app). A real user gesture still goes through
+/// `ensure_docker_with(UserClick)`, which can install (see
+/// `PawnsIntegration::start_for_user`, mirroring `install_for_user`).
+pub async fn ensure_docker_no_install() -> Result<()> {
+    ensure_docker_core(crate::elevation_gate::ElevationTrigger::Automatic, false).await
+}
+
+/// FAIL-13 (c4 BUG LOOP 4): may this caller fetch the Docker Desktop installer?
+///
+/// Only a real user gesture may. An Automatic caller (the boot recovery pass,
+/// a supervisor restart, a health tick) is refused by the elevation gate at the
+/// install step anyway, so a download on its behalf is a gesture-less ~600 MB
+/// fetch that can never be used — RC13 repeated it every few minutes.
+fn may_fetch_docker_installer(trigger: crate::elevation_gate::ElevationTrigger) -> bool {
+    trigger == crate::elevation_gate::ElevationTrigger::UserClick
+}
+
+async fn ensure_docker_core(
+    trigger: crate::elevation_gate::ElevationTrigger,
+    allow_install: bool,
+) -> Result<()> {
     match docker_status() {
         DockerStatus::Ready => {
             info!("Docker is already available");
@@ -568,9 +854,18 @@ pub async fn ensure_docker() -> Result<()> {
             })
         }
         DockerStatus::NotInstalled => {
+            if !allow_install {
+                anyhow::bail!("Install Docker Desktop, then turn this on again.");
+            }
+            // FAIL-13 (c4 BUG LOOP 4): `allow_install` alone is not a gesture —
+            // `ensure_docker()` passes it on every automatic path, and this
+            // arm fetched the installer before the gate refused to run it.
+            if !may_fetch_docker_installer(trigger) {
+                anyhow::bail!("Install Docker Desktop, then turn this on again.");
+            }
             info!("Docker Desktop not installed — downloading installer");
             let installer_path = download_docker_installer().await?;
-            run_docker_installer(&installer_path).await?;
+            run_docker_installer(&installer_path, trigger).await?;
             std::fs::remove_file(&installer_path).ok();
 
             // Fresh installs may need a first-run engine bootstrap; some
@@ -705,3 +1000,225 @@ mod tests {
         }
     }
 }
+
+/// B19 — "Docker unavailable" while Docker Desktop is running.
+///
+/// Every docker spawn site resolved `docker` by bare name against the PATH
+/// THIS PROCESS was launched with, and Windows does not refresh a running
+/// process's environment. Installing Docker, or fixing its PATH entry, while
+/// FEM was already running therefore left it permanently CliMissing, and the
+/// only cure was restarting the app.
+#[cfg(test)]
+mod b19_docker_cli_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn falls_back_to_a_known_install_path_when_the_launch_time_path_misses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cli = tmp.path().join("docker.exe");
+        std::fs::write(&cli, b"stub").unwrap();
+
+        assert_eq!(
+            pick_docker_cli(false, std::slice::from_ref(&cli)),
+            Some(cli)
+        );
+    }
+
+    #[test]
+    fn keeps_the_bare_name_when_the_cli_is_already_on_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cli = tmp.path().join("docker.exe");
+        std::fs::write(&cli, b"stub").unwrap();
+
+        assert_eq!(
+            pick_docker_cli(true, &[cli]),
+            None,
+            "an on-PATH docker must keep resolving by name"
+        );
+    }
+
+    #[test]
+    fn ignores_candidates_that_do_not_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        assert_eq!(pick_docker_cli(false, &[tmp.path().join("nope.exe")]), None);
+        assert_eq!(pick_docker_cli(false, &[]), None);
+    }
+
+    #[test]
+    fn the_first_existing_candidate_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("first.exe");
+        let second = tmp.path().join("second.exe");
+        std::fs::write(&second, b"stub").unwrap();
+
+        assert_eq!(
+            pick_docker_cli(false, &[first, second.clone()]),
+            Some(second),
+            "a missing earlier candidate must not stop the search"
+        );
+    }
+
+    /// The CLI lives under the Docker Desktop install, not beside it.
+    #[test]
+    fn the_cli_is_derived_from_the_desktop_install_path() {
+        let derived = cli_beside_desktop_exe(std::path::Path::new(
+            "C:/Program Files/Docker/Docker/Docker Desktop.exe",
+        ))
+        .expect("a rooted path has a parent");
+
+        assert!(derived.ends_with("resources/bin/docker.exe"), "{derived:?}");
+        assert!(cli_beside_desktop_exe(std::path::Path::new("")).is_none());
+    }
+}
+
+/// B19 — hard install evidence must outrank a fail-open firmware probe.
+#[cfg(test)]
+mod b19_docker_status_precedence_tests {
+    use super::*;
+
+    #[test]
+    fn install_evidence_outranks_the_firmware_probe_when_the_cli_is_missing() {
+        assert_eq!(
+            resolve_docker_status(DockerProbe::CliMissing, true, false),
+            DockerStatus::DaemonStopped,
+            "a machine with Docker demonstrably installed must not read as \
+             'Docker unavailable' because a CIM query said otherwise"
+        );
+    }
+
+    #[test]
+    fn a_genuinely_absent_install_with_a_negative_probe_is_still_virtualization_disabled() {
+        assert_eq!(
+            resolve_docker_status(DockerProbe::CliMissing, false, false),
+            DockerStatus::VirtualizationDisabled
+        );
+    }
+
+    #[test]
+    fn an_unreachable_daemon_with_a_negative_probe_is_unchanged() {
+        assert_eq!(
+            resolve_docker_status(DockerProbe::DaemonUnreachable, true, false),
+            DockerStatus::VirtualizationDisabled,
+            "the other arm must not have moved"
+        );
+    }
+
+    #[test]
+    fn an_absent_install_with_a_healthy_probe_is_simply_not_installed() {
+        assert_eq!(
+            resolve_docker_status(DockerProbe::CliMissing, false, true),
+            DockerStatus::NotInstalled
+        );
+    }
+}
+
+/// B19 — a probe reading must not be trusted for the life of the process.
+#[cfg(test)]
+mod b19_probe_cache_ttl_tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn a_reading_inside_the_ttl_is_reused() {
+        let now = Instant::now();
+        assert!(cache_is_fresh(
+            Some(now),
+            now + Duration::from_secs(599),
+            VIRT_CACHE_TTL
+        ));
+    }
+
+    #[test]
+    fn a_reading_past_the_ttl_is_re_probed() {
+        let now = Instant::now();
+        assert!(!cache_is_fresh(
+            Some(now),
+            now + Duration::from_secs(601),
+            VIRT_CACHE_TTL
+        ));
+    }
+
+    #[test]
+    fn an_empty_cache_is_never_fresh() {
+        assert!(!cache_is_fresh(None, Instant::now(), VIRT_CACHE_TTL));
+    }
+
+    /// The range check below only pins the constant. This pins that
+    /// `virtualization_supported` actually CONSULTS the TTL cache and no longer
+    /// caches for the whole process lifetime.
+    #[test]
+    fn the_virtualization_probe_consults_the_ttl_cache_not_a_process_lifetime_oncelock() {
+        let src = include_str!("docker_manager.rs");
+        let at = src
+            .find(&format!("pub fn virtualization{}()", "_supported"))
+            .expect("virtualization_supported must exist");
+        let end = src[at..]
+            .find(&format!("\nfn probe_virtualization{}()", "_supported"))
+            .map(|e| at + e)
+            .expect("the probe body must follow the cached accessor");
+        let body = &src[at..end];
+
+        // Comments are stripped before the OnceLock check: the doc comment in
+        // this region deliberately NAMES the OnceLock it replaced, and a guard
+        // that trips over its own explanation is worse than no guard.
+        let code: String = body
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            code.contains(&format!("cache_is{}(", "_fresh")),
+            "the probe does not consult the TTL cache:\n{code}"
+        );
+        assert!(
+            !code.contains("OnceLock"),
+            "the probe still caches its reading for the whole process lifetime:\n{code}"
+        );
+    }
+
+    /// A reading taken before WSL2 had finished coming up must not outlive the
+    /// condition it measured.
+    #[test]
+    fn the_ttl_is_bounded_in_minutes_not_in_process_lifetime() {
+        assert!(VIRT_CACHE_TTL <= Duration::from_secs(900));
+        assert!(VIRT_CACHE_TTL >= Duration::from_secs(60));
+    }
+}
+
+/// FAIL-14: the CLI-spawn-failure WARN fired on every probe. Separate file so
+/// the inline `mod tests`/`mod b19_*` blocks above stay byte-identical.
+#[cfg(test)]
+#[path = "docker_manager_warn_once_tests.rs"]
+mod docker_manager_warn_once_tests;
+
+/// c4 BUG LOOP 4 (BL4-A): the installer download needs the caller's gesture.
+#[cfg(test)]
+#[path = "docker_gesture_download_tests.rs"]
+mod docker_gesture_download_tests;
+
+/// c4 BUG LOOP 5 (lens-1 NB): the caller's trigger reaches the core.
+#[cfg(test)]
+#[path = "docker_trigger_passthrough_tests.rs"]
+mod docker_trigger_passthrough_tests;
+
+/// c5 D7: both Docker-absent refusals carry the one ruled text.
+#[cfg(test)]
+#[path = "docker_refusal_text_c5_tests.rs"]
+mod docker_refusal_text_c5_tests;
+
+/// c5 F7: pins RC14-X7 (a refusal that can never fire).
+#[cfg(test)]
+#[path = "docker_guard_c5_tests.rs"]
+mod docker_guard_c5_tests;
+
+/// c5 D12: the "not on PATH" WARN fires once per state, not per refresh.
+#[cfg(test)]
+#[path = "docker_cli_warn_once_c5_tests.rs"]
+mod docker_cli_warn_once_c5_tests;
+
+/// c5 D12: docker_command routes every resolution through that gate.
+#[cfg(test)]
+#[path = "docker_cli_warn_wiring_c5_tests.rs"]
+mod docker_cli_warn_wiring_c5_tests;

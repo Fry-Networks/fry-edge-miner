@@ -5,15 +5,21 @@ import Tag from '../components/primitives/Tag'
 import { formatRewardWithToken } from '../lib/formatReward'
 import { GATES } from '../lib/integrationMeta'
 import { useRewards, type HourlyGates } from '../hooks/useRewards'
-import { deriveRewardDisplay } from '../lib/rewardReadiness'
+import { deriveRewardDisplay, stakeSubtitle } from '../lib/rewardReadiness'
 
 export default function Rewards() {
   const { rewards } = useRewards()
   const { rows, hourlyGates, summary } = rewards
   // Cold-cache guard (mirrors Dashboard.tsx): don't show a placeholder
   // base_reward/stake_multiplier as if it were confirmed data.
-  const { rewardToken, baseReward: fullDayEst, stakeMultiplierLabel, stakeLabel } = deriveRewardDisplay(summary)
+  const { estimated, rewardToken, baseReward: fullDayEst, stakeMultiplierLabel, stakeLabel } = deriveRewardDisplay(summary)
   const totalEarned = rows.reduce((sum, r) => sum + r.reward, 0).toFixed(2)
+  // B22 D3: "Full Day Est." is base_reward — no multipliers — so its caption
+  // must say that, not "at full proportion" (which reads as if the stake
+  // multiplier were already applied). sub2 reconciles it with the actual
+  // "Now:" estimate (the same figure Dashboard's Daily Estimate shows), so
+  // the two pages' daily figures have an on-screen relationship.
+  const integrationPct = summary?.integration_multiplier !== undefined ? Math.round(summary.integration_multiplier * 100) : null
 
   return (
     <div
@@ -33,10 +39,11 @@ export default function Rewards() {
           Icon={TrendingUp}
           label="Full Day Est."
           value={fullDayEst}
-          sub={`${rewardToken} at full proportion`}
+          sub={fullDayEst === '—' ? '—' : `${rewardToken} base, before the ${stakeMultiplierLabel} stake multiplier`}
+          sub2={estimated === '—' ? undefined : `Now: ${estimated} ${rewardToken}/day${integrationPct === null ? '' : ` at ${integrationPct}% of full`}`}
           accent="var(--amb)"
         />
-        <StatCard Icon={Shield} label="Staking Tier" value={stakeMultiplierLabel} sub={stakeLabel === '—' ? '—' : `${stakeLabel} stake active`} accent="var(--red)" />
+        <StatCard Icon={Shield} label="Staking Tier" value={stakeMultiplierLabel} sub={stakeSubtitle(stakeLabel)} accent="var(--red)" />
       </div>
 
       <div

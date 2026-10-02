@@ -84,6 +84,19 @@ export function shouldPollAgain(hasSummary: boolean, ready: boolean, pollsSoFar:
   return pollsSoFar < NOT_READY_POLL_CAP
 }
 
+// B22 D4: matches useIntegrations.ts's 30s poll (see fetchSystem there) so
+// the reward summary and the integration list age together — otherwise a
+// ready summary is frozen for the lifetime of the mount while the
+// integration-driven parts of the page (B22 D2) keep moving.
+export const READY_REFRESH_MS = 30_000
+
+/** A ready summary must keep refreshing; the not-ready effect above owns
+ *  every other (hasSummary, ready) combination — see the complementarity
+ *  guard in useRewardsSteadyRefresh.test.ts. */
+export function shouldRefreshWhenReady(hasSummary: boolean, ready: boolean): boolean {
+  return hasSummary && ready
+}
+
 export function useRewards() {
   const [rewards, setRewards] = useState<RewardsData>({
     summary: null,
@@ -133,6 +146,13 @@ export function useRewards() {
     }
     // Re-arm whenever readiness flips (e.g. summary appears, or resolves)
     // rather than on every fetch — `fetch` itself is stable (useCallback []).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [!!rewards.summary, ready, fetch])
+
+  useEffect(() => {
+    if (!shouldRefreshWhenReady(!!rewards.summary, ready)) return
+    const id = setInterval(fetch, READY_REFRESH_MS)
+    return () => clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [!!rewards.summary, ready, fetch])
 

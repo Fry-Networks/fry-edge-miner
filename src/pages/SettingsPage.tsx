@@ -19,6 +19,7 @@ import {
   formatFreeSpace,
   driveLabel,
   STORAGE_CHANGE_CONFIRM,
+  storageFallbackMessage,
   type StorageLocation,
 } from '../lib/storageLocation'
 import { deriveRewardDisplay } from '../lib/rewardReadiness'
@@ -467,10 +468,21 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
           {formatFreeSpace(storage?.free_gb ?? null)}
           {driveLabel(storage?.path) ? ` on ${driveLabel(storage?.path)}` : ''}
         </div>
-        {storage?.pending_restart && (
+        {/* B4 D3 + B13 D5: a startup fallback is not a "restart will fix it"
+            situation — restarting cannot make an unavailable drive
+            available. Show the fallback message instead of the restart
+            banner in that case; the genuine pending-restart case (the user
+            just changed the setting) is unaffected. */}
+        {storageFallbackMessage(storage) ? (
           <div style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--amb)', marginTop: 8 }}>
-            Restart Fry Edge Miner to start using this location.
+            {storageFallbackMessage(storage)}
           </div>
+        ) : (
+          storage?.pending_restart && (
+            <div style={{ fontFamily: 'var(--fb)', fontSize: 12, color: 'var(--amb)', marginTop: 8 }}>
+              Restart Fry Edge Miner to start using this location.
+            </div>
+          )
         )}
         <div style={{ fontFamily: 'var(--fb)', fontSize: 11, color: 'var(--t2)', marginTop: 10, lineHeight: 1.5 }}>
           Storage integrations (Iagon, Storj, Space Acres) size and write here. Point this at a

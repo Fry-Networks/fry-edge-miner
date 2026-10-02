@@ -1,0 +1,17 @@
+# B1: pin the CRT linkage for the shipped Windows binary.
+#
+# v0.4.28 and v0.4.29 imported no CRT DLL at all; from v0.4.30 the release
+# binary imported VCRUNTIME140.dll and VCRUNTIME140_1.dll, and every machine
+# without the VC++ redistributable hit "VCRUNTIME140_1.dll was not found" and
+# could not start the app. The linkage was never stated anywhere — it was
+# whatever the link happened to produce — so it drifted silently. This states
+# it: link the C/C++ runtime statically, so no shipped PE can import it even
+# if the conditions that produced the drift come back.
+#
+# There is no .cargo/config.toml at any shipped tag; this file is new.
+#
+# NOTE: a `RUSTFLAGS` environment variable OVERRIDES this whole table. The
+# release workflow sets none, and qa/ci/check_crt_imports.py is the gate that
+# fails the build if the linkage drifts again regardless of the reason.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -85,7 +85,7 @@ describe('deriveRewardDisplay', () => {
     const out = deriveRewardDisplay(warmSummary())
     expect(out.estimated).toBe('12.50')
     expect(out.baseReward).toBe('5.00')
-    expect(out.stakeMultiplierLabel).toBe('1.3×')
+    expect(out.stakeMultiplierLabel).toBe('1.25×')
     expect(out.rewardAsa).toBe('3612979527')
     expect(out.rewardToken).toBe('FRY')
     expect(out.stakeLabel).toBe('Bronze')

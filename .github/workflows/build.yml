@@ -24,7 +24,9 @@ jobs:
           echo "APP_VERSION=$APP_VERSION"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy, rustfmt
 
       - name: Cache Rust dependencies
         uses: actions/cache@v4
@@ -50,7 +52,7 @@ jobs:
         # re-resolves transitive deps against latest, and on 2026-08-07 a fresh
         # zune-jpeg failed to compile on the runner ("macro expansion ends with
         # an incomplete expression"), breaking a build whose app code was fine.
-        run: cargo install tauri-cli --version "^2" --locked
+        run: cargo install tauri-cli --version "=2.12.0" --locked
 
       # The repo's tripwire tests (MSI fail-closed gate, elevation hygiene,
       # bundle targets) only have value if something runs them. Gates run
@@ -65,6 +67,17 @@ jobs:
           # runs this again via beforeBuildCommand; it takes ~2s and is idempotent.
           npm run build
           cd src-tauri
+          # B1 ROOT CAUSE. v0.4.30 is the first tag where this test pass runs
+          # in the SAME target directory as the release link below, and its
+          # binary is the first to contain __CxxFrameHandler (C++ FH4
+          # unwinding) — which is what pulls in VCRUNTIME140_1.dll. Every
+          # machine without the VC++ redistributable then hit "VCRUNTIME140_1.dll
+          # was not found" and could not start the app. Give the gates their own
+          # target directory so what the release links is decided by the release
+          # build alone. It lives under target/ so the existing cache still
+          # covers it; target/release/ — what `cargo tauri build` bundles — is
+          # never written by this step.
+          export CARGO_TARGET_DIR="$PWD/target/test-pass"
           # Formatting gate. rustfmt.toml pins the target (stock 2021-edition
           # rustfmt), so this catches drift rather than imposing a new style.
           cargo fmt --check
@@ -103,6 +116,21 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           FEM_API_TOKEN: ${{ secrets.FEM_API_TOKEN }}
           DIIISCO_BEARER_TOKEN: ${{ secrets.DIIISCO_BEARER_TOKEN }}
+
+      # B1 GATE. Nothing FEM builds or bundles may import a redistributable
+      # CRT DLL: a user without the VC++ redistributable cannot start such a
+      # binary, and the app is what has to run on their machine. Proven RED
+      # against the v0.4.33 exe and GREEN against v0.4.29. Runs before any
+      # upload step, so a binary that would reproduce the bug is never
+      # published.
+      - name: CRT-import gate over the shipped PE files
+        shell: bash
+        run: |
+          python3 -m pip install --disable-pip-version-check pefile
+          python3 qa/ci/check_crt_imports.py \
+            src-tauri/target/release/fry-edge-miner.exe \
+            src-tauri/target/release/bundle \
+            src-tauri/resources
 
       # Every glob is pinned to APP_VERSION so a stale installer can never be
       # published again even if the bundle directory survives somehow — the
@@ -176,13 +204,15 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --title "FEM $TAG" --generate-notes
+              --title "FEM $TAG" --generate-notes --prerelease
           fi
 
       - name: Upload release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
+          prerelease: true
+          make_latest: false
           files: |
             fem-installer-nsis/*.exe
             fem-installer-nsis-sig/*.sig

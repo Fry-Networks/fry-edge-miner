@@ -11,6 +11,41 @@ use tracing::{info, warn};
 /// therefore takes effect on the next launch.
 static STORAGE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+/// B4: why the configured storage root was NOT used, when it was not used.
+///
+/// The fallback was a `warn!` and nothing else, so Settings went on reporting
+/// the CONFIGURED path as "where partner data is stored" while the files were
+/// actually going to %APPDATA%, under a banner promising that a restart would
+/// start using the configured location — which it will not while the drive is
+/// unavailable. Nothing was ever deleted; the user is looking in the wrong
+/// place. That is the "fry edge miner folder empty" report, manufactured.
+static STORAGE_ROOT_FALLBACK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// PURE: what the user is told when the configured root could not be used.
+/// Names the configured path, the reason, where the files ARE, and — the part
+/// that matters most to someone staring at an empty folder — that nothing was
+/// deleted.
+pub fn storage_fallback_message(configured: &Path, reason: &str, active: &Path) -> String {
+    format!(
+        "Could not use {} ({}). Partner files are being written to {} instead, \
+         and your existing files there have not been deleted. Reconnect the \
+         drive and restart Fry Edge Miner to use the configured location.",
+        configured.display(),
+        reason,
+        active.display()
+    )
+}
+
+/// The fallback message for this run, if the configured root was rejected.
+pub fn storage_fallback_reason() -> Option<String> {
+    STORAGE_ROOT_FALLBACK.get().cloned()
+}
+
+/// B4: the fallback's reporting, kept out of download.rs's own tests.
+#[cfg(test)]
+#[path = "storage_fallback_tests.rs"]
+mod storage_fallback_tests;
+
 /// The historic location — verbatim the pre-fix body of `partners_base_dir`.
 pub fn default_partners_base_dir() -> PathBuf {
     dirs::data_dir()
@@ -56,6 +91,13 @@ pub fn init_storage_root(configured: Option<&str>) -> PathBuf {
                     error = %e.message(),
                     "Configured storage location is unusable — falling back to the default"
                 );
+                // B4: record it for the UI. A log line alone let Settings keep
+                // reporting the configured path as the live one.
+                let _ = STORAGE_ROOT_FALLBACK.set(storage_fallback_message(
+                    &chosen,
+                    &e.message(),
+                    &default,
+                ));
                 default
             }
         }
@@ -78,6 +120,22 @@ pub fn partners_base_dir() -> PathBuf {
         .get()
         .cloned()
         .unwrap_or_else(default_partners_base_dir)
+}
+
+/// PURE: pick between an integration's legacy deploy directory and the one
+/// under the configured storage root.
+///
+/// Three partner deploy roots resolved `dirs::data_local_dir()` themselves and
+/// never consulted the storage root at all, so moving storage left them behind
+/// — which is half of "Titan broken on a custom storage root". Grandfathering
+/// an existing legacy directory means no live deployment moves and no
+/// migration is needed; only a fresh install lands under the configured root.
+pub fn resolve_deploy_dir(legacy: PathBuf, rooted: PathBuf) -> PathBuf {
+    if legacy.exists() && !rooted.exists() {
+        legacy
+    } else {
+        rooted
+    }
 }
 
 /// Default User-Agent for all partner downloads.
@@ -288,5 +346,40 @@ mod bug1_storage_root_tests {
             PathBuf::from(r"D:\aem"),
             "force-clean would target the drive root"
         );
+    }
+
+    /// B13: three partner deploy roots never consulted the storage root, so a
+    /// user who moved storage left them stranded. Grandfathering an existing
+    /// legacy directory is what makes the fix migration-free.
+    #[test]
+    fn an_existing_legacy_deploy_dir_is_grandfathered_so_no_live_deployment_moves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("legacy").join("sentinel");
+        let rooted = tmp.path().join("rooted").join("sentinel");
+        std::fs::create_dir_all(&legacy).unwrap();
+
+        assert_eq!(resolve_deploy_dir(legacy.clone(), rooted), legacy);
+    }
+
+    #[test]
+    fn a_fresh_deploy_lands_under_the_configured_storage_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("legacy").join("sentinel");
+        let rooted = tmp.path().join("rooted").join("sentinel");
+
+        assert_eq!(resolve_deploy_dir(legacy, rooted.clone()), rooted);
+    }
+
+    /// Once the rooted directory exists it wins, even if the legacy one is
+    /// still lying around — otherwise a deployment would flip back and forth.
+    #[test]
+    fn a_deployment_already_under_the_root_is_not_dragged_back_to_the_legacy_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = tmp.path().join("legacy").join("sentinel");
+        let rooted = tmp.path().join("rooted").join("sentinel");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&rooted).unwrap();
+
+        assert_eq!(resolve_deploy_dir(legacy, rooted.clone()), rooted);
     }
 }

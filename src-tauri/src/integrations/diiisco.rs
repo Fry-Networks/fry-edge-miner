@@ -110,11 +110,38 @@ pub struct DiiiscoIntegration {
     pub config: Arc<ConfigStore>,
 }
 
-fn deploy_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .expect("no local data dir")
-        .join("FryEdgeMiner")
-        .join("diiisco")
+/// PURE seam: given what `dirs::data_local_dir()` returned, resolve Diiisco's
+/// deploy directory — or explain why it can't, instead of panicking.
+///
+/// Split out from `deploy_dir()` so "no local data dir" (in practice
+/// unreachable on a dev machine, where $HOME is always set) is something a
+/// test can DRIVE with a constructed `None`, rather than something only a
+/// machine with no resolvable home directory could ever exercise.
+fn resolve_local_deploy_dir(local_data_dir: Option<PathBuf>) -> Result<PathBuf> {
+    // B13: this used to resolve `dirs::data_local_dir()` directly and never
+    // consult the storage root, so a user who moved storage left this
+    // deployment stranded at the old location. An existing legacy directory is
+    // grandfathered, so nothing live moves and no migration is needed.
+    let base = local_data_dir.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Could not determine this OS's local application data directory — \
+             Diiisco cannot resolve where to deploy"
+        )
+    })?;
+    Ok(super::download::resolve_deploy_dir(
+        base.join("FryEdgeMiner").join("diiisco"),
+        super::download::partners_base_dir().join("diiisco"),
+    ))
+}
+
+/// diiisco panic fix: a missing OS data directory used to `.expect()` here,
+/// which unwound through every caller of `deploy_dir()`/`compose_file()` —
+/// `install()`, `start()`, `stop()`, `installed_version()`,
+/// `collect_poc_data()` — none of which could recover from a panic. Now a
+/// handled `Result`; each caller surfaces or absorbs it per its own contract
+/// (`Integration`'s trait methods can't all return `Result`).
+fn deploy_dir() -> Result<PathBuf> {
+    resolve_local_deploy_dir(dirs::data_local_dir())
 }
 
 /// Fetch credentials with exponential-backoff retry on network errors.
@@ -161,15 +188,15 @@ fn docker_available() -> bool {
     super::docker_manager::docker_cli_probe_bounded() == Some(true)
 }
 
-fn compose_file() -> PathBuf {
-    deploy_dir().join("docker-compose.yml")
+fn compose_file() -> Result<PathBuf> {
+    Ok(deploy_dir()?.join("docker-compose.yml"))
 }
 
 /// The diiisco-node image is built locally by install(); it is never
 /// published to a registry, so `compose up` must not be allowed to fall back
 /// to pulling it.
 fn image_built() -> bool {
-    crate::supervisor::platform::command("docker")
+    crate::integrations::docker_manager::docker_command()
         .args(["images", "-q", "diiisco-node:latest"])
         .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
         .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
@@ -194,6 +221,20 @@ impl Integration for DiiiscoIntegration {
         "Diiisco"
     }
 
+    /// B3: a user who clicked the toggle may be asked to approve the Docker
+    /// Desktop install once. Satisfying Docker first with that authority leaves
+    /// the ordinary install path below untouched — `ensure_docker` is
+    /// idempotent, so its call inside `install()` then finds Docker ready.
+    /// Every other caller of `install()` (boot recovery, the Docker watcher)
+    /// keeps getting Automatic, which the gate refuses without prompting.
+    async fn install_for_user(&self) -> Result<()> {
+        super::docker_manager::ensure_docker_with(
+            crate::elevation_gate::ElevationTrigger::UserClick,
+        )
+        .await?;
+        self.install().await
+    }
+
     async fn install(&self) -> Result<()> {
         // B6: a recent lookup already proved this device has no wallet. Fail
         // immediately with the actionable reason rather than re-asking
@@ -204,10 +245,9 @@ impl Integration for DiiiscoIntegration {
         // Ensure Docker is available, auto-installing if needed
         super::docker_manager::ensure_docker().await?;
 
-        let deploy_dir = dirs::data_local_dir()
-            .ok_or_else(|| anyhow::anyhow!("Cannot resolve local app data dir"))?
-            .join("FryEdgeMiner")
-            .join("diiisco");
+        // Was an inline duplicate of `deploy_dir()`, which meant the two could
+        // disagree about where Diiisco lives.
+        let deploy_dir = deploy_dir()?;
 
         // Write Docker files from embedded content
         let node_dir = deploy_dir.join("diiisco-node");
@@ -253,7 +293,7 @@ impl Integration for DiiiscoIntegration {
             anyhow::bail!("DIIISCO_BEARER_TOKEN not configured — set the environment variable before enabling Diiisco");
         }
         info!("Building Diiisco Docker image");
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["compose", "build"])
             .env("ALGO_ADDRESS", &algo_address)
             .env("ALGO_MNEMONIC", &algo_mnemonic)
@@ -280,11 +320,15 @@ impl Integration for DiiiscoIntegration {
             anyhow::bail!("{}", WALLET_NOT_PROVISIONED);
         }
         super::docker_manager::ensure_docker().await?;
-        let compose = compose_file();
+        // Resolved once here (rather than at each of the two spots that used
+        // to call `deploy_dir()` separately) so start() can't disagree with
+        // itself about where Diiisco lives partway through.
+        let deploy = deploy_dir()?;
+        let compose = deploy.join("docker-compose.yml");
         if !compose.exists() {
             anyhow::bail!(
                 "Diiisco is not installed yet (deploy directory missing at {}) — toggle it off and on to reinstall",
-                deploy_dir().display()
+                deploy.display()
             );
         }
 
@@ -326,14 +370,12 @@ impl Integration for DiiiscoIntegration {
             anyhow::bail!("DIIISCO_BEARER_TOKEN not configured — set the environment variable before enabling Diiisco");
         }
 
-        let deploy = deploy_dir();
-
         // diiisco-node is built locally, never pulled. If the image is
         // missing (failed/interrupted install), `up` would try to pull it
         // from a registry — "pull access denied". Build first.
         if !image_built() {
             info!("diiisco-node image missing — building before start");
-            let output = crate::supervisor::platform::command("docker")
+            let output = crate::integrations::docker_manager::docker_command()
                 .args(["compose", "build"])
                 .env("ALGO_ADDRESS", &algo_address)
                 .env("ALGO_MNEMONIC", &algo_mnemonic)
@@ -353,7 +395,7 @@ impl Integration for DiiiscoIntegration {
         // runs ("network diiisco_default already exists"). Volumes survive.
         // Failures don't block startup, but they must be visible in logs.
         info!("Cleaning up stale Diiisco containers/networks");
-        match crate::supervisor::platform::command("docker")
+        match crate::integrations::docker_manager::docker_command()
             .args(["compose", "down", "--remove-orphans"])
             .env("ALGO_ADDRESS", &algo_address)
             .env("ALGO_MNEMONIC", &algo_mnemonic)
@@ -376,7 +418,7 @@ impl Integration for DiiiscoIntegration {
         }
 
         info!("Starting Diiisco containers");
-        let output = crate::supervisor::platform::command("docker")
+        let output = crate::integrations::docker_manager::docker_command()
             .args(["compose", "up", "-d"])
             .env("ALGO_ADDRESS", &algo_address)
             .env("ALGO_MNEMONIC", &algo_mnemonic)
@@ -395,9 +437,14 @@ impl Integration for DiiiscoIntegration {
     }
 
     async fn stop(&self) -> Result<()> {
-        let compose = compose_file();
+        // An unresolvable deploy directory means there is nothing deployed to
+        // stop — the same "nothing to do" outcome as a missing compose file
+        // below, not a failure to report.
+        let Ok(compose) = compose_file() else {
+            return Ok(());
+        };
         if compose.exists() {
-            crate::supervisor::platform::command("docker")
+            crate::integrations::docker_manager::docker_command()
                 .args(["compose", "-f", &compose.to_string_lossy(), "stop"])
                 .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
             info!("Stopped Diiisco containers");
@@ -440,7 +487,11 @@ impl Integration for DiiiscoIntegration {
     }
 
     fn installed_version(&self) -> Option<String> {
-        if !compose_file().exists() {
+        // An unresolvable deploy directory can't hold an install.
+        let Ok(compose) = compose_file() else {
+            return None;
+        };
+        if !compose.exists() {
             return None;
         }
         // Compose file present but image never built = failed/interrupted
@@ -454,7 +505,7 @@ impl Integration for DiiiscoIntegration {
 
     fn collect_poc_data(&self) -> PocGateData {
         // Synchronous check — can't do async health here, check compose file existence
-        let compose_exists = compose_file().exists();
+        let compose_exists = compose_file().map(|p| p.exists()).unwrap_or(false);
         PocGateData {
             poa: compose_exists && docker_available(),
             ..Default::default()
@@ -656,3 +707,9 @@ mod credential_error_message_tests {
         assert!(!msg.contains("<html>"), "{msg}");
     }
 }
+
+/// The diiisco panic fix: a missing local data dir used to `.expect()`.
+/// Separate file so the inline `mod`s above stay byte-identical.
+#[cfg(test)]
+#[path = "diiisco_deploy_dir_tests.rs"]
+mod diiisco_deploy_dir_tests;

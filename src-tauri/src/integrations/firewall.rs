@@ -93,7 +93,12 @@ pub(crate) fn current_rule_program(rule_name: &str) -> Option<String> {
 /// elevation → ONE `RunAs` PowerShell shot (single UAC prompt), transcript to
 /// the FEM log dir, parent blocks on the exit code. Failure is non-fatal —
 /// the caller keeps starting the integration (Windows will simply prompt).
-pub fn ensure_program_rules(rule_name: &str, program: &Path) -> Result<()> {
+pub fn ensure_program_rules(
+    rule_name: &str,
+    program: &Path,
+    purpose: &'static str,
+    trigger: crate::elevation_gate::ElevationTrigger,
+) -> Result<()> {
     let program_str = program.to_string_lossy().to_string();
     if let Some(existing) = current_rule_program(rule_name) {
         if existing == program_str.to_lowercase() {
@@ -152,46 +157,233 @@ pub fn ensure_program_rules(rule_name: &str, program: &Path) -> Result<()> {
         inner.replace('"', "`\"")
     );
 
-    let out = crate::supervisor::platform::command("powershell")
-        .args(["-NoProfile", "-Command", &outer])
-        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
-    if out.status.success() {
-        info!(rule = rule_name, transcript = %transcript.display(), "Firewall rules reconciled");
-        Ok(())
-    } else {
-        // 1223 = UAC declined.
-        warn!(
-            rule = rule_name,
-            code = out.status.code(),
-            "Firewall rule creation failed (UAC declined or netsh error) — continuing without rules"
-        );
+    // B3: the prompt goes through the elevation gate, so FEM never raises UAC
+    // on its own — an Automatic trigger is refused before the shot is fired,
+    // and a UserClick gets exactly one attempt per target per process run. The
+    // attempt key carries the target so a genuinely NEW binary path re-arms
+    // that one attempt instead of being silently suppressed.
+    let attempt_key = format!("{rule_name}|{}", program_str.to_lowercase());
+    let outcome = crate::elevation_gate::run_elevated(purpose, &attempt_key, trigger, || {
+        // UAC_ANSWER_TIMEOUT, not PROBE_TIMEOUT: this blocks on a HUMAN
+        // answering a consent dialog, which the 20 s probe budget cannot cover.
+        let out = crate::supervisor::platform::command("powershell")
+            .args(["-NoProfile", "-Command", &outer])
+            .output_bounded(crate::supervisor::platform::UAC_ANSWER_TIMEOUT)?;
+        if out.status.success() {
+            info!(rule = rule_name, transcript = %transcript.display(), "Firewall rules reconciled");
+            return Ok(());
+        }
+        // 1223 = UAC declined. Reported as PermissionDenied so the gate
+        // recognises a decline and shows the approval message rather than a
+        // raw exit code.
+        if crate::elevation_gate::is_declined(out.status.code(), None) {
+            return Err(anyhow::Error::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "firewall rule creation declined (exit {:?})",
+                    out.status.code()
+                ),
+            )));
+        }
         anyhow::bail!(
             "firewall rule creation failed (exit {:?})",
             out.status.code()
         )
+    });
+
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(skipped) => {
+            warn!(
+                rule = rule_name,
+                reason = %skipped,
+                "Firewall rules not reconciled — continuing without them"
+            );
+            anyhow::bail!("{skipped}")
+        }
     }
 }
 
 /// Delete the rules (elevated, warn-only). Used by force-clean/uninstall.
-pub fn delete_rules(rule_name: &str) {
+pub fn delete_rules(
+    rule_name: &str,
+    purpose: &'static str,
+    trigger: crate::elevation_gate::ElevationTrigger,
+) {
     if current_rule_program(rule_name).is_none() {
         return;
     }
     let outer = format!(
         "$ErrorActionPreference = 'Stop'; try {{ $p = Start-Process -FilePath netsh -ArgumentList 'advfirewall','firewall','delete','rule','name={rule_name}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; if ($null -eq $p) {{ exit 3 }}; exit $p.ExitCode }} catch {{ exit 2 }}"
     );
-    match crate::supervisor::platform::command("powershell")
-        .args(["-NoProfile", "-Command", &outer])
-        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
-    {
-        Ok(o) if o.status.success() => info!(rule = rule_name, "Firewall rules deleted"),
-        Ok(o) => warn!(
-            rule = rule_name,
-            code = o.status.code(),
-            "Firewall rule delete failed"
-        ),
-        Err(e) => warn!(rule = rule_name, error = %e, "Firewall rule delete could not run"),
+    let attempt_key = format!("delete|{rule_name}");
+    let outcome = crate::elevation_gate::run_elevated(purpose, &attempt_key, trigger, || {
+        // Same human-answer budget as the create path.
+        let o = crate::supervisor::platform::command("powershell")
+            .args(["-NoProfile", "-Command", &outer])
+            .output_bounded(crate::supervisor::platform::UAC_ANSWER_TIMEOUT)?;
+        if o.status.success() {
+            return Ok(());
+        }
+        anyhow::bail!("firewall rule delete failed (exit {:?})", o.status.code())
+    });
+    match outcome {
+        Ok(()) => info!(rule = rule_name, "Firewall rules deleted"),
+        Err(skipped) => warn!(rule = rule_name, reason = %skipped, "Firewall rule delete skipped"),
     }
+}
+
+/// D-C5-2: what Windows Firewall says about frynode's inbound allow rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuleVerdict {
+    /// An enabled inbound allow rule for this exact program covers every
+    /// active network profile.
+    Admitted,
+    Missing,
+    Disabled,
+    /// Rules of this name exist, but none is an inbound allow rule.
+    NotInboundAllow,
+    WrongProgram,
+    ProfileNotCovered,
+    /// The listing could not be produced, or was cut short.
+    Unreadable,
+}
+
+/// D-C5-2: the PowerShell that lists every rule named `rule_name` and the
+/// active network categories, one fact per line, then `END`. It prints enum
+/// NAMES (Inbound, True, Allow, Any, Public), which Windows does not translate;
+/// netsh's labels and values are localized, so a netsh parse would never admit
+/// the rule on a non-English Windows. Any error exits 3 without `END`.
+pub(crate) fn rule_listing_script(rule_name: &str) -> String {
+    let name = format!("'{}'", rule_name.replace('\'', "''"));
+    format!(
+        "$ErrorActionPreference = 'Stop'; try {{ \
+         [Console]::OutputEncoding = [Text.Encoding]::UTF8; \
+         Get-NetFirewallRule -DisplayName {name} -ErrorAction SilentlyContinue | ForEach-Object {{ \
+         $f = $_ | Get-NetFirewallApplicationFilter; \
+         'RULE|' + $_.Direction + '|' + $_.Enabled + '|' + $_.Action + '|' + $_.Profile + '|' + $f.Program }}; \
+         Get-NetConnectionProfile -ErrorAction SilentlyContinue | ForEach-Object {{ 'NET|' + $_.NetworkCategory }}; \
+         'END' }} catch {{ exit 3 }}"
+    )
+}
+
+/// D-C5-2: the listing `rule_verdict` reads. Unelevated — reading rules needs
+/// no admin — and bounded by PROBE_TIMEOUT. `None` when PowerShell failed or
+/// timed out.
+pub(crate) fn rule_listing(rule_name: &str) -> Option<String> {
+    let out = crate::supervisor::platform::command("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &rule_listing_script(rule_name),
+        ])
+        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// PURE (D-C5-2): does the listing hold an enabled inbound allow rule for
+/// `program` that covers every active network profile? Fails closed: a missing
+/// or cut-short listing is `Unreadable`, never `Admitted`.
+pub(crate) fn rule_verdict(listing: Option<&str>, program: &str) -> RuleVerdict {
+    let Some(listing) = listing else {
+        return RuleVerdict::Unreadable;
+    };
+    let lines: Vec<&str> = listing.lines().map(str::trim).collect();
+    if !lines.contains(&"END") {
+        return RuleVerdict::Unreadable;
+    }
+    let mut active: Vec<&str> = lines
+        .iter()
+        .filter_map(|l| l.strip_prefix("NET|"))
+        .map(|c| match c.trim() {
+            "DomainAuthenticated" => "Domain",
+            other => other,
+        })
+        .collect();
+    // Windows puts a network it cannot identify on the Public profile.
+    if active.is_empty() {
+        active.push("Public");
+    }
+    let wanted = normalize_program(program);
+    // Report the failure closest to a usable rule.
+    let rank = |v: RuleVerdict| match v {
+        RuleVerdict::Missing => 0,
+        RuleVerdict::NotInboundAllow => 1,
+        RuleVerdict::WrongProgram => 2,
+        RuleVerdict::Disabled => 3,
+        _ => 4,
+    };
+    let mut closest = RuleVerdict::Missing;
+    for rule in lines.iter().filter_map(|l| l.strip_prefix("RULE|")) {
+        let f: Vec<&str> = rule.splitn(5, '|').map(str::trim).collect();
+        let [direction, enabled, action, profile, rule_program] = f[..] else {
+            continue;
+        };
+        let verdict = if !direction.eq_ignore_ascii_case("Inbound")
+            || !action.eq_ignore_ascii_case("Allow")
+        {
+            RuleVerdict::NotInboundAllow
+        } else if !enabled.eq_ignore_ascii_case("True") {
+            RuleVerdict::Disabled
+        } else if normalize_program(rule_program) != wanted {
+            RuleVerdict::WrongProgram
+        } else if !profile_covers(profile, &active) {
+            RuleVerdict::ProfileNotCovered
+        } else {
+            return RuleVerdict::Admitted;
+        };
+        if rank(verdict) > rank(closest) {
+            closest = verdict;
+        }
+    }
+    closest
+}
+
+/// `Any`, or a list such as `Domain, Private` naming every active profile.
+fn profile_covers(profile: &str, active: &[&str]) -> bool {
+    if profile.eq_ignore_ascii_case("Any") {
+        return true;
+    }
+    let covered: Vec<&str> = profile.split(',').map(str::trim).collect();
+    active
+        .iter()
+        .all(|a| covered.iter().any(|c| c.eq_ignore_ascii_case(a)))
+}
+
+/// PURE (D-C5-2): a program path in the one spelling rule and binary are
+/// compared in.
+pub(crate) fn normalize_program(program: &str) -> String {
+    normalize_program_with(program, |name| std::env::var(name).ok())
+}
+
+/// `normalize_program` with the environment injected: surrounding quotes and
+/// spaces dropped, `%VAR%` expanded, `/` read as `\`, the `\\?\` prefix
+/// dropped, and case folded, as Windows paths compare.
+fn normalize_program_with(program: &str, env: impl Fn(&str) -> Option<String>) -> String {
+    let mut rest = program.trim().trim_matches('"');
+    let mut expanded = String::new();
+    while let Some(start) = rest.find('%') {
+        let Some(len) = rest[start + 1..].find('%') else {
+            break;
+        };
+        let name = &rest[start + 1..start + 1 + len];
+        expanded.push_str(&rest[..start]);
+        match env(name) {
+            Some(value) => expanded.push_str(&value),
+            None => expanded.push_str(&rest[start..start + len + 2]),
+        }
+        rest = &rest[start + len + 2..];
+    }
+    expanded.push_str(rest);
+    let slashed = expanded.replace('/', "\\");
+    slashed
+        .strip_prefix("\\\\?\\")
+        .unwrap_or(&slashed)
+        .to_lowercase()
 }
 
 #[cfg(test)]
@@ -229,3 +421,8 @@ mod tests {
         }
     }
 }
+
+/// Continuation #5, D-C5-2: the rule predicate behind the fryDVPN gate.
+#[cfg(test)]
+#[path = "fryvpn_c5_rule_predicate_tests.rs"]
+mod fryvpn_c5_rule_predicate_tests;

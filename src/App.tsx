@@ -12,11 +12,15 @@ import { useIntegrations } from './hooks/useIntegrations'
 import { sdkActiveLine, sdkActiveCount } from './lib/tierSplit'
 import { countActive } from './lib/rewardModel'
 import { REQUIRED_INTEGRATIONS } from './lib/integrationMeta'
+import { hasFailingIntegration } from './lib/setupRequired'
 import { deriveConnectivity } from './lib/connectivity'
 import { useDevice } from './hooks/useDevice'
 import { makeName } from './lib/names'
 import { isTauri } from './lib/tauri'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+import { type HardeningWarning } from './lib/hardeningWarning'
+import { subscribeToHardeningStatus } from './lib/hardeningStatusEffect'
 
 // Truncated error banner with expandable details — raw multi-line backend
 // output (e.g. Docker logs) must never flood the layout.
@@ -135,6 +139,76 @@ function IntegrationsErrorCard({ error, onRetry }: { error: string; onRetry: () 
   )
 }
 
+// FAIL-11: the boot pass and the pre-update re-assert both run hardening
+// `Automatic`, which the gate refuses before any UAC prompt — that's by
+// design (B3), but until this banner existed the ONLY record of it was a log
+// line. Retry invokes the `retry_hardening` command, the one call site that
+// passes `ElevationTrigger::UserClick`, so a user who wants hardening
+// applied (after a decline, or proactively) has a real gesture to ask for
+// it. Dismissible so a user who has already read the manual-command fallback
+// isn't stuck looking at it.
+function HardeningWarningBanner({ warning, onDismiss }: { warning: HardeningWarning; onDismiss: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const [retryError, setRetryError] = useState<string | null>(null)
+
+  const retry = () => {
+    setBusy(true)
+    setRetryError(null)
+    invoke('retry_hardening')
+      .then(() => onDismiss())
+      // A failed retry re-emits `elevation-required`, which updates
+      // `warning` above via the listener in AppShell — this local error is
+      // just for the case the command itself rejects before that happens.
+      .catch((e) => setRetryError(String(e)))
+      .finally(() => setBusy(false))
+  }
+
+  return (
+    <div
+      style={{
+        padding: '8px 16px',
+        background: 'var(--amb)18',
+        borderBottom: '1px solid var(--amb)40',
+        fontFamily: 'var(--fb)',
+        fontSize: 12,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        flexWrap: 'wrap'
+      }}
+    >
+      <span style={{ fontWeight: 600, flexShrink: 0 }}>Security hardening:</span>
+      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+        {retryError ?? warning.reason}
+      </span>
+      <button
+        onClick={retry}
+        disabled={busy}
+        style={{
+          flexShrink: 0,
+          fontFamily: 'var(--fb)',
+          fontSize: 11,
+          padding: '4px 12px',
+          borderRadius: 'var(--radsm)',
+          border: '1px solid var(--teal)',
+          background: 'var(--tealg)',
+          color: 'var(--teal)',
+          cursor: busy ? 'default' : 'pointer',
+          opacity: busy ? 0.6 : 1
+        }}
+      >
+        {busy ? 'Retrying…' : 'Retry'}
+      </button>
+      <button
+        onClick={onDismiss}
+        style={{ flexShrink: 0, background: 'none', border: 'none', color: 'var(--t1)', cursor: 'pointer', fontSize: 11 }}
+      >
+        Dismiss
+      </button>
+    </div>
+  )
+}
+
 function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceName: string; minerKey?: string; deregister: (force?: boolean) => Promise<void>; deviceError: string | null }) {
   const [page, setPage] = useState<NavPage>('dashboard')
   const {
@@ -158,7 +232,9 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
   // BUG 13: enabled+healthy ("active"), not merely enabled — see
   // `sdkActiveCount` for why this must not be `sdkCounts(...).activeCount`.
   const sdkLine = sdkActiveLine(sdkActiveCount(integrations))
-  const hasUnhealthy = integrations.some((i) => i.enabled && !i.healthy)
+  // B17 D4: a setup-blocked integration (waiting on the user, not a fault)
+  // is not a fleet failure — see lib/setupRequired.ts.
+  const hasUnhealthy = hasFailingIntegration(integrations)
   // Badge reflects reachability of the Fry backend only. Docker state is a
   // local prerequisite surfaced via the TopBar Docker chip + per-card errors,
   // never via the connectivity badge (users read "Degraded" as "offline").
@@ -168,6 +244,18 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
     dockerStatus: system?.docker ?? null
   })
   const dockerChip = system && system.docker !== 'ready' ? system.docker : null
+
+  // FAIL-11: the backend's `elevation-required` event is the only record a
+  // suppressed/declined AUTOMATIC hardening attempt used to leave — nothing
+  // read it. `subscribeToHardeningStatus` (unit-tested separately, with
+  // mocked invoke/listen, against a real behavioural assertion rather than a
+  // source-text substring match — see hardeningStatusEffect.test.ts) is the
+  // pull-then-listen wiring that makes it reach the UI.
+  const [hardeningWarning, setHardeningWarning] = useState<HardeningWarning | null>(null)
+  useEffect(() => {
+    if (!isTauri()) return
+    return subscribeToHardeningStatus({ invoke, listen, setWarning: setHardeningWarning })
+  }, [])
 
   return (
     <div
@@ -183,8 +271,11 @@ function AppShell({ deviceName, minerKey, deregister, deviceError }: { deviceNam
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <TopBar page={page} connectivity={connectivity} docker={dockerChip} />
         {error && <ErrorBanner error={error} />}
+        {hardeningWarning && (
+          <HardeningWarningBanner warning={hardeningWarning} onDismiss={() => setHardeningWarning(null)} />
+        )}
         <div style={{ flex: 1, overflow: 'hidden' }}>
-          {page === 'dashboard' && <Dashboard intgs={integrations} />}
+          {page === 'dashboard' && <Dashboard intgs={integrations} system={system} />}
           {page === 'integrations' &&
             (integrations.length === 0 && error ? (
               <IntegrationsErrorCard error={error} onRetry={refetch} />
