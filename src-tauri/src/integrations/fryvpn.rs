@@ -697,12 +697,37 @@ pub(crate) fn registration_funding_message(
     // Whole 0.001 ALGO, rounded so that sending the figure shown is always
     // enough: the shortfall and the total UP, the holdings DOWN.
     Err(format!(
-        "{FUNDING_MARKER} — send {:.3} ALGO to {} (this device's wallet needs {:.3} ALGO total to register on-chain and holds {:.3} ALGO). fryDVPN registers automatically on the next check.",
+        "{FUNDING_MARKER} — send {:.3} ALGO to {} (this is this device's own fryDVPN node wallet, created and kept on this device — not your reward wallet; it needs {:.3} ALGO total to register on-chain and holds {:.3} ALGO). fryDVPN registers automatically on the next check.",
         short.div_ceil(1_000) as f64 / 1_000.0,
         address,
         total_needed.div_ceil(1_000) as f64 / 1_000.0,
         (amount / 1_000) as f64 / 1_000.0
     ))
+}
+
+#[cfg(test)]
+mod dashbugs_b1_node_wallet_copy {
+    use super::*;
+    const ADDR: &str = "SYNTHNODEWALLETADDRESS";
+    // 2026-09-15/09-28 reports: owners did not know whose address the card showed ("this
+    // not my wallet"). Mainnet case: exactly 0.1 ALGO sent → amount 100_000 = min-balance.
+    fn msg() -> String {
+        registration_funding_message(100_000, 100_000, 300_000, ADDR).unwrap_err()
+    }
+    #[test]
+    fn says_it_is_the_devices_own_node_wallet_not_the_reward_wallet() {
+        let m = msg();
+        assert!(m.contains("own fryDVPN node wallet"), "{m}");
+        assert!(m.contains("not your reward wallet"), "{m}");
+    }
+
+    #[test]
+    fn total_and_shortfall_still_include_the_locked_minimum() {
+        let m = msg();
+        assert!(m.contains("send 0.300 ALGO to SYNTHNODEWALLETADDRESS"), "{m}");
+        assert!(m.contains("0.400 ALGO total"), "{m}");
+        assert!(m.contains("holds 0.100 ALGO"), "{m}");
+    }
 }
 
 /// What the card says when algod could not be read at all.
