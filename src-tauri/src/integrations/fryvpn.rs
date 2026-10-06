@@ -724,7 +724,10 @@ mod dashbugs_b1_node_wallet_copy {
     #[test]
     fn total_and_shortfall_still_include_the_locked_minimum() {
         let m = msg();
-        assert!(m.contains("send 0.300 ALGO to SYNTHNODEWALLETADDRESS"), "{m}");
+        assert!(
+            m.contains("send 0.300 ALGO to SYNTHNODEWALLETADDRESS"),
+            "{m}"
+        );
         assert!(m.contains("0.400 ALGO total"), "{m}");
         assert!(m.contains("holds 0.100 ALGO"), "{m}");
     }
