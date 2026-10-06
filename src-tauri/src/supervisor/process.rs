@@ -119,6 +119,38 @@ mod error_mode_tests;
 #[path = "partner_log_scrub_tests.rs"]
 mod partner_log_scrub_tests;
 
+#[cfg(test)]
+#[path = "spawn_error_message_dd_tests.rs"]
+mod spawn_error_message_dd_tests;
+
+/// Human-readable form of a failed child start, for the card text. The raw
+/// OS code / NTSTATUS (and std's "(os error N)" suffix) never appear: they mean
+/// nothing to the user and are not actionable. The original error is logged.
+/// Deliberately gives no advice to change security settings.
+pub(crate) fn humanize_spawn_error(integration_id: &str, e: &io::Error) -> io::Error {
+    warn!(integration = %integration_id, error = %e, "Child process failed to start");
+    // 4551 = ERROR_CODE_INTEGRITY_BLOCK-style App Control refusal.
+    let reason = if e.raw_os_error() == Some(4551) {
+        "was blocked by Windows Application Control (Smart App Control)".to_string()
+    } else {
+        let why = match e.kind() {
+            io::ErrorKind::NotFound => "its file was not found",
+            io::ErrorKind::PermissionDenied => "permission was denied",
+            io::ErrorKind::OutOfMemory => "the system is out of memory",
+            io::ErrorKind::TimedOut => "it took too long",
+            io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => {
+                "its file could not be loaded"
+            }
+            _ => "the system refused to start it",
+        };
+        format!("could not start ({why})")
+    };
+    io::Error::new(
+        e.kind(),
+        format!("{integration_id} {reason}. Fry Edge Miner keeps running its other components."),
+    )
+}
+
 /// Run `create` (the actual `Command::spawn`) on its own thread with the
 /// loader's modal error boxes suppressed, and wait at most `bound` for it.
 /// A creation that completes after the caller gave up is killed and logged —
@@ -153,7 +185,7 @@ where
             }
         })?;
     match rx.recv_timeout(bound) {
-        Ok(result) => result,
+        Ok(result) => result.map_err(|e| humanize_spawn_error(integration_id, &e)),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
             io::ErrorKind::TimedOut,
             format!(

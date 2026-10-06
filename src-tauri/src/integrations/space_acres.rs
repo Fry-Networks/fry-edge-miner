@@ -1204,7 +1204,7 @@ impl Integration for SpaceAcresIntegration {
         }
         let child = cmd
             .spawn()
-            .map_err(|e| anyhow::anyhow!("Failed to start SpaceAcres: {}", e))?;
+            .map_err(|e| crate::supervisor::process::humanize_spawn_error("SpaceAcres", &e))?;
         // B4 (D-03): SpaceAcres joins the kill-on-close job like every other
         // partner. The trade-off is deliberate and documented: an abrupt kill
         // can interrupt a plot. FEM's normal quit stops it gracefully first
