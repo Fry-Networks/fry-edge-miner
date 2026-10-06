@@ -556,7 +556,6 @@ fn process_not_running_reason(vc_redist_missing: bool, stderr_tail: &str) -> Str
 /// Why the most recent titan-edge START attempt failed: the spawn's raw OS
 /// error (e.g. 4551, App Control) or the child's startup exit status (NTSTATUS,
 /// e.g. 0xC0000135). Recorded per integration; read by `classify_not_running`.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StartFailure {
     SpawnOsError(i32),
@@ -565,14 +564,38 @@ pub(crate) enum StartFailure {
 
 /// Pure: card message for a not-running titan-edge, given the recorded start
 /// failure (if any), whether the VC++ runtime is missing, and the log tail.
-// RED stub: ignores `failure` (today's behaviour). The D1 fix replaces the body.
-#[cfg_attr(not(test), allow(dead_code))]
+///
+/// A recorded code decides on its own: the environment heuristic is only the
+/// fallback for "no code known", so an App Control refusal (os error 4551) is
+/// never shown as a missing runtime. No raw code ever reaches the text, and
+/// none of it advises changing security settings.
 fn classify_not_running(
-    _failure: Option<StartFailure>,
+    failure: Option<StartFailure>,
     vc_redist_missing: bool,
     stderr_tail: &str,
 ) -> String {
-    process_not_running_reason(vc_redist_missing, stderr_tail)
+    match failure {
+        // The leading marker is what stops the health loop respawning through a
+        // refusal it cannot satisfy (`integrations::awaits_user_action`, B15).
+        Some(StartFailure::SpawnOsError(4551)) => format!(
+            "{} \u{2014} titan-edge was blocked by Windows Application Control (Smart App \
+             Control) and cannot start on this device. The file itself is intact, so \
+             reinstalling will not help.",
+            super::code_integrity::AWAITING_ADMIN_MARKER
+        ),
+        // STATUS_DLL_NOT_FOUND: the loader could not resolve a static import.
+        Some(StartFailure::ChildExitStatus(0xC000_0135)) => "titan-edge process is not running: \
+             missing VC++ 2015-2022 x64 runtime (VCRUNTIME140.dll / MSVCP140.dll not found) \
+             \u{2014} install the Visual C++ Redistributable from \
+             https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist to fix this"
+            .to_string(),
+        Some(_) => {
+            "titan-edge could not start: Windows stopped it while it was starting. Fry Edge \
+             Miner keeps running its other components."
+                .to_string()
+        }
+        None => process_not_running_reason(vc_redist_missing, stderr_tail),
+    }
 }
 
 impl TitanIntegration {
@@ -856,6 +879,17 @@ impl Integration for TitanIntegration {
             // wrong AND the health loop keeps respawning through a refusal it
             // can never satisfy. The returned message carries the
             // awaits-user-action marker, which is what stops that loop.
+            // D1: a structured start-failure code recorded by the supervisor is
+            // authoritative; the checks below are only for "no code known".
+            let recorded = crate::supervisor::start_failure::get("titan");
+            if recorded.is_some() {
+                // A recorded code never consults the heuristic inputs.
+                return HealthStatus::Unhealthy(classify_not_running(
+                    recorded,
+                    false,
+                    "no error output",
+                ));
+            }
             if let Some(blocked) = super::code_integrity::recent_block(&Self::binary_path())
                 .or_else(|| super::code_integrity::recent_block(&Self::dll_path()))
             {
@@ -866,7 +900,7 @@ impl Integration for TitanIntegration {
                 .await
                 .unwrap_or_default();
             let tail = super::stderr_tail(&stderr_content, 3);
-            return HealthStatus::Unhealthy(process_not_running_reason(vc_redist_missing(), &tail));
+            return HealthStatus::Unhealthy(classify_not_running(None, vc_redist_missing(), &tail));
         }
 
         // Read both log files (stdout and stderr)

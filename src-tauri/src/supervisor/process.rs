@@ -368,6 +368,9 @@ impl ManagedProcess {
         // B23: piped, not redirected straight into the files. The file paths
         // and names are unchanged; what changes is that FEM now sees every
         // line before it reaches disk and can scrub it.
+        // D1: a new attempt supersedes whatever the last one recorded.
+        super::start_failure::clear(integration_id);
+        let id_owned = integration_id.to_string();
         let mut child = spawn_bounded(integration_id, SPAWN_TIMEOUT, move || {
             let mut cmd = super::platform::command(&command_owned);
             for (k, v) in &env_owned {
@@ -379,7 +382,9 @@ impl ManagedProcess {
             if let Some(ref dir) = cwd_owned {
                 cmd.current_dir(dir);
             }
+            // D1: keep the raw OS code before it is humanized away.
             cmd.spawn()
+                .inspect_err(|e| super::start_failure::record_spawn_error(&id_owned, e))
         })?;
 
         // Only on the child `spawn_bounded` actually RETURNED. The timeout
@@ -409,7 +414,18 @@ impl ManagedProcess {
 
     /// Check if the process is still running (non-blocking)
     pub fn is_running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        match self.child.try_wait() {
+            Ok(None) => {
+                // D1: observed healthy, so no earlier failure may explain a later one.
+                super::start_failure::clear(&self.integration_id);
+                true
+            }
+            Ok(Some(status)) => {
+                super::start_failure::record_exit_code(&self.integration_id, status.code());
+                false
+            }
+            Err(_) => false,
+        }
     }
 
     /// Get the process ID

@@ -7,6 +7,7 @@ mod health_rearm_tests;
 pub mod platform;
 pub mod process;
 pub mod resource_guard;
+pub(crate) mod start_failure;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
