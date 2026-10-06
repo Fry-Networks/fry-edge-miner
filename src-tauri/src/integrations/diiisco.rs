@@ -713,3 +713,8 @@ mod credential_error_message_tests {
 #[cfg(test)]
 #[path = "diiisco_deploy_dir_tests.rs"]
 mod diiisco_deploy_dir_tests;
+
+/// C9: Diiisco bearer token comes from the credential response, never compiled in.
+#[cfg(test)]
+#[path = "diiisco_cred_c9_tests.rs"]
+mod diiisco_cred_c9_tests;
