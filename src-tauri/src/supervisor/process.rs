@@ -119,6 +119,10 @@ mod error_mode_tests;
 #[path = "partner_log_scrub_tests.rs"]
 mod partner_log_scrub_tests;
 
+#[cfg(test)]
+#[path = "spawn_error_message_dd_tests.rs"]
+mod spawn_error_message_dd_tests;
+
 /// Run `create` (the actual `Command::spawn`) on its own thread with the
 /// loader's modal error boxes suppressed, and wait at most `bound` for it.
 /// A creation that completes after the caller gave up is killed and logged —
