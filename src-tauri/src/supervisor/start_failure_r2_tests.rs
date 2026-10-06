@@ -72,7 +72,7 @@ fn dropping_a_process_does_not_observe_it() {
         .find("impl Drop for ManagedProcess")
         .expect("Drop impl present");
     let rest = &src[at..];
-    let body = &rest[..rest.find("\n}\n").expect("end of Drop impl")];
+    let body = &rest[..rest.find("\n}").expect("end of Drop impl")];
     assert!(
         !body.contains("is_running()"),
         "Drop must not go through the recording is_running"
