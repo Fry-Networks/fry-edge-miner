@@ -495,7 +495,7 @@ impl ManagedProcess {
 
 impl Drop for ManagedProcess {
     fn drop(&mut self) {
-        // Not `is_running()`: a dropped process must not record or clear anything.
+        // A plain poll, not the recording one: a dropped process must not record or clear anything.
         if matches!(self.child.try_wait(), Ok(None)) {
             let _ = self.child.kill();
             let _ = self.child.wait();
