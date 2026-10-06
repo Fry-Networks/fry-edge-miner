@@ -389,8 +389,9 @@ impl ManagedProcess {
                 cmd.current_dir(dir);
             }
             // D1: keep the raw OS code before it is humanized away.
-            cmd.spawn()
-                .inspect_err(|e| super::start_failure::record_spawn_error(&id_owned, e))
+            cmd.spawn().inspect_err(|e| {
+                super::start_failure::record_spawn_error_for_attempt(&id_owned, attempt, e)
+            })
         })?;
 
         // Only on the child `spawn_bounded` actually RETURNED. The timeout

@@ -67,12 +67,14 @@ pub(crate) fn record_spawn_error(id: &str, e: &io::Error) {
     }
 }
 
-/// `Some(ntstatus)` when a child's exit code is an NTSTATUS failure code
-/// (severity bits 0b11, e.g. -1073741515 == 0xC0000135). Ordinary small exit
-/// codes (1, 2, ...) are the program's own and keep the log-tail diagnosis.
+/// `Some(ntstatus)` when a child's exit code is an NTSTATUS error code: severity
+/// 0b11 and the customer bit clear, i.e. 0xC0000000..=0xCFFFFFFF (e.g.
+/// -1073741515 == 0xC0000135). Ordinary exit codes (1, 2, ...), a plain
+/// `exit(-1)` (0xFFFFFFFF) and customer-defined codes (0xE...) are the
+/// program's own and keep the log-tail diagnosis.
 pub(crate) fn ntstatus_from_exit_code(code: i32) -> Option<u32> {
     let status = code as u32;
-    (status & 0xC000_0000 == 0xC000_0000).then_some(status)
+    (status >> 28 == 0xC).then_some(status)
 }
 
 /// Record the exit status of a child that was observed dead.
@@ -119,10 +121,13 @@ pub(crate) fn clear_if_current(id: &str, attempt: u64) {
     }
 }
 
-// RED stub (round 3): not attempt-guarded. Replaced by the fix.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn record_spawn_error_for_attempt(id: &str, _attempt: u64, e: &io::Error) {
-    record_spawn_error(id, e);
+/// Record a failed spawn, but only if `attempt` is still the current one: a
+/// spawn that fails late (after the caller timed out and moved on) must not
+/// overwrite a newer attempt's record.
+pub(crate) fn record_spawn_error_for_attempt(id: &str, attempt: u64, e: &io::Error) {
+    if is_current(id, attempt) {
+        record_spawn_error(id, e);
+    }
 }
 
 #[cfg(test)]
