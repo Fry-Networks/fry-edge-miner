@@ -61,6 +61,35 @@ pub(crate) fn record_exit_code(id: &str, code: Option<i32>) {
     }
 }
 
+/// How long after spawn an exit still counts as a START failure.
+pub(crate) const STARTUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
+// RED stubs (round 2): no window, no attempt tracking. Replaced by the fix.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn begin_attempt(id: &str) -> u64 {
+    clear(id);
+    0
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn record_exit_code_for_attempt(
+    id: &str,
+    _attempt: u64,
+    code: Option<i32>,
+    _alive_for: std::time::Duration,
+) {
+    record_exit_code(id, code);
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn clear_if_current(id: &str, _attempt: u64) {
+    clear(id);
+}
+
 #[cfg(test)]
 #[path = "start_failure_record_tests.rs"]
 mod start_failure_record_tests;
+
+#[cfg(test)]
+#[path = "start_failure_r2_tests.rs"]
+mod start_failure_r2_tests;

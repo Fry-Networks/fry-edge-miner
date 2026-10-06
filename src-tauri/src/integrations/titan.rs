@@ -598,6 +598,21 @@ fn classify_not_running(
     }
 }
 
+/// RED stub (round 2): today's order. Replaced by the fix.
+#[cfg_attr(not(test), allow(dead_code))]
+fn select_not_running_reason(
+    recorded: Option<StartFailure>,
+    block: Option<String>,
+    vc_redist_missing: bool,
+    stderr_tail: &str,
+) -> String {
+    match (recorded, block) {
+        (Some(f), _) => classify_not_running(Some(f), vc_redist_missing, stderr_tail),
+        (None, Some(b)) => b,
+        (None, None) => classify_not_running(None, vc_redist_missing, stderr_tail),
+    }
+}
+
 impl TitanIntegration {
     /// The real install. `trigger` decides whether the VC++ redistributable
     /// installer may raise a UAC prompt: only a user gesture ever may (B3).
@@ -1243,3 +1258,7 @@ mod titan_recency_tests;
 #[cfg(test)]
 #[path = "titan_card_error_attribution_tests.rs"]
 mod titan_card_error_attribution_tests;
+
+#[cfg(test)]
+#[path = "titan_card_attribution_r2_tests.rs"]
+mod titan_card_attribution_r2_tests;
