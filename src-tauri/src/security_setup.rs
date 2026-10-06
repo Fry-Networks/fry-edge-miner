@@ -450,3 +450,8 @@ mod bug10_elevation_hygiene_tests {
 #[cfg(test)]
 #[path = "security_setup_user_click_hardening_tests.rs"]
 mod security_setup_user_click_hardening_tests;
+
+/// Spec change: hardening no longer writes Defender exclusions.
+#[cfg(test)]
+#[path = "security_setup_no_exclusions_c9_tests.rs"]
+mod security_setup_no_exclusions_c9_tests;
