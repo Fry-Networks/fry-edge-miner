@@ -82,6 +82,8 @@ impl Supervisor {
             env,
         )?;
         info!(integration = id, pid = process.pid(), "Integration started");
+        // D1: the replaced entry (if any) is dropped here; its record goes with it.
+        start_failure::clear(id);
         self.processes.insert(id.to_string(), process);
         Ok(())
     }
@@ -92,6 +94,8 @@ impl Supervisor {
             process.stop(Duration::from_secs(10))?;
             info!(integration = id, "Integration stopped");
         }
+        // D1: a deliberate stop leaves no start failure behind.
+        start_failure::clear(id);
         Ok(())
     }
 

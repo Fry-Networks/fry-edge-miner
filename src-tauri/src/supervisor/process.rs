@@ -212,6 +212,12 @@ pub struct ManagedProcess {
     /// files, scrubbing each line on the way. They end on their own when the
     /// pipe reaches EOF, which is when the child exits or is killed.
     log_pumps: Vec<std::thread::JoinHandle<()>>,
+    /// D1: which start attempt this child belongs to (see `start_failure`).
+    attempt: u64,
+    /// D1: how long the child had lived the last time it was SEEN running. The
+    /// health loop polls every ~30 s, so "now - spawn" at the moment a death is
+    /// noticed would misread an instant startup failure as a long run.
+    last_alive_for: Duration,
 }
 
 /// B23: copy one of the child's pipes into its log file, scrubbing each line.
@@ -369,7 +375,7 @@ impl ManagedProcess {
         // and names are unchanged; what changes is that FEM now sees every
         // line before it reaches disk and can scrub it.
         // D1: a new attempt supersedes whatever the last one recorded.
-        super::start_failure::clear(integration_id);
+        let attempt = super::start_failure::begin_attempt(integration_id);
         let id_owned = integration_id.to_string();
         let mut child = spawn_bounded(integration_id, SPAWN_TIMEOUT, move || {
             let mut cmd = super::platform::command(&command_owned);
@@ -409,6 +415,8 @@ impl ManagedProcess {
             started_at: Utc::now(),
             log_dir: log_dir.to_path_buf(),
             log_pumps,
+            attempt,
+            last_alive_for: Duration::ZERO,
         })
     }
 
@@ -417,11 +425,19 @@ impl ManagedProcess {
         match self.child.try_wait() {
             Ok(None) => {
                 // D1: observed healthy, so no earlier failure may explain a later one.
-                super::start_failure::clear(&self.integration_id);
+                super::start_failure::clear_if_current(&self.integration_id, self.attempt);
+                self.last_alive_for = (Utc::now() - self.started_at)
+                    .to_std()
+                    .unwrap_or(Duration::ZERO);
                 true
             }
             Ok(Some(status)) => {
-                super::start_failure::record_exit_code(&self.integration_id, status.code());
+                super::start_failure::record_exit_code_for_attempt(
+                    &self.integration_id,
+                    self.attempt,
+                    status.code(),
+                    self.last_alive_for,
+                );
                 false
             }
             Err(_) => false,
@@ -479,7 +495,8 @@ impl ManagedProcess {
 
 impl Drop for ManagedProcess {
     fn drop(&mut self) {
-        if self.is_running() {
+        // Not `is_running()`: a dropped process must not record or clear anything.
+        if matches!(self.child.try_wait(), Ok(None)) {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }

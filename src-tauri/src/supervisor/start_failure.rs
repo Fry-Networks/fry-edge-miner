@@ -14,7 +14,28 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::{Mutex, OnceLock};
 
-use crate::integrations::titan::StartFailure;
+/// Why the most recent START attempt failed: the spawn's raw OS error (e.g.
+/// 4551, App Control) or the child's startup exit status (NTSTATUS, e.g.
+/// 0xC0000135). Recorded per integration; read by `titan::classify_not_running`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartFailure {
+    SpawnOsError(i32),
+    ChildExitStatus(u32),
+}
+
+/// Attempt number of the newest start attempt per integration. A record is only
+/// written or cleared on behalf of the process that belongs to that attempt.
+fn attempts() -> &'static Mutex<HashMap<String, u64>> {
+    static ATTEMPTS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    ATTEMPTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn is_current(id: &str, attempt: u64) -> bool {
+    attempts()
+        .lock()
+        .ok()
+        .is_some_and(|map| map.get(id) == Some(&attempt))
+}
 
 fn store() -> &'static Mutex<HashMap<String, StartFailure>> {
     static STORE: OnceLock<Mutex<HashMap<String, StartFailure>>> = OnceLock::new();
@@ -62,29 +83,40 @@ pub(crate) fn record_exit_code(id: &str, code: Option<i32>) {
 }
 
 /// How long after spawn an exit still counts as a START failure.
-#[allow(dead_code)] // RED stub: the fix uses it
 pub(crate) const STARTUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
-// RED stubs (round 2): no window, no attempt tracking. Replaced by the fix.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Start a new attempt for `id`: it supersedes every earlier attempt (whose
+/// children can no longer record or clear anything) and drops the old record.
 pub(crate) fn begin_attempt(id: &str) -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let attempt = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut map) = attempts().lock() {
+        map.insert(id.to_string(), attempt);
+    }
     clear(id);
-    0
+    attempt
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+/// Record a child's exit status, but only if it belongs to the current attempt
+/// and died within `STARTUP_WINDOW` of being spawned: a child that ran for a
+/// while and then crashed is not a start failure (the log tail explains it).
 pub(crate) fn record_exit_code_for_attempt(
     id: &str,
-    _attempt: u64,
+    attempt: u64,
     code: Option<i32>,
-    _alive_for: std::time::Duration,
+    alive_for: std::time::Duration,
 ) {
-    record_exit_code(id, code);
+    if alive_for < STARTUP_WINDOW && is_current(id, attempt) {
+        record_exit_code(id, code);
+    }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn clear_if_current(id: &str, _attempt: u64) {
-    clear(id);
+/// Clear the record because the child of `attempt` was observed running, unless
+/// a newer attempt has since taken over.
+pub(crate) fn clear_if_current(id: &str, attempt: u64) {
+    if is_current(id, attempt) {
+        clear(id);
+    }
 }
 
 #[cfg(test)]
