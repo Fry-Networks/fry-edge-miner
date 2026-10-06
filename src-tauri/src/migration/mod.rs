@@ -9,6 +9,7 @@ use crate::config::miner_key;
 const FRYHUB_DATA_DIR: &str = "C:/ProgramData/FryNetworks";
 
 const MINER_PREFIXES: &[(&str, &str)] = &[
+    ("AEM", "AEM Miner"),
     ("BM", "Bandwidth Miner"),
     ("RDN", "Compute Node"),
     ("SDN", "Storage Decentralization Node"),
@@ -150,9 +151,23 @@ fn find_miner_key_in_dir(dir: &Path, code: &str) -> Option<DetectedMinerKey> {
     None
 }
 
+/// The FEM- twin the server already holds for a legacy key: the 2026-06-18 rename mapped every
+/// legacy key to "FEM-" + the same 32 characters (main.migration.fem_key_map). Placeholder or
+/// malformed keys have no twin.
+fn fem_twin(legacy_key: &str) -> Option<String> {
+    let (_, body) = legacy_key.trim().split_once('-')?;
+    miner_key::validate_fem_key_preserve_case(&format!("FEM-{}", body)).ok()
+}
+
 /// Plan a migration from FryHub miner keys to FEM
 pub fn plan_migration(installation: &FryHubInstallation, wallet: Option<String>) -> MigrationPlan {
-    let fem_key = miner_key::generate();
+    // Keep the registered identity: a freshly generated key is an unregistered stub, so the
+    // migrated client would heartbeat while the user's registered device stayed dark (OOS-C8-11).
+    let fem_key = installation
+        .found_keys
+        .iter()
+        .find_map(|k| fem_twin(&k.key))
+        .unwrap_or_else(miner_key::generate);
 
     let mut integrations: Vec<String> = Vec::new();
     let source_keys: Vec<String> = installation
@@ -294,5 +309,84 @@ mod tests {
 
         // No production API calls: this test only calls detect + plan,
         // never execute_migration or notify_migration
+    }
+
+    fn inst_with(keys: &[(&str, &str)]) -> FryHubInstallation {
+        FryHubInstallation {
+            found_keys: keys
+                .iter()
+                .map(|(code, key)| DetectedMinerKey {
+                    key: key.to_string(),
+                    miner_type: code.to_string(),
+                    display_name: code.to_string(),
+                })
+                .collect(),
+            wallet: None,
+            data_dir: String::new(),
+        }
+    }
+
+    // OOS-C8-11: the server renamed every legacy key to FEM- + the same 32 characters
+    // (main.migration.fem_key_map, 11,186 of 11,186 entries). Minting a fresh key made the
+    // migrated client heartbeat under an unregistered stub while the registered twin stayed dark.
+    #[test]
+    fn test_migration_keeps_the_registered_identity() {
+        let body = "K1PqZ7x0aB3cD4eF5gH6iJ7kL8mN9oP0";
+        let plan = plan_migration(&inst_with(&[("BM", &format!("BM-{}", body))]), None);
+        assert_eq!(
+            plan.fem_key,
+            format!("FEM-{}", body),
+            "FEM key must be FEM- + the legacy body, case preserved"
+        );
+
+        let aem = "EWqA1b2C3d4E5f6G7h8I9j0K1l2M3n4O";
+        let plan = plan_migration(&inst_with(&[("AEM", &format!("AEM-{}", aem))]), None);
+        assert_eq!(
+            plan.fem_key,
+            format!("FEM-{}", aem),
+            "AEM keys migrate to their FEM- twin too"
+        );
+    }
+
+    #[test]
+    fn test_aem_is_a_known_miner_type() {
+        assert!(
+            MINER_PREFIXES.iter().any(|(p, _)| *p == "AEM"),
+            "AEM must be a recognised FryHub miner type"
+        );
+    }
+
+    #[test]
+    fn test_placeholder_or_malformed_keys_still_get_a_fresh_key() {
+        for k in [
+            "BM-DETECTED",
+            "RDN-TESTFIXTURE00000000000000000000",
+            "BM-has-dash-0000000000000000000000",
+        ] {
+            let plan = plan_migration(&inst_with(&[("BM", k)]), None);
+            assert!(
+                crate::config::miner_key::is_valid(&plan.fem_key),
+                "fallback key must be a valid FEM key"
+            );
+            assert!(
+                !plan.fem_key.ends_with(k.split_once('-').unwrap().1),
+                "no FEM key from a non-32-char body"
+            );
+        }
+    }
+
+    #[test]
+    fn test_first_valid_legacy_key_in_detection_order_wins() {
+        let a = "AAAAbbbbCCCCddddEEEEffffGGGGhhhh";
+        let b = "11112222333344445555666677778888";
+        let plan = plan_migration(
+            &inst_with(&[
+                ("BM", "BM-DETECTED"),
+                ("RDN", &format!("RDN-{}", a)),
+                ("SDN", &format!("SDN-{}", b)),
+            ]),
+            None,
+        );
+        assert_eq!(plan.fem_key, format!("FEM-{}", a));
     }
 }
