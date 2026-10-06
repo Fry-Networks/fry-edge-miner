@@ -553,6 +553,28 @@ fn process_not_running_reason(vc_redist_missing: bool, stderr_tail: &str) -> Str
     }
 }
 
+/// Why the most recent titan-edge START attempt failed: the spawn's raw OS
+/// error (e.g. 4551, App Control) or the child's startup exit status (NTSTATUS,
+/// e.g. 0xC0000135). Recorded per integration; read by `classify_not_running`.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartFailure {
+    SpawnOsError(i32),
+    ChildExitStatus(u32),
+}
+
+/// Pure: card message for a not-running titan-edge, given the recorded start
+/// failure (if any), whether the VC++ runtime is missing, and the log tail.
+// RED stub: ignores `failure` (today's behaviour). The D1 fix replaces the body.
+#[cfg_attr(not(test), allow(dead_code))]
+fn classify_not_running(
+    _failure: Option<StartFailure>,
+    vc_redist_missing: bool,
+    stderr_tail: &str,
+) -> String {
+    process_not_running_reason(vc_redist_missing, stderr_tail)
+}
+
 impl TitanIntegration {
     /// The real install. `trigger` decides whether the VC++ redistributable
     /// installer may raise a UAC prompt: only a user gesture ever may (B3).
@@ -1183,3 +1205,7 @@ mod titan_layout_tests;
 #[cfg(test)]
 #[path = "titan_recency_tests.rs"]
 mod titan_recency_tests;
+
+#[cfg(test)]
+#[path = "titan_card_error_attribution_tests.rs"]
+mod titan_card_error_attribution_tests;
