@@ -119,6 +119,12 @@ pub(crate) fn clear_if_current(id: &str, attempt: u64) {
     }
 }
 
+// RED stub (round 3): not attempt-guarded. Replaced by the fix.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn record_spawn_error_for_attempt(id: &str, _attempt: u64, e: &io::Error) {
+    record_spawn_error(id, e);
+}
+
 #[cfg(test)]
 #[path = "start_failure_record_tests.rs"]
 mod start_failure_record_tests;
@@ -126,3 +132,7 @@ mod start_failure_record_tests;
 #[cfg(test)]
 #[path = "start_failure_r2_tests.rs"]
 mod start_failure_r2_tests;
+
+#[cfg(test)]
+#[path = "start_failure_r3_tests.rs"]
+mod start_failure_r3_tests;
