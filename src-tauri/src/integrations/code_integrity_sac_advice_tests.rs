@@ -1,11 +1,11 @@
-//! RED: the card text must not tell the user to weaken Windows protection or
+//! The card text must not tell the user to weaken Windows protection or
 //! to allow the blocked file. It may only name the blocker, say reinstalling
 //! will not help, and point at Windows Security.
 
 use super::*;
 use std::path::Path;
 
-const FORBIDDEN: [&str; 12] = [
+const FORBIDDEN: [&str; 13] = [
     "disable",
     "turn off",
     "smart app control off",
@@ -18,6 +18,7 @@ const FORBIDDEN: [&str; 12] = [
     "whitelist",
     "bypass",
     "run anyway",
+    "allow ",
 ];
 
 fn normalize(s: &str) -> String {

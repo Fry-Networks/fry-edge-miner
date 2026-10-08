@@ -54,9 +54,10 @@ pub(crate) fn user_message(image: &Path) -> String {
     format!(
         "{AWAITING_ADMIN_MARKER} — Windows blocked {name} from loading (Smart App Control or an \
          app-control policy refused the unsigned file). The file itself is intact, so \
-         reinstalling will not help. Windows Security keeps a record of this block under App & \
-         browser control. This integration stays paused until the file can load; re-enable it \
-         afterwards."
+         reinstalling will not help. Windows Security may have shown a notification about it, \
+         and the block is recorded in Event Viewer under \
+         Microsoft-Windows-CodeIntegrity/Operational. This integration stays paused until the \
+         file can load; re-enable it afterwards."
     )
 }
 
