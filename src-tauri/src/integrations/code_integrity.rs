@@ -365,3 +365,9 @@ mod code_integrity_b15_capture_tests;
 #[cfg(test)]
 #[path = "code_integrity_c5_attr_tests.rs"]
 mod code_integrity_c5_attr_tests;
+
+/// RED: the card text must not advise disabling Smart App Control or allowing
+/// the blocked file. Separate file so the files above stay byte-identical.
+#[cfg(test)]
+#[path = "code_integrity_sac_advice_tests.rs"]
+mod code_integrity_sac_advice_tests;
