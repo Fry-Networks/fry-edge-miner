@@ -13,3 +13,6 @@ testsprite_tests\tmp\config.json
 playwright-report/
 test-results/
 playwright/.cache/
+
+# Fetched at build time by scripts/fetch-vcredist.mjs (pinned, verified)
+src-tauri/resources/vc_redist.x64.exe

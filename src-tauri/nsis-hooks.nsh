@@ -170,4 +170,135 @@
   ; real mechanism is the app's own one-time ELEVATED setup
   ; (security_setup.rs), which runs both together under a single UAC prompt
   ; on first launch and before each update, and actually succeeds.
+  ; >>> FEMQA-VCREDIST
+  ; Install the bundled Microsoft VC++ 2015-2022 x64 runtime when it is missing
+  ; or too old. Titan's binaries import it. Design constraints:
+  ;  - Interactive installs only. Silent, passive (/P) and update (/UPDATE)
+  ;    installs never block on a prompt; the app's runtime card covers them.
+  ;  - NOT elevated by us: the redist is a WiX Burn bundle that raises its own
+  ;    UAC prompt when needed, so this per-user installer stays unelevated.
+  ;  - Bounded: one finite 120 s wait, then the install continues regardless.
+  ;  - Never fatal: every failure path only logs and carries on.
+  ; FLOOR 35211 is the build that ran Titan on a clean Windows 10 redist; the
+  ; bundled redist is also 14.44.35211.
+  Push $R0
+  Push $R1
+  Push $R2
+  Push $R3
+  Push $R4
+  Push $R5
+  Push $R6
+  Push $R7
+  Push $R8
+  Push $R9
+
+  StrCpy $R0 1
+
+  ${If} ${Silent}
+  ${OrIf} $PassiveMode = 1
+  ${OrIf} $UpdateMode = 1
+    DetailPrint "VC++ runtime check skipped (silent/passive/update install); FEM will show the runtime card if Titan needs it"
+    StrCpy $R0 0
+  ${EndIf}
+
+  ${If} $R0 = 1
+    ; Need check: 64-bit registry view plus the real System32 (no WOW64 redirection).
+    SetRegView 64
+    ClearErrors
+    ReadRegDWORD $R1 HKLM "SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" "Installed"
+    ${If} ${Errors}
+      StrCpy $R1 0
+    ${EndIf}
+    ClearErrors
+    ReadRegDWORD $R2 HKLM "SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" "Bld"
+    ${If} ${Errors}
+      StrCpy $R2 0
+    ${EndIf}
+    SetRegView lastused
+
+    ; R3 = 1 when a runtime DLL is missing.
+    StrCpy $R3 0
+    ${DisableX64FSRedirection}
+    ${IfNot} ${FileExists} "$WINDIR\System32\vcruntime140.dll"
+      StrCpy $R3 1
+    ${EndIf}
+    ${IfNot} ${FileExists} "$WINDIR\System32\vcruntime140_1.dll"
+      StrCpy $R3 1
+    ${EndIf}
+    ${IfNot} ${FileExists} "$WINDIR\System32\msvcp140.dll"
+      StrCpy $R3 1
+    ${EndIf}
+    ${IfNot} ${FileExists} "$WINDIR\System32\msvcp140_atomic_wait.dll"
+      StrCpy $R3 1
+    ${EndIf}
+    ${EnableX64FSRedirection}
+
+    ; NEED = not registered, or any DLL missing, or older than the floor.
+    StrCpy $R0 0
+    ${If} $R1 <> 1
+    ${OrIf} $R3 = 1
+    ${OrIf} $R2 < 35211
+      StrCpy $R0 1
+    ${EndIf}
+
+    ${If} $R0 = 0
+      DetailPrint "VC++ 2015-2022 x64 runtime present (Bld $R2); bundled redist not needed"
+    ${EndIf}
+  ${EndIf}
+
+  ${If} $R0 = 1
+  ${AndIfNot} ${FileExists} "$INSTDIR\resources\vc_redist.x64.exe"
+    DetailPrint "Bundled VC++ redist not found in the install folder; continuing"
+    StrCpy $R0 0
+  ${EndIf}
+
+  ${If} $R0 = 1
+    DetailPrint "Installing VC++ 2015-2022 x64 runtime (bundled, Microsoft-signed)..."
+    StrCpy $R3 '"$INSTDIR\resources\vc_redist.x64.exe" /install /quiet /norestart'
+    ; STARTUPINFOW is 68 bytes in a 32-bit process; PROCESS_INFORMATION is 16.
+    ; System::Alloc zero-fills.
+    System::Alloc 68
+    Pop $R4
+    System::Call '*$R4(i 68)'
+    System::Alloc 16
+    Pop $R5
+    ; "w R3" hands CreateProcessW a private writable copy of the command line.
+    System::Call 'kernel32::CreateProcessW(p 0, w R3, p 0, p 0, i 0, i 0, p 0, p 0, p R4, p R5) i .R6 ?e'
+    Pop $R8
+    ${If} $R6 <> 0
+      System::Call '*$R5(p .R7, p .R9)'
+      System::Call 'kernel32::WaitForSingleObject(p $R7, i 120000) i .R8'
+      ${If} $R8 = 0
+        System::Call 'kernel32::GetExitCodeProcess(p $R7, *i .R8)'
+        ${If} $R8 = 0
+        ${OrIf} $R8 = 1638
+          DetailPrint "VC++ runtime install finished (exit $R8)"
+        ${ElseIf} $R8 = 3010
+          DetailPrint "VC++ runtime installed (exit 3010, reboot pending)"
+        ${Else}
+          DetailPrint "VC++ redist exit $R8 - continuing; FEM will show the runtime card if Titan needs it"
+        ${EndIf}
+      ${Else}
+        DetailPrint "VC++ redist still waiting (e.g. consent prompt) after 120 s - continuing install; it may finish on its own"
+      ${EndIf}
+      System::Call 'kernel32::CloseHandle(p $R7)'
+      System::Call 'kernel32::CloseHandle(p $R9)'
+    ${Else}
+      DetailPrint "Could not start the VC++ redist (error $R8) - continuing"
+    ${EndIf}
+    System::Free $R4
+    System::Free $R5
+  ${EndIf}
+
+  Pop $R9
+  Pop $R8
+  Pop $R7
+  Pop $R6
+  Pop $R5
+  Pop $R4
+  Pop $R3
+  Pop $R2
+  Pop $R1
+  Pop $R0
+  ; <<< FEMQA-VCREDIST
 !macroend
