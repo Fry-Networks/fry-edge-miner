@@ -191,14 +191,18 @@
   Push $R7
   Push $R8
   Push $R9
+  Push $0
+  Push $1
 
   StrCpy $R0 1
+  StrCpy $0 1
 
   ${If} ${Silent}
   ${OrIf} $PassiveMode = 1
   ${OrIf} $UpdateMode = 1
     DetailPrint "VC++ runtime check skipped (silent/passive/update install); FEM will show the runtime card if Titan needs it"
     StrCpy $R0 0
+    StrCpy $0 0
   ${EndIf}
 
   ${If} $R0 = 1
@@ -243,10 +247,6 @@
 
     ${If} $R0 = 0
       DetailPrint "VC++ 2015-2022 x64 runtime present (Bld $R2); bundled redist not needed"
-      ; Reclaim 25 MB and shrink the user-writable swap window. Interactive
-      ; installs only (this branch is unreachable for silent/passive/update).
-      Delete "$INSTDIR\resources\vc_redist.x64.exe"
-      ClearErrors
     ${EndIf}
   ${EndIf}
 
@@ -282,12 +282,6 @@
         ${Else}
           DetailPrint "VC++ redist exit $R8 - continuing; FEM will show the runtime card if Titan needs it"
         ${EndIf}
-        ; Run completed (any exit code): reclaim 25 MB and shrink the
-        ; user-writable swap window. NOT deleted on timeout (Burn still holds
-        ; the file) nor on silent/passive/update installs (kept for a possible
-        ; runtime-side use of the bundled copy - an operator decision).
-        Delete "$INSTDIR\resources\vc_redist.x64.exe"
-        ClearErrors
       ${Else}
         DetailPrint "VC++ redist still waiting (e.g. consent prompt) after 120 s - continuing install; it may finish on its own"
       ${EndIf}
@@ -300,6 +294,58 @@
     System::Free $R5
   ${EndIf}
 
+  ; C2a (operator decision): keep the bundled copy so a later runtime-side
+  ; install can use it. Delete it ONLY when a FRESH probe, run after the
+  ; install attempt (any outcome: success, UAC declined, timeout, launch
+  ; failure) or on the "already present" path, proves the runtime is there.
+  ; Interactive installs only; silent/passive/update never reach the delete.
+  ; >>> FEMQA-POSTPROBE
+  ${If} $0 = 1
+    StrCpy $1 0
+    SetRegView 64
+    ClearErrors
+    ReadRegDWORD $R1 HKLM "SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" "Installed"
+    ${If} ${Errors}
+      StrCpy $R1 0
+    ${EndIf}
+    ClearErrors
+    ReadRegDWORD $R2 HKLM "SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" "Bld"
+    ${If} ${Errors}
+      StrCpy $R2 0
+    ${EndIf}
+    SetRegView lastused
+    StrCpy $R3 0
+    ${DisableX64FSRedirection}
+    ${IfNot} ${FileExists} "$WINDIR\System32\vcruntime140.dll"
+      StrCpy $R3 1
+    ${EndIf}
+    ${IfNot} ${FileExists} "$WINDIR\System32\vcruntime140_1.dll"
+      StrCpy $R3 1
+    ${EndIf}
+    ${IfNot} ${FileExists} "$WINDIR\System32\msvcp140.dll"
+      StrCpy $R3 1
+    ${EndIf}
+    ${IfNot} ${FileExists} "$WINDIR\System32\msvcp140_atomic_wait.dll"
+      StrCpy $R3 1
+    ${EndIf}
+    ${EnableX64FSRedirection}
+    ${If} $R1 = 1
+    ${AndIf} $R3 = 0
+    ${AndIf} $R2 >= 35211
+      StrCpy $1 1
+    ${EndIf}
+    ${If} $1 = 1
+      Delete "$INSTDIR\resources\vc_redist.x64.exe"
+      ClearErrors
+      DetailPrint "bundled redist removed (runtime verified)"
+    ${Else}
+      DetailPrint "keeping bundled redist (runtime not verified present)"
+    ${EndIf}
+  ${EndIf}
+  ; <<< FEMQA-POSTPROBE
+
+  Pop $1
+  Pop $0
   Pop $R9
   Pop $R8
   Pop $R7
