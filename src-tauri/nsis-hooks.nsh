@@ -152,7 +152,7 @@
     FileWrite $6 "$\r$\n"
     FileWrite $6 "To recover:$\r$\n"
     FileWrite $6 "  1. Download the latest Fry Edge Miner installer from the official Fry Networks website and run it again.$\r$\n"
-    FileWrite $6 "  2. Or put the previous version back from: $APPDATA\com.frynetworks.fem\.prev\fry-edge-miner.exe$\r$\n"
+    FileWrite $6 "  2. Or put the previous version back (if it exists) from: $APPDATA\com.frynetworks.fem\.prev\fry-edge-miner.exe$\r$\n"
     FileWrite $6 "  3. If this keeps happening, contact Fry Networks support and include this file.$\r$\n"
     FileClose $6
     MessageBox MB_ICONEXCLAMATION "Fry Edge Miner did not install correctly — the application file is missing or was blocked by antivirus.$\r$\n$\r$\nSee $INSTDIR\update-failed.txt for recovery steps, or restore the previous version from $APPDATA\com.frynetworks.fem\.prev\"
