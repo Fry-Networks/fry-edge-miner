@@ -151,6 +151,21 @@ fn node_wrapper_noop_off_windows() {
 }
 
 #[test]
+fn wrapper_strips_psmodulepath_for_windows_powershell() {
+    let s = read(
+        repo().join("scripts/fetch-vcredist.mjs"),
+        "scripts/fetch-vcredist.mjs",
+    );
+    has_ci(&s, "PSModulePath", "PSModulePath handling");
+    let i = s.find("spawnSync(").expect("spawnSync call");
+    let call = &s[i..];
+    assert!(
+        call.contains("env:") || call.contains("env,"),
+        "env not passed to spawnSync"
+    );
+}
+
+#[test]
 fn ps1_pins_and_verifies() {
     let s = read(
         repo().join("scripts/fetch-vcredist.ps1"),
