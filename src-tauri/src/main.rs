@@ -18,6 +18,9 @@ mod security_setup;
 mod storage_location;
 mod supervisor;
 mod system_info;
+#[cfg(test)]
+#[path = "update_failed_advice_tests.rs"]
+mod update_failed_advice_tests;
 mod updater_auto;
 #[cfg(test)]
 #[path = "vc_redist_bundle_tests.rs"]
