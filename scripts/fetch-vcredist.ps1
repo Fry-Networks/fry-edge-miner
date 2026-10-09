@@ -2,6 +2,8 @@
 # into src-tauri/resources/vc_redist.x64.exe (bundled by tauri.windows.conf.json).
 # Fail closed: any mismatch deletes the download and exits 1.
 $ErrorActionPreference = 'Stop'
+# PS 5.1's progress bar makes Invoke-WebRequest dramatically slower.
+$ProgressPreference = 'SilentlyContinue'
 
 $Url    = "https://download.visualstudio.microsoft.com/download/pr/bd1c8d9d-ba95-4eee-bc6e-df1fcc876373/CC0FF0EB1DC3F5188AE6300FAEF32BF5BEEBA4BDD6E8E445A9184072096B713B/VC_redist.x64.exe"
 $Sha256 = "cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b"

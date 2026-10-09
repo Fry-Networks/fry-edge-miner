@@ -14,4 +14,8 @@ const r = spawnSync(
   ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1],
   { stdio: 'inherit' },
 );
+if (r.error) {
+  console.error(`fetch-vcredist: failed to start powershell: ${r.error.message}`);
+  process.exit(1);
+}
 process.exit(r.status ?? 1);

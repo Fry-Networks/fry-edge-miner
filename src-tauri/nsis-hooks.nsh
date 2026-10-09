@@ -243,6 +243,10 @@
 
     ${If} $R0 = 0
       DetailPrint "VC++ 2015-2022 x64 runtime present (Bld $R2); bundled redist not needed"
+      ; Reclaim 25 MB and shrink the user-writable swap window. Interactive
+      ; installs only (this branch is unreachable for silent/passive/update).
+      Delete "$INSTDIR\resources\vc_redist.x64.exe"
+      ClearErrors
     ${EndIf}
   ${EndIf}
 
@@ -278,6 +282,12 @@
         ${Else}
           DetailPrint "VC++ redist exit $R8 - continuing; FEM will show the runtime card if Titan needs it"
         ${EndIf}
+        ; Run completed (any exit code): reclaim 25 MB and shrink the
+        ; user-writable swap window. NOT deleted on timeout (Burn still holds
+        ; the file) nor on silent/passive/update installs (kept for a possible
+        ; runtime-side use of the bundled copy - an operator decision).
+        Delete "$INSTDIR\resources\vc_redist.x64.exe"
+        ClearErrors
       ${Else}
         DetailPrint "VC++ redist still waiting (e.g. consent prompt) after 120 s - continuing install; it may finish on its own"
       ${EndIf}
