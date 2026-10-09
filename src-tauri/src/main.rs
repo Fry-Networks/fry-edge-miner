@@ -19,6 +19,9 @@ mod storage_location;
 mod supervisor;
 mod system_info;
 mod updater_auto;
+#[cfg(test)]
+#[path = "vc_redist_bundle_tests.rs"]
+mod vc_redist_bundle_tests;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

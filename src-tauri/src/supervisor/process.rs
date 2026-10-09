@@ -119,6 +119,38 @@ mod error_mode_tests;
 #[path = "partner_log_scrub_tests.rs"]
 mod partner_log_scrub_tests;
 
+#[cfg(test)]
+#[path = "spawn_error_message_dd_tests.rs"]
+mod spawn_error_message_dd_tests;
+
+/// Human-readable form of a failed child start, for the card text. The raw
+/// OS code / NTSTATUS (and std's "(os error N)" suffix) never appear: they mean
+/// nothing to the user and are not actionable. The original error is logged.
+/// Deliberately gives no advice to change security settings.
+pub(crate) fn humanize_spawn_error(integration_id: &str, e: &io::Error) -> io::Error {
+    warn!(integration = %integration_id, error = %e, "Child process failed to start");
+    // 4551 = ERROR_CODE_INTEGRITY_BLOCK-style App Control refusal.
+    let reason = if e.raw_os_error() == Some(4551) {
+        "was blocked by Windows Application Control (Smart App Control)".to_string()
+    } else {
+        let why = match e.kind() {
+            io::ErrorKind::NotFound => "its file was not found",
+            io::ErrorKind::PermissionDenied => "permission was denied",
+            io::ErrorKind::OutOfMemory => "the system is out of memory",
+            io::ErrorKind::TimedOut => "it took too long",
+            io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => {
+                "its file could not be loaded"
+            }
+            _ => "the system refused to start it",
+        };
+        format!("could not start ({why})")
+    };
+    io::Error::new(
+        e.kind(),
+        format!("{integration_id} {reason}. Fry Edge Miner keeps running its other components."),
+    )
+}
+
 /// Run `create` (the actual `Command::spawn`) on its own thread with the
 /// loader's modal error boxes suppressed, and wait at most `bound` for it.
 /// A creation that completes after the caller gave up is killed and logged —
@@ -153,7 +185,7 @@ where
             }
         })?;
     match rx.recv_timeout(bound) {
-        Ok(result) => result,
+        Ok(result) => result.map_err(|e| humanize_spawn_error(integration_id, &e)),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
             io::ErrorKind::TimedOut,
             format!(
@@ -180,6 +212,12 @@ pub struct ManagedProcess {
     /// files, scrubbing each line on the way. They end on their own when the
     /// pipe reaches EOF, which is when the child exits or is killed.
     log_pumps: Vec<std::thread::JoinHandle<()>>,
+    /// D1: which start attempt this child belongs to (see `start_failure`).
+    attempt: u64,
+    /// D1: how long the child had lived the last time it was SEEN running. The
+    /// health loop polls every ~30 s, so "now - spawn" at the moment a death is
+    /// noticed would misread an instant startup failure as a long run.
+    last_alive_for: Duration,
 }
 
 /// B23: copy one of the child's pipes into its log file, scrubbing each line.
@@ -336,6 +374,9 @@ impl ManagedProcess {
         // B23: piped, not redirected straight into the files. The file paths
         // and names are unchanged; what changes is that FEM now sees every
         // line before it reaches disk and can scrub it.
+        // D1: a new attempt supersedes whatever the last one recorded.
+        let attempt = super::start_failure::begin_attempt(integration_id);
+        let id_owned = integration_id.to_string();
         let mut child = spawn_bounded(integration_id, SPAWN_TIMEOUT, move || {
             let mut cmd = super::platform::command(&command_owned);
             for (k, v) in &env_owned {
@@ -347,7 +388,10 @@ impl ManagedProcess {
             if let Some(ref dir) = cwd_owned {
                 cmd.current_dir(dir);
             }
-            cmd.spawn()
+            // D1: keep the raw OS code before it is humanized away.
+            cmd.spawn().inspect_err(|e| {
+                super::start_failure::record_spawn_error_for_attempt(&id_owned, attempt, e)
+            })
         })?;
 
         // Only on the child `spawn_bounded` actually RETURNED. The timeout
@@ -372,12 +416,33 @@ impl ManagedProcess {
             started_at: Utc::now(),
             log_dir: log_dir.to_path_buf(),
             log_pumps,
+            attempt,
+            last_alive_for: Duration::ZERO,
         })
     }
 
     /// Check if the process is still running (non-blocking)
     pub fn is_running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        match self.child.try_wait() {
+            Ok(None) => {
+                // D1: observed healthy, so no earlier failure may explain a later one.
+                super::start_failure::clear_if_current(&self.integration_id, self.attempt);
+                self.last_alive_for = (Utc::now() - self.started_at)
+                    .to_std()
+                    .unwrap_or(Duration::ZERO);
+                true
+            }
+            Ok(Some(status)) => {
+                super::start_failure::record_exit_code_for_attempt(
+                    &self.integration_id,
+                    self.attempt,
+                    status.code(),
+                    self.last_alive_for,
+                );
+                false
+            }
+            Err(_) => false,
+        }
     }
 
     /// Get the process ID
@@ -431,7 +496,8 @@ impl ManagedProcess {
 
 impl Drop for ManagedProcess {
     fn drop(&mut self) {
-        if self.is_running() {
+        // A plain poll, not the recording one: a dropped process must not record or clear anything.
+        if matches!(self.child.try_wait(), Ok(None)) {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
