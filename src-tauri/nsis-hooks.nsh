@@ -148,12 +148,12 @@
     DetailPrint "fry-edge-miner.exe missing or truncated after install (size: $4 bytes) — likely quarantined by antivirus"
     FileOpen $6 "$INSTDIR\update-failed.txt" w
     FileWrite $6 "Fry Edge Miner failed to install correctly.$\r$\n"
-    FileWrite $6 "The most likely cause is antivirus/Defender quarantining the new file during install.$\r$\n"
+    FileWrite $6 "The application file is missing or incomplete after installation. Security software may have removed or blocked it during install.$\r$\n"
     FileWrite $6 "$\r$\n"
     FileWrite $6 "To recover:$\r$\n"
-    FileWrite $6 "  1. Open Windows Security > Virus & threat protection > Protection history, find the quarantined fry-edge-miner.exe, and restore it.$\r$\n"
-    FileWrite $6 "  2. Or restore the previous version from: $APPDATA\com.frynetworks.fem\.prev\fry-edge-miner.exe$\r$\n"
-    FileWrite $6 "  3. Add an exclusion for this folder in Windows Security so future updates are unaffected: $INSTDIR$\r$\n"
+    FileWrite $6 "  1. Download the latest Fry Edge Miner installer from the official Fry Networks website and run it again.$\r$\n"
+    FileWrite $6 "  2. Or put the previous version back from: $APPDATA\com.frynetworks.fem\.prev\fry-edge-miner.exe$\r$\n"
+    FileWrite $6 "  3. If this keeps happening, contact Fry Networks support and include this file.$\r$\n"
     FileClose $6
     MessageBox MB_ICONEXCLAMATION "Fry Edge Miner did not install correctly — the application file is missing or was blocked by antivirus.$\r$\n$\r$\nSee $INSTDIR\update-failed.txt for recovery steps, or restore the previous version from $APPDATA\com.frynetworks.fem\.prev\"
   ${Else}
