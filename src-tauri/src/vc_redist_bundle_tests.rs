@@ -273,7 +273,7 @@ fn nsis_hook_redist_block() {
         "WaitForSingleObject needs a finite timeout <= 120000 ms; found {all:?}"
     );
     assert!(
-        !vals.iter().any(|v| *v == 0xFFFF_FFFF),
+        !vals.contains(&0xFFFF_FFFF),
         "WaitForSingleObject uses 0xFFFFFFFF (infinite)"
     );
     assert!(
