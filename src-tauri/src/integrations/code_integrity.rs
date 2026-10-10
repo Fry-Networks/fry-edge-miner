@@ -54,8 +54,10 @@ pub(crate) fn user_message(image: &Path) -> String {
     format!(
         "{AWAITING_ADMIN_MARKER} — Windows blocked {name} from loading (Smart App Control or an \
          app-control policy refused the unsigned file). The file itself is intact, so \
-         reinstalling will not help. Allow {name} in Windows Security, or turn Smart App Control \
-         off, then re-enable this integration."
+         reinstalling will not help. Windows Security may have shown a notification about it, \
+         and the block is recorded in Event Viewer under \
+         Microsoft-Windows-CodeIntegrity/Operational. This integration stays paused until the \
+         file can load; re-enable it afterwards."
     )
 }
 
@@ -365,3 +367,9 @@ mod code_integrity_b15_capture_tests;
 #[cfg(test)]
 #[path = "code_integrity_c5_attr_tests.rs"]
 mod code_integrity_c5_attr_tests;
+
+/// RED: the card text must not advise disabling Smart App Control or allowing
+/// the blocked file. Separate file so the files above stay byte-identical.
+#[cfg(test)]
+#[path = "code_integrity_sac_advice_tests.rs"]
+mod code_integrity_sac_advice_tests;
