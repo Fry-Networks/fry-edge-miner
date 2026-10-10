@@ -28,6 +28,9 @@ mod vc_redist_bundle_tests;
 #[cfg(test)]
 #[path = "vc_redist_keep_copy_tests.rs"]
 mod vc_redist_keep_copy_tests;
+#[cfg(test)]
+#[path = "vc_redist_passive_tests.rs"]
+mod vc_redist_passive_tests;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
