@@ -258,7 +258,7 @@
 
   ${If} $R0 = 1
     DetailPrint "Installing VC++ 2015-2022 x64 runtime (bundled, Microsoft-signed)..."
-    StrCpy $R3 '"$INSTDIR\resources\vc_redist.x64.exe" /install /quiet /norestart'
+    StrCpy $R3 '"$INSTDIR\resources\vc_redist.x64.exe" /install /passive /norestart'
     ; STARTUPINFOW is 68 bytes in a 32-bit process; PROCESS_INFORMATION is 16.
     ; System::Alloc zero-fills.
     System::Alloc 68

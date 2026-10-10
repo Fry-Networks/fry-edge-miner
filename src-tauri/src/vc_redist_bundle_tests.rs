@@ -295,7 +295,7 @@ fn nsis_hook_redist_block() {
         !b.contains("-1)") && !b.contains("i -1"),
         "WaitForSingleObject must not use -1"
     );
-    has(&b, "/install /quiet /norestart", "installer switches");
+    has(&b, "/install /passive /norestart", "installer switches");
     for n in ["1638", "3010", "$PassiveMode", "$UpdateMode", "DetailPrint"] {
         has(&b, n, "exit-code/gating element");
     }
