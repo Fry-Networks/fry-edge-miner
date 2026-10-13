@@ -10,6 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
+#[path = "diiisco_node_key.rs"]
+mod diiisco_node_key;
+
 const HEALTH_URL: &str = "http://localhost:8181/health";
 
 /// B6: what the user is told when hardwareapi has no Algorand wallet for this
@@ -129,12 +132,17 @@ fn require_diiisco_bearer(creds: &crate::api::types::CredentialInfo) -> Result<S
 }
 
 /// Token for the health probe: runtime env var, else the last one seen in a
-/// credential response, else empty.
+/// credential response, else this device's own node key, else empty.
 fn diiisco_bearer_token() -> String {
     std::env::var("DIIISCO_BEARER_TOKEN")
         .ok()
         .filter(|s| !s.is_empty())
         .or_else(|| CRED_BEARER.lock().ok().and_then(|g| g.clone()))
+        .or_else(|| {
+            deploy_dir()
+                .ok()
+                .and_then(|d| diiisco_node_key::read_key(&d))
+        })
         .unwrap_or_default()
 }
 
@@ -303,7 +311,7 @@ impl Integration for DiiiscoIntegration {
                 "Miner key not set — complete device registration before installing Diiisco"
             )
         })?;
-        let creds = fetch_credentials_with_retry(&self.api_client, miner_key)
+        let mut creds = fetch_credentials_with_retry(&self.api_client, miner_key)
             .await
             .map_err(credential_fetch_error)?;
         let algo_address = match classify_wallet(creds.algo_address.as_deref()) {
@@ -321,6 +329,11 @@ impl Integration for DiiiscoIntegration {
         })?;
 
         // Docker compose build with credentials as env vars (NOT command-line args)
+        diiisco_node_key::fill_local_key(
+            &mut creds,
+            std::env::var("DIIISCO_BEARER_TOKEN").ok(),
+            &deploy_dir,
+        )?;
         let bearer = require_diiisco_bearer(&creds)?;
         info!("Building Diiisco Docker image");
         let output = crate::integrations::docker_manager::docker_command()
@@ -379,7 +392,7 @@ impl Integration for DiiiscoIntegration {
                 "Miner key not set — complete device registration before starting Diiisco"
             )
         })?;
-        let creds = fetch_credentials_with_retry(&self.api_client, miner_key)
+        let mut creds = fetch_credentials_with_retry(&self.api_client, miner_key)
             .await
             .map_err(credential_fetch_error)?;
         let algo_address = match classify_wallet(creds.algo_address.as_deref()) {
@@ -395,6 +408,11 @@ impl Integration for DiiiscoIntegration {
         let algo_mnemonic = creds.algo_mnemonic.clone().ok_or_else(|| {
             anyhow::anyhow!("Device Algorand mnemonic unavailable — contact support")
         })?;
+        diiisco_node_key::fill_local_key(
+            &mut creds,
+            std::env::var("DIIISCO_BEARER_TOKEN").ok(),
+            &deploy,
+        )?;
         let bearer = require_diiisco_bearer(&creds)?;
 
         // diiisco-node is built locally, never pulled. If the image is
