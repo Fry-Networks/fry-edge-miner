@@ -132,6 +132,8 @@ pub struct CredentialInfo {
     pub pawns_account_email: Option<String>,
     #[serde(default)]
     pub pawns_account_password: Option<String>,
+    #[serde(default)]
+    pub diiisco_bearer_token: Option<String>,
 }
 
 // --- IP Status ---
