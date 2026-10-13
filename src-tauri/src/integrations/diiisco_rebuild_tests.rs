@@ -3,7 +3,8 @@
 use super::super::diiisco_rebuild::{
     after_fresh_build, clear_backoff, delay_secs, fp12, image_tag, pin_sha, pin_sha_of, plan_start,
     probe_verdict, read_backoff, read_stamp, record_attempt, redact_node_output, run_node_sequence,
-    write_stamp, Backoff, NodeOps, Outcome, Plan, Stamp, BACKOFF_FILE, STAMP_FILE,
+    write_embedded_dockerfile, write_stamp, Backoff, NodeOps, Outcome, Plan, Stamp, BACKOFF_FILE,
+    REBUILD_LOCK, STAMP_FILE,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -228,6 +229,7 @@ struct Fake {
     builds: AtomicUsize,
     have_image: bool,
     build_ok: bool,
+    refresh_ok: bool,
     probe_ok: bool,
     same_id: bool,
     stop: AtomicBool,
@@ -244,6 +246,7 @@ impl Fake {
             builds: AtomicUsize::new(0),
             have_image: true,
             build_ok: true,
+            refresh_ok: true,
             probe_ok: true,
             same_id: false,
             stop: AtomicBool::new(false),
@@ -266,6 +269,14 @@ impl Fake {
 impl NodeOps for Fake {
     fn image_exists(&self) -> bool {
         self.have_image
+    }
+    fn refresh_dockerfile(&self) -> Result<()> {
+        self.rec("refresh_dockerfile".into());
+        if self.refresh_ok {
+            Ok(())
+        } else {
+            anyhow::bail!("fake refresh failed")
+        }
     }
     fn image_id(&self, reference: &str) -> Option<String> {
         self.rec(format!("image_id:{reference}"));
@@ -317,7 +328,7 @@ impl NodeOps for Fake {
 }
 
 async fn run(f: &Fake) -> Result<Outcome> {
-    run_node_sequence(f, &f.dir, &key_fp(), &pin(), NOW).await
+    run_node_sequence(f, &f.dir, &key_fp(), &pin(), || NOW).await
 }
 
 fn s(v: &[&str]) -> Vec<String> {
@@ -335,6 +346,7 @@ async fn upgrade_switch_order_is_build_up_probe_tag_stamp_rmi_by_id() {
     let t = tag();
     let want = vec![
         "image_id:diiisco-node:latest".to_string(),
+        "refresh_dockerfile".to_string(),
         format!("build:{t}"),
         "down".to_string(),
         format!("up_no_build:{t}"),
@@ -378,6 +390,7 @@ async fn a_failed_build_keeps_the_old_image_with_no_stamp_and_a_backoff() {
         f.calls(),
         vec![
             "image_id:diiisco-node:latest".to_string(),
+            "refresh_dockerfile".to_string(),
             format!("build:{t}"),
             "up_no_build:none".to_string()
         ]
@@ -470,6 +483,7 @@ async fn a_missing_image_builds_even_inside_a_backoff_and_tags_before_stamping()
     assert_eq!(
         f.calls(),
         vec![
+            "refresh_dockerfile".to_string(),
             format!("build:{t}"),
             format!("tag_latest:{t}"),
             "down".to_string(),
@@ -540,7 +554,7 @@ fn redaction_masks_every_planted_form() {
     assert!(out.contains(&format!("[diiisco-key fp={}]", fp12(bearer))));
     assert!(out.contains(&format!("[diiisco-key fp={}]", fp12(&embedded))));
     assert!(out.contains("ERR build arg"));
-    assert_eq!(out.matches("[diiisco-key fp=").count(), 8);
+    assert_eq!(out.matches("[diiisco-key fp=").count(), 7);
 }
 
 #[test]
@@ -548,6 +562,169 @@ fn redaction_leaves_text_without_keys_unchanged() {
     let text = "Step 4/9 : RUN npm install\nsk-fem- is only a prefix\nsk-fem-abc";
     assert_eq!(redact_node_output(text, &[]), text);
     assert_eq!(redact_node_output(text, &[""]), text);
+}
+
+// ------------------------------------------- F1: Dockerfile on disk is current
+
+#[test]
+fn writer_replaces_a_stale_dockerfile_with_the_embedded_one() {
+    let d = tempfile::tempdir().unwrap();
+    let node = d.path().join("diiisco-node");
+    std::fs::create_dir_all(&node).unwrap();
+    std::fs::write(
+        node.join("Dockerfile"),
+        "FROM stale\nRUN git clone --depth 1 x .\n",
+    )
+    .unwrap();
+    let wrote = write_embedded_dockerfile(d.path());
+    assert!(wrote.is_ok(), "writer must succeed");
+    let got = std::fs::read_to_string(node.join("Dockerfile"));
+    assert!(got.is_ok(), "Dockerfile readable after the write");
+    assert!(
+        got.unwrap() == DOCKERFILE,
+        "on-disk Dockerfile must equal the embedded one"
+    );
+    let names: Vec<String> = std::fs::read_dir(&node)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["Dockerfile".to_string()], "no tmp file left");
+}
+
+#[test]
+fn writer_creates_the_node_dir_when_absent() {
+    let d = tempfile::tempdir().unwrap();
+    let wrote = write_embedded_dockerfile(d.path());
+    assert!(wrote.is_ok());
+    let got = std::fs::read_to_string(d.path().join("diiisco-node").join("Dockerfile"));
+    assert!(got.is_ok_and(|g| g == DOCKERFILE));
+}
+
+#[tokio::test]
+async fn the_dockerfile_is_refreshed_before_every_build() {
+    for have_image in [true, false] {
+        let d = tempfile::tempdir().unwrap();
+        let mut f = Fake::new(d.path());
+        f.have_image = have_image;
+        run(&f).await.unwrap();
+        let c = f.calls();
+        let refresh = c.iter().position(|x| x == "refresh_dockerfile");
+        let build = c.iter().position(|x| x.starts_with("build:"));
+        assert!(refresh.is_some() && build.is_some(), "{c:?}");
+        assert!(refresh < build, "refresh must precede the build: {c:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_failed_refresh_builds_nothing_and_keeps_the_old_node() {
+    let d = tempfile::tempdir().unwrap();
+    let mut f = Fake::new(d.path());
+    f.refresh_ok = false;
+    let out = run(&f).await.unwrap();
+    assert_eq!(out, Outcome::UpgradeFailed);
+    assert_eq!(f.builds.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        f.calls().last().map(String::as_str),
+        Some("up_no_build:none")
+    );
+    assert!(read_stamp(d.path()).is_none());
+    // fresh path: the error propagates
+    let d2 = tempfile::tempdir().unwrap();
+    let mut f2 = Fake::new(d2.path());
+    f2.have_image = false;
+    f2.refresh_ok = false;
+    assert!(run(&f2).await.is_err());
+    assert_eq!(f2.builds.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn start_and_the_build_site_refresh_the_dockerfile() {
+    let body = non_test(include_str!("diiisco.rs"));
+    assert_eq!(body.matches("write_embedded_dockerfile(").count(), 2);
+    let start = body.split("async fn start(").nth(1).unwrap_or("");
+    let start = start.split("async fn stop(").next().unwrap_or("");
+    assert!(
+        start.contains("write_embedded_dockerfile("),
+        "start refreshes beside the compose"
+    );
+    assert!(body.contains("fn refresh_dockerfile(&self)"));
+}
+
+#[test]
+fn dockerfile_no_longer_mentions_the_ts_node_fallback() {
+    assert!(!DOCKERFILE.contains("ts-node"));
+}
+
+// ------------------------------------------- F2: clock read after the lock
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_clock_is_read_only_after_the_lock_is_held() {
+    let d = tempfile::tempdir().unwrap();
+    let f = Arc::new(Fake::new(d.path()));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let guard = REBUILD_LOCK.lock().await;
+    let (f2, r2) = (Arc::clone(&f), Arc::clone(&reads));
+    let h = tokio::spawn(async move {
+        run_node_sequence(&*f2, &f2.dir, &key_fp(), &pin(), move || {
+            r2.fetch_add(1, Ordering::SeqCst);
+            NOW
+        })
+        .await
+        .unwrap()
+    });
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        0,
+        "no clock read while queued"
+    );
+    drop(guard);
+    h.await.unwrap();
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        1,
+        "read exactly once, after the lock"
+    );
+}
+
+#[tokio::test]
+async fn a_waiter_planning_after_the_winner_sees_the_recorded_attempt() {
+    // The winner recorded an attempt at T. A waiter whose clock is read after
+    // the lock (>= T) defers; read before it (T-1) it would see a future
+    // attempt, ignore the backoff and build again.
+    let d = tempfile::tempdir().unwrap();
+    record_attempt(d.path(), &tag(), NOW).unwrap();
+    let f = Fake::new(d.path());
+    let out = run_node_sequence(&f, &f.dir, &key_fp(), &pin(), || NOW + 1).await;
+    assert!(out.is_ok_and(|o| o == Outcome::Ran));
+    assert_eq!(f.builds.load(Ordering::SeqCst), 0);
+}
+
+// ----------------------------------------------- F5: mnemonic is masked
+
+#[test]
+fn redaction_masks_a_planted_mnemonic_and_the_call_sites_pass_it() {
+    let mnemonic = "abandon ability able about above absent absorb abstract";
+    let text = format!("ERROR: bad phrase [{mnemonic}] and again {mnemonic}.");
+    let out = redact_node_output(&text, &[&key(), mnemonic]);
+    assert!(!out.contains("abandon ability"), "{out}");
+    assert!(!out.contains("abstract"), "{out}");
+    assert_eq!(out.matches("[diiisco-key fp=").count(), 2);
+    let body = non_test(include_str!("diiisco.rs"));
+    for (i, _) in body.match_indices("redact_out(") {
+        let w = &body[i..(i + 200).min(body.len())];
+        if w.starts_with("redact_out(s: &str") {
+            continue;
+        }
+        assert!(
+            w.contains("mnemonic"),
+            "redact_out call at byte {i} omits the mnemonic"
+        );
+    }
+    assert!(body.matches("redact_out(").count() >= 3);
 }
 
 // ---------------------------------------------------------- static contents

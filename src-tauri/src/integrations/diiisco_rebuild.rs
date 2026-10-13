@@ -12,6 +12,14 @@ pub(super) const PROBE_STEP_SECS: u64 = 5;
 
 pub(super) static REBUILD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+pub(super) fn unix_now() -> u64 {
+    0
+}
+
+pub(super) fn write_embedded_dockerfile(_deploy: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 pub(super) fn bump_stop_generation() {}
 
 pub(super) fn stop_generation() -> u64 {
@@ -98,6 +106,7 @@ pub(super) fn redact_node_output(s: &str, _secrets: &[&str]) -> String {
 #[async_trait]
 pub(super) trait NodeOps: Send + Sync {
     fn image_exists(&self) -> bool;
+    fn refresh_dockerfile(&self) -> Result<()>;
     fn image_id(&self, reference: &str) -> Option<String>;
     fn build(&self, tag: &str) -> Result<()>;
     fn down(&self);
@@ -128,12 +137,12 @@ pub(super) fn after_fresh_build<O: NodeOps + ?Sized>(
     Ok(())
 }
 
-pub(super) async fn run_node_sequence<O: NodeOps + ?Sized>(
+pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
     _ops: &O,
     _dir: &Path,
     _key_fp: &str,
     _pin_sha: &str,
-    _now: u64,
+    _clock: C,
 ) -> Result<Outcome> {
     Ok(Outcome::Ran)
 }
