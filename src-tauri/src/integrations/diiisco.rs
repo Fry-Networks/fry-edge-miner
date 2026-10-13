@@ -12,6 +12,8 @@ use tracing::{info, warn};
 
 #[path = "diiisco_node_key.rs"]
 mod diiisco_node_key;
+#[path = "diiisco_rebuild.rs"]
+mod diiisco_rebuild;
 
 const HEALTH_URL: &str = "http://localhost:8181/health";
 
