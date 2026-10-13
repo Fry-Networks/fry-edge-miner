@@ -31,49 +31,39 @@ fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// Build the elevated inner script: Defender path + process exclusions for
-/// this install, plus the frynode firewall rule — combined so both land
-/// under the SAME UAC prompt rather than two separate ones. Pure/testable:
-/// takes plain data in, returns a script string, no process spawned.
+/// The FEM-FryNode firewall reconcile commands, each as one PowerShell-ready
+/// `netsh ...` string (program path single-quoted). Shared by the elevated
+/// script and the manual command so both always do the same thing.
+fn firewall_reconcile_commands(frynode_path: &Path) -> Vec<String> {
+    firewall::reconcile_commands("FEM-FryNode", &frynode_path.to_string_lossy())
+        .into_iter()
+        .map(|argv| {
+            let quoted: Vec<String> = argv
+                .iter()
+                .map(|a| {
+                    if let Some(prog) = a.strip_prefix("program=") {
+                        format!("program={}", ps_quote(prog))
+                    } else {
+                        a.clone()
+                    }
+                })
+                .collect();
+            format!("netsh {}", quoted.join(" "))
+        })
+        .collect()
+}
+
+/// Build the elevated inner script: the frynode firewall rule reconcile.
+/// FEM no longer writes Microsoft Defender exclusions (operator-approved spec
+/// change). `install_dir`/`exe_names` are kept for signature stability.
+/// Pure/testable: takes plain data in, returns a script string, no process
+/// spawned.
 pub fn build_hardening_script(
-    install_dir: &Path,
-    exe_names: &[&str],
+    _install_dir: &Path,
+    _exe_names: &[&str],
     frynode_path: &Path,
 ) -> String {
-    let install_dir_str = install_dir.to_string_lossy().to_string();
-    let exclusion_process_list = exe_names
-        .iter()
-        .map(|n| ps_quote(n))
-        .collect::<Vec<_>>()
-        .join(",");
-
-    let defender_cmd = format!(
-        "Add-MpPreference -ExclusionPath {} -ErrorAction SilentlyContinue; \
-         Add-MpPreference -ExclusionProcess {} -ErrorAction SilentlyContinue",
-        ps_quote(&install_dir_str),
-        exclusion_process_list
-    );
-
-    let firewall_cmds =
-        firewall::reconcile_commands("FEM-FryNode", &frynode_path.to_string_lossy())
-            .into_iter()
-            .map(|argv| {
-                let quoted: Vec<String> = argv
-                    .iter()
-                    .map(|a| {
-                        if let Some(prog) = a.strip_prefix("program=") {
-                            format!("program={}", ps_quote(prog))
-                        } else {
-                            a.clone()
-                        }
-                    })
-                    .collect();
-                format!("netsh {}", quoted.join(" "))
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-
-    format!("{defender_cmd}; {firewall_cmds}")
+    firewall_reconcile_commands(frynode_path).join("; ")
 }
 
 /// v0.4.29 canary fix. Build the OUTER (unelevated) PowerShell wrapper that
@@ -182,19 +172,13 @@ pub(crate) fn run_hardening_elevated(
 }
 
 /// The manual command surfaced when the elevated attempt is declined/fails,
-/// so the operator can run it themselves from an admin PowerShell.
-pub fn manual_hardening_command(install_dir: &Path, exe_names: &[&str]) -> String {
-    let install_dir_str = install_dir.to_string_lossy().to_string();
-    let exclusion_process_list = exe_names
-        .iter()
-        .map(|n| ps_quote(n))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(
-        "Add-MpPreference -ExclusionPath {} ; Add-MpPreference -ExclusionProcess {}",
-        ps_quote(&install_dir_str),
-        exclusion_process_list
-    )
+/// so the operator can run it themselves from an admin PowerShell. It is the
+/// manual equivalent of the elevated script: the FEM-FryNode firewall rule
+/// reconcile (no Defender exclusions). Every caller passes the frynode path
+/// `install_dir\resources\frynode.exe`, so it is derived here.
+pub fn manual_hardening_command(install_dir: &Path, _exe_names: &[&str]) -> String {
+    let frynode_path = install_dir.join("resources").join("frynode.exe");
+    firewall_reconcile_commands(&frynode_path).join("; ")
 }
 
 #[cfg(test)]
@@ -226,9 +210,9 @@ mod tests {
             &["fry-edge-miner.exe", "frynode.exe"],
             &frynode,
         );
-        assert!(script.contains("Add-MpPreference -ExclusionPath"));
+        assert!(!script.contains("Add-MpPreference"));
         assert!(script.contains("Fry Edge Miner"));
-        assert!(script.contains("fry-edge-miner.exe"));
+        assert!(!script.contains("fry-edge-miner.exe"));
         assert!(script.contains("frynode.exe"));
     }
 
@@ -256,8 +240,8 @@ mod tests {
     fn the_manual_command_mirrors_the_elevated_scripts_exclusions() {
         let install_dir = PathBuf::from(r"C:\Users\x\AppData\Local\Fry Edge Miner");
         let cmd = manual_hardening_command(&install_dir, &["fry-edge-miner.exe", "frynode.exe"]);
-        assert!(cmd.contains("Add-MpPreference -ExclusionPath"));
-        assert!(cmd.contains("fry-edge-miner.exe"));
+        assert!(!cmd.contains("Add-MpPreference"));
+        assert!(!cmd.contains("fry-edge-miner.exe"));
         assert!(cmd.contains("frynode.exe"));
     }
 
@@ -450,3 +434,8 @@ mod bug10_elevation_hygiene_tests {
 #[cfg(test)]
 #[path = "security_setup_user_click_hardening_tests.rs"]
 mod security_setup_user_click_hardening_tests;
+
+/// Spec change: hardening no longer writes Defender exclusions.
+#[cfg(test)]
+#[path = "security_setup_no_exclusions_c9_tests.rs"]
+mod security_setup_no_exclusions_c9_tests;
