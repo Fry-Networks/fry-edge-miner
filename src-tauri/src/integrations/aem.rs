@@ -64,7 +64,9 @@ impl AemIntegration {
             Ok(Ok(())) => {}
         }
         info!(binary = ?binary, "Starting OlostepBrowser");
-        let child = crate::supervisor::platform::command(&binary).spawn()?;
+        let child = crate::supervisor::platform::command(&binary)
+            .spawn()
+            .map_err(|e| crate::supervisor::process::humanize_spawn_error("OlostepBrowser", &e))?;
         // B4 (D-03): every partner FEM spawns joins the kill-on-close job,
         // Olostep included, so an abnormal FEM exit cannot leave a browser
         // running with no owner. FEM's normal quit stops partners gracefully

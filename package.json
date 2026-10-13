@@ -1,10 +1,11 @@
 {
   "name": "fry-edge-miner",
-  "version": "0.4.35",
+  "version": "0.4.36",
   "description": "Fry Edge Miner - Multi-integration decentralized platform client",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node scripts/fetch-vcredist.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",

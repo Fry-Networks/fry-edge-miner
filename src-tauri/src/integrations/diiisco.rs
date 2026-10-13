@@ -10,6 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
+#[path = "diiisco_node_key.rs"]
+mod diiisco_node_key;
+
 const HEALTH_URL: &str = "http://localhost:8181/health";
 
 /// B6: what the user is told when hardwareapi has no Algorand wallet for this
@@ -97,11 +100,49 @@ pub fn requirements_for(wallet_is_missing: bool) -> Result<(), String> {
     }
     Ok(())
 }
-/// Diiisco bearer token: runtime env var → compile-time option_env! → empty default.
+/// Bearer token resolved from the hardwareapi credential response, cached for
+/// `health_check`, which has no credentials in hand. Never compiled in.
+static CRED_BEARER: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// PURE: runtime env var (non-empty, dev override) -> credential response
+/// field (non-empty) -> None.
+fn resolve_diiisco_bearer(
+    env: Option<String>,
+    creds: &crate::api::types::CredentialInfo,
+) -> Option<String> {
+    env.filter(|s| !s.is_empty())
+        .or_else(|| creds.diiisco_bearer_token.clone().filter(|s| !s.is_empty()))
+}
+
+/// Resolve the token or SKIP: one warning (no token value), then an error
+/// through the caller's existing failure path. No docker build is attempted.
+fn require_diiisco_bearer(creds: &crate::api::types::CredentialInfo) -> Result<String> {
+    match resolve_diiisco_bearer(std::env::var("DIIISCO_BEARER_TOKEN").ok(), creds) {
+        Some(t) => {
+            if let Ok(mut g) = CRED_BEARER.lock() {
+                *g = Some(t.clone());
+            }
+            Ok(t)
+        }
+        None => {
+            warn!("Diiisco bearer token unavailable (no env override, none in credential response) — skipping Diiisco");
+            anyhow::bail!("DIIISCO_BEARER_TOKEN not configured — set the environment variable before enabling Diiisco")
+        }
+    }
+}
+
+/// Token for the health probe: runtime env var, else the last one seen in a
+/// credential response, else this device's own node key, else empty.
 fn diiisco_bearer_token() -> String {
     std::env::var("DIIISCO_BEARER_TOKEN")
         .ok()
-        .or_else(|| option_env!("DIIISCO_BEARER_TOKEN").map(|s| s.to_string()))
+        .filter(|s| !s.is_empty())
+        .or_else(|| CRED_BEARER.lock().ok().and_then(|g| g.clone()))
+        .or_else(|| {
+            deploy_dir()
+                .ok()
+                .and_then(|d| diiisco_node_key::read_key(&d))
+        })
         .unwrap_or_default()
 }
 
@@ -270,7 +311,7 @@ impl Integration for DiiiscoIntegration {
                 "Miner key not set — complete device registration before installing Diiisco"
             )
         })?;
-        let creds = fetch_credentials_with_retry(&self.api_client, miner_key)
+        let mut creds = fetch_credentials_with_retry(&self.api_client, miner_key)
             .await
             .map_err(credential_fetch_error)?;
         let algo_address = match classify_wallet(creds.algo_address.as_deref()) {
@@ -283,15 +324,17 @@ impl Integration for DiiiscoIntegration {
                 anyhow::bail!("{}", reason);
             }
         };
-        let algo_mnemonic = creds.algo_mnemonic.ok_or_else(|| {
+        let algo_mnemonic = creds.algo_mnemonic.clone().ok_or_else(|| {
             anyhow::anyhow!("Device Algorand mnemonic unavailable — contact support")
         })?;
 
         // Docker compose build with credentials as env vars (NOT command-line args)
-        let bearer = diiisco_bearer_token();
-        if bearer.is_empty() {
-            anyhow::bail!("DIIISCO_BEARER_TOKEN not configured — set the environment variable before enabling Diiisco");
-        }
+        diiisco_node_key::fill_local_key(
+            &mut creds,
+            std::env::var("DIIISCO_BEARER_TOKEN").ok(),
+            &deploy_dir,
+        )?;
+        let bearer = require_diiisco_bearer(&creds)?;
         info!("Building Diiisco Docker image");
         let output = crate::integrations::docker_manager::docker_command()
             .args(["compose", "build"])
@@ -349,7 +392,7 @@ impl Integration for DiiiscoIntegration {
                 "Miner key not set — complete device registration before starting Diiisco"
             )
         })?;
-        let creds = fetch_credentials_with_retry(&self.api_client, miner_key)
+        let mut creds = fetch_credentials_with_retry(&self.api_client, miner_key)
             .await
             .map_err(credential_fetch_error)?;
         let algo_address = match classify_wallet(creds.algo_address.as_deref()) {
@@ -362,13 +405,15 @@ impl Integration for DiiiscoIntegration {
                 anyhow::bail!("{}", reason);
             }
         };
-        let algo_mnemonic = creds.algo_mnemonic.ok_or_else(|| {
+        let algo_mnemonic = creds.algo_mnemonic.clone().ok_or_else(|| {
             anyhow::anyhow!("Device Algorand mnemonic unavailable — contact support")
         })?;
-        let bearer = diiisco_bearer_token();
-        if bearer.is_empty() {
-            anyhow::bail!("DIIISCO_BEARER_TOKEN not configured — set the environment variable before enabling Diiisco");
-        }
+        diiisco_node_key::fill_local_key(
+            &mut creds,
+            std::env::var("DIIISCO_BEARER_TOKEN").ok(),
+            &deploy,
+        )?;
+        let bearer = require_diiisco_bearer(&creds)?;
 
         // diiisco-node is built locally, never pulled. If the image is
         // missing (failed/interrupted install), `up` would try to pull it
@@ -713,3 +758,11 @@ mod credential_error_message_tests {
 #[cfg(test)]
 #[path = "diiisco_deploy_dir_tests.rs"]
 mod diiisco_deploy_dir_tests;
+
+#[cfg(test)]
+#[path = "diiisco_cred_c9_tests.rs"]
+mod diiisco_cred_c9_tests;
+
+#[cfg(test)]
+#[path = "diiisco_resolve_c9_tests.rs"]
+mod diiisco_resolve_c9_tests;

@@ -707,3 +707,8 @@ mod scrubber_bl3_joined_name_tests;
 #[cfg(test)]
 #[path = "scrubber_c5_pin_tests.rs"]
 mod scrubber_c5_pin_tests;
+
+/// C9: the Diiisco bearer token is redacted in both sinks.
+#[cfg(test)]
+#[path = "diiisco_redaction_c9_tests.rs"]
+mod diiisco_redaction_c9_tests;

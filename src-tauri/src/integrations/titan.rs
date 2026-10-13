@@ -553,6 +553,80 @@ fn process_not_running_reason(vc_redist_missing: bool, stderr_tail: &str) -> Str
     }
 }
 
+pub(crate) use crate::supervisor::start_failure::StartFailure;
+
+/// Windows refusing to run the image: spawn errors 4551 (code-integrity block),
+/// 577 (ERROR_INVALID_IMAGE_HASH), 1260 (ERROR_ACCESS_DISABLED_BY_POLICY), or a
+/// startup exit of 0xC0E90002 (STATUS_SYSTEM_INTEGRITY_POLICY_VIOLATION) /
+/// 0xC0000428 (STATUS_INVALID_IMAGE_HASH).
+fn is_app_control(failure: StartFailure) -> bool {
+    matches!(
+        failure,
+        StartFailure::SpawnOsError(4551 | 577 | 1260)
+            | StartFailure::ChildExitStatus(0xC0E9_0002 | 0xC000_0428)
+    )
+}
+
+/// A recorded code that explains the failure on its own, so no other probe may
+/// override it.
+fn is_conclusive(failure: StartFailure) -> bool {
+    is_app_control(failure) || failure == StartFailure::ChildExitStatus(0xC000_0135)
+}
+
+/// Pure: the not-running card message. Conclusive codes decide alone; any other
+/// recorded code defers to a found code-integrity block, else is generic; with
+/// no code, a found block wins, else today's heuristic.
+fn select_not_running_reason(
+    recorded: Option<StartFailure>,
+    block: Option<String>,
+    vc_redist_missing: bool,
+    stderr_tail: &str,
+) -> String {
+    match (recorded, block) {
+        (Some(f), _) if is_conclusive(f) => classify_not_running(Some(f), false, stderr_tail),
+        (Some(_), Some(b)) => b,
+        (Some(f), None) => classify_not_running(Some(f), vc_redist_missing, stderr_tail),
+        (None, Some(b)) => b,
+        (None, None) => classify_not_running(None, vc_redist_missing, stderr_tail),
+    }
+}
+
+/// Pure: card message for a not-running titan-edge, given the recorded start
+/// failure (if any), whether the VC++ runtime is missing, and the log tail.
+///
+/// A recorded code decides on its own: the environment heuristic is only the
+/// fallback for "no code known", so an App Control refusal (os error 4551) is
+/// never shown as a missing runtime. No raw code ever reaches the text, and
+/// none of it advises changing security settings.
+fn classify_not_running(
+    failure: Option<StartFailure>,
+    vc_redist_missing: bool,
+    stderr_tail: &str,
+) -> String {
+    match failure {
+        // The leading marker is what stops the health loop respawning through a
+        // refusal it cannot satisfy (`integrations::awaits_user_action`, B15).
+        Some(f) if is_app_control(f) => format!(
+            "{} \u{2014} titan-edge was blocked by Windows Application Control (Smart App \
+             Control) and cannot start on this device. The file itself is intact, so \
+             reinstalling will not help.",
+            super::code_integrity::AWAITING_ADMIN_MARKER
+        ),
+        // STATUS_DLL_NOT_FOUND: the loader could not resolve a static import.
+        Some(StartFailure::ChildExitStatus(0xC000_0135)) => "titan-edge process is not running: \
+             missing VC++ 2015-2022 x64 runtime (VCRUNTIME140.dll / MSVCP140.dll not found) \
+             \u{2014} install the Visual C++ Redistributable from \
+             https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist to fix this"
+            .to_string(),
+        Some(_) => {
+            "titan-edge could not start: Windows stopped it while it was starting. Fry Edge \
+             Miner keeps running its other components."
+                .to_string()
+        }
+        None => process_not_running_reason(vc_redist_missing, stderr_tail),
+    }
+}
+
 impl TitanIntegration {
     /// The real install. `trigger` decides whether the VC++ redistributable
     /// installer may raise a UAC prompt: only a user gesture ever may (B3).
@@ -834,17 +908,28 @@ impl Integration for TitanIntegration {
             // wrong AND the health loop keeps respawning through a refusal it
             // can never satisfy. The returned message carries the
             // awaits-user-action marker, which is what stops that loop.
-            if let Some(blocked) = super::code_integrity::recent_block(&Self::binary_path())
-                .or_else(|| super::code_integrity::recent_block(&Self::dll_path()))
-            {
-                return HealthStatus::Unhealthy(blocked);
-            }
+            // D1: a structured start-failure code recorded by the supervisor
+            // decides when it is conclusive; otherwise the recent code-integrity
+            // block (the probe only runs when needed) and then today's heuristic
+            // are consulted, in `select_not_running_reason`'s order.
+            let recorded = crate::supervisor::start_failure::get("titan");
+            let block = if recorded.is_some_and(is_conclusive) {
+                None
+            } else {
+                super::code_integrity::recent_block(&Self::binary_path())
+                    .or_else(|| super::code_integrity::recent_block(&Self::dll_path()))
+            };
             let stderr_path = self.log_dir.join("titan").join("titan_stderr.log");
             let stderr_content = tokio::fs::read_to_string(&stderr_path)
                 .await
                 .unwrap_or_default();
             let tail = super::stderr_tail(&stderr_content, 3);
-            return HealthStatus::Unhealthy(process_not_running_reason(vc_redist_missing(), &tail));
+            return HealthStatus::Unhealthy(select_not_running_reason(
+                recorded,
+                block,
+                vc_redist_missing(),
+                &tail,
+            ));
         }
 
         // Read both log files (stdout and stderr)
@@ -1183,3 +1268,11 @@ mod titan_layout_tests;
 #[cfg(test)]
 #[path = "titan_recency_tests.rs"]
 mod titan_recency_tests;
+
+#[cfg(test)]
+#[path = "titan_card_error_attribution_tests.rs"]
+mod titan_card_error_attribution_tests;
+
+#[cfg(test)]
+#[path = "titan_card_attribution_r2_tests.rs"]
+mod titan_card_attribution_r2_tests;
