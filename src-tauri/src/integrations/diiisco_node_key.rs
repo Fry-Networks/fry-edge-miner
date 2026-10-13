@@ -13,7 +13,8 @@ pub(super) const KEY_FILE: &str = "node-api-key";
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) const KEY_PREFIX: &str = "sk-fem-";
 
-#[cfg_attr(not(test), allow(dead_code))]
+// RED stub: the lock is used once the module is implemented.
+#[allow(dead_code)]
 static KEY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Exactly `KEY_PREFIX` followed by 64 lowercase hex characters.
