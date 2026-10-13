@@ -25,8 +25,18 @@ RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
-# Clone the official Diiisco node repo
-RUN git clone --depth 1 https://github.com/Diiisco-Inc/diiisco-node.git .
+# Upstream is pinned to one reviewed commit, never to moving HEAD. Evidence
+# (B1 review, 2026-10-13): this commit is upstream HEAD as of 2026-10-09; its
+# template listens on api port 8080 on 127.0.0.1 by default, so the seds below
+# move it to 8181 on all interfaces (the compose publishes it on host loopback
+# only), `/health` is unauthenticated and `/v1/*` is guarded by the bearer. A
+# pin bump changes the image tag, which triggers the one-time gated rebuild.
+ARG DIIISCO_NODE_SHA=45ef1cc8c68a804d716be7b5511a9fece36b0f85
+RUN git init . && \
+    git remote add origin https://github.com/Diiisco-Inc/diiisco-node.git && \
+    git fetch --depth 1 origin "$DIIISCO_NODE_SHA" && \
+    git checkout --detach FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = "$DIIISCO_NODE_SHA"
 
 # Install dependencies. Upstream's package.json has historically imported
 # `json-canonicalize` without declaring it, so `npm install` alone left it
@@ -51,13 +61,20 @@ RUN cp src/environment/example.environment.ts src/environment/environment.ts && 
     sed -i "s#\"sk-testkey1\"#\"${API_KEY}\"#g" src/environment/environment.ts && \
     sed -i "/\"sk-testkey2\"/d" src/environment/environment.ts && \
     sed -i "s#baseURL: \"http://localhost\"#baseURL: \"http://diiisco-ollama\"#g" src/environment/environment.ts && \
-    sed -i "s#\"~/Desktop/\"#\"/app/data/\"#g" src/environment/environment.ts
+    sed -i "s#\"~/Desktop/\"#\"/app/data/\"#g" src/environment/environment.ts && \
+    sed -i 's#^    port: 8080,#    port: 8181,\n    host: "0.0.0.0",#' src/environment/environment.ts && \
+    grep -q '^    port: 8181,$' src/environment/environment.ts && \
+    grep -q '^    host: "0.0.0.0",$' src/environment/environment.ts
 
 # Compile TypeScript. Force-emit JS even when upstream ships genuine type bugs
 # (e.g. statusPages.ts string|string[]) so the per-user image build never dies.
-# Guarantee dist/ exists so the Stage-2 COPY never fails; runtime falls back to
-# ts-node --transpile-only on src/ if dist/ is incomplete.
+# Guarantee dist/ exists so the Stage-2 COPY never fails; the check below then
+# fails the build if the entry point (dist/dev.js) was not produced.
 RUN (npm run build || npx tsc --noEmitOnError false --skipLibCheck || true) && mkdir -p dist
+
+# The self-starting entry is dist/dev.js (dist/index.js is a library export).
+# Fail the build rather than ship an image whose CMD cannot start.
+RUN test -f dist/dev.js
 
 # ── Stage 2: Runtime ────────────────────────────────────────────────────
 FROM node:22-slim
@@ -78,9 +95,8 @@ RUN mkdir -p /app/data
 
 EXPOSE 8181
 
-# Try dist first (compiled), fall back to ts-node --transpile-only (ignores
-# upstream type errors at runtime), then plain node on src.
-# F10: do NOT swallow stderr — a silent MODULE_NOT_FOUND (e.g. a missing dep)
-# used to look like the container refusing to start with no explanation. Let the
-# real error reach `docker logs` so failures are diagnosable.
-CMD ["sh", "-c", "node dist/index.js || npx ts-node --transpile-only src/index.ts || node src/index.js"]
+# dist/dev.js is the self-starting entry and loads the environment.ts written
+# above. No runtime package fetch: everything the node needs is baked in at
+# build time. F10: do NOT swallow stderr — the real error must reach
+# `docker logs` so failures are diagnosable.
+CMD ["node", "dist/dev.js"]

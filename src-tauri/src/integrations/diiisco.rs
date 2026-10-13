@@ -337,27 +337,50 @@ impl Integration for DiiiscoIntegration {
             &deploy_dir,
         )?;
         let bearer = require_diiisco_bearer(&creds)?;
+        let key_fp = diiisco_rebuild::fp12(&bearer);
+        let pin = diiisco_rebuild::pin_sha().unwrap_or_default();
+        let tag = diiisco_rebuild::image_tag(&key_fp, &pin);
+        // Same lock as start(): a build never overlaps another build or switch.
+        let _rebuild_guard = diiisco_rebuild::REBUILD_LOCK.lock().await;
         info!("Building Diiisco Docker image");
-        let output = crate::integrations::docker_manager::docker_command()
-            .args(["compose", "build"])
-            .env("ALGO_ADDRESS", &algo_address)
-            .env("ALGO_MNEMONIC", &algo_mnemonic)
-            .env("DIIISCO_API_KEY", bearer)
-            .current_dir(&deploy_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
+        let output = node_cmd(
+            &deploy_dir,
+            &algo_address,
+            &algo_mnemonic,
+            &bearer,
+            Some(&tag),
+        )
+        .args(["compose", "build"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = redact_out(
+                &String::from_utf8_lossy(&output.stderr),
+                &bearer,
+                &algo_mnemonic,
+                &deploy_dir,
+            );
             warn!(stderr = %stderr, "docker compose build failed (full output)");
             anyhow::bail!("docker compose build failed: {}", tail_lines(&stderr, 15));
         }
+        // `latest` is the single moving alias for the current-good image; tag
+        // it BEFORE the stamp so an env-less recovery `up` finds it.
+        let node = DockerNode::new(
+            deploy_dir.clone(),
+            algo_address,
+            algo_mnemonic,
+            bearer,
+            diiisco_rebuild::stop_generation(),
+        );
+        diiisco_rebuild::after_fresh_build(&node, &deploy_dir, &tag, &key_fp, &pin)?;
         info!("Diiisco install complete — image built with per-device wallet");
         Ok(())
     }
 
     async fn start(&self) -> Result<()> {
+        let stop_gen = diiisco_rebuild::stop_generation();
         // B6: short-circuit BEFORE any API call. The supervisor retries start()
         // on a schedule; without this, a device waiting on provisioning issues
         // a credentials lookup every single attempt to be told the same thing.
@@ -383,6 +406,9 @@ impl Integration for DiiiscoIntegration {
         // would keep its stale compose forever and never pick up fixes like
         // dropping the conflicting 11434 publish.
         tokio::fs::write(&compose, include_str!("diiisco_deploy/docker-compose.yml")).await?;
+        // Same for the Dockerfile: an upgraded device holds the pre-pin copy,
+        // and the gated rebuild must build the pinned one.
+        diiisco_rebuild::write_embedded_dockerfile(&deploy)?;
 
         // The compose file interpolates ${ALGO_ADDRESS}/${ALGO_MNEMONIC}/
         // ${DIIISCO_API_KEY} on EVERY invocation, `up` included — without
@@ -417,73 +443,27 @@ impl Integration for DiiiscoIntegration {
         )?;
         let bearer = require_diiisco_bearer(&creds)?;
 
-        // diiisco-node is built locally, never pulled. If the image is
-        // missing (failed/interrupted install), `up` would try to pull it
-        // from a registry — "pull access denied". Build first.
-        if !image_built() {
-            info!("diiisco-node image missing — building before start");
-            let output = crate::integrations::docker_manager::docker_command()
-                .args(["compose", "build"])
-                .env("ALGO_ADDRESS", &algo_address)
-                .env("ALGO_MNEMONIC", &algo_mnemonic)
-                .env("DIIISCO_API_KEY", &bearer)
-                .current_dir(&deploy)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!(stderr = %stderr, "Diiisco pre-start image build failed (full output)");
-                anyhow::bail!("Diiisco image build failed: {}", tail_lines(&stderr, 15));
-            }
-        }
-
-        // Best-effort cleanup of stale containers/networks from prior failed
-        // runs ("network diiisco_default already exists"). Volumes survive.
-        // Failures don't block startup, but they must be visible in logs.
-        info!("Cleaning up stale Diiisco containers/networks");
-        match crate::integrations::docker_manager::docker_command()
-            .args(["compose", "down", "--remove-orphans"])
-            .env("ALGO_ADDRESS", &algo_address)
-            .env("ALGO_MNEMONIC", &algo_mnemonic)
-            .env("DIIISCO_API_KEY", &bearer)
-            .current_dir(&deploy)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
-        {
-            Ok(o) if !o.status.success() => {
-                warn!(
-                    stderr = %String::from_utf8_lossy(&o.stderr),
-                    "Diiisco pre-start cleanup reported errors (continuing)"
-                );
-            }
-            Err(e) => {
-                warn!(error = %e, "Diiisco pre-start cleanup failed to run (continuing)");
-            }
-            _ => {}
-        }
-
-        info!("Starting Diiisco containers");
-        let output = crate::integrations::docker_manager::docker_command()
-            .args(["compose", "up", "-d"])
-            .env("ALGO_ADDRESS", &algo_address)
-            .env("ALGO_MNEMONIC", &algo_mnemonic)
-            .env("DIIISCO_API_KEY", &bearer)
-            .current_dir(&deploy)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(stderr = %stderr, "Failed to start Diiisco (full output)");
-            anyhow::bail!("Failed to start Diiisco: {}", tail_lines(&stderr, 15));
-        }
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-        Ok(())
+        // diiisco-node is built locally, never pulled. The plan, the build and
+        // the switch run detached: `toggle_integration` bounds start() at 60 s
+        // but a build cannot be preempted, so a dropped start() must not
+        // abandon a half-done switch. A stop() in the meantime wins (see
+        // `stop_generation`).
+        let node = DockerNode::new(
+            deploy.clone(),
+            algo_address,
+            algo_mnemonic,
+            bearer.clone(),
+            stop_gen,
+        );
+        tokio::spawn(run_node(node, deploy, bearer))
+            .await
+            .map_err(|e| anyhow::anyhow!("Diiisco start task failed: {e}"))?
     }
 
     async fn stop(&self) -> Result<()> {
+        // A detached start sequence that began earlier must not bring the node
+        // back up after this.
+        diiisco_rebuild::bump_stop_generation();
         // An unresolvable deploy directory means there is nothing deployed to
         // stop — the same "nothing to do" outcome as a missing compose file
         // below, not a failure to report.
@@ -493,6 +473,7 @@ impl Integration for DiiiscoIntegration {
         if compose.exists() {
             crate::integrations::docker_manager::docker_command()
                 .args(["compose", "-f", &compose.to_string_lossy(), "stop"])
+                .env_remove("DIIISCO_IMAGE_TAG")
                 .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)?;
             info!("Stopped Diiisco containers");
         }
@@ -571,6 +552,259 @@ impl Integration for DiiiscoIntegration {
     fn check_requirements(&self) -> Result<(), String> {
         requirements_for(wallet_missing())
     }
+}
+
+/// Compose/docker command for the diiisco project. Compose interpolates the
+/// wallet and key variables on EVERY invocation; the image tag is set only when
+/// a specific tag is intended and removed otherwise, so a stray process env can
+/// never redirect compose.
+fn node_cmd(
+    deploy: &std::path::Path,
+    algo_address: &str,
+    algo_mnemonic: &str,
+    bearer: &str,
+    tag: Option<&str>,
+) -> std::process::Command {
+    let mut c = crate::integrations::docker_manager::docker_command();
+    c.env("ALGO_ADDRESS", algo_address)
+        .env("ALGO_MNEMONIC", algo_mnemonic)
+        .env("DIIISCO_API_KEY", bearer)
+        .current_dir(deploy);
+    match tag {
+        Some(t) => {
+            c.env("DIIISCO_IMAGE_TAG", t);
+        }
+        None => {
+            c.env_remove("DIIISCO_IMAGE_TAG");
+        }
+    }
+    c
+}
+
+/// Docker output with the bearer and the device key masked, for any log line
+/// or error text.
+fn redact_out(s: &str, bearer: &str, algo_mnemonic: &str, deploy: &std::path::Path) -> String {
+    let device = diiisco_node_key::read_key(deploy).unwrap_or_default();
+    diiisco_rebuild::redact_node_output(s, &[bearer, device.as_str(), algo_mnemonic])
+}
+
+const PROBE_URL: &str = "http://127.0.0.1:8181/v1/models";
+
+async fn http_status(rb: reqwest::RequestBuilder) -> u16 {
+    rb.send().await.map(|r| r.status().as_u16()).unwrap_or(0)
+}
+
+/// The Docker side of start(): one deploy dir plus the credentials compose
+/// interpolates. Implements the seam the rebuild sequence is tested through.
+struct DockerNode {
+    deploy: PathBuf,
+    algo_address: String,
+    algo_mnemonic: String,
+    bearer: String,
+    stop_gen: u64,
+}
+
+impl DockerNode {
+    fn new(
+        deploy: PathBuf,
+        algo_address: String,
+        algo_mnemonic: String,
+        bearer: String,
+        stop_gen: u64,
+    ) -> Self {
+        DockerNode {
+            deploy,
+            algo_address,
+            algo_mnemonic,
+            bearer,
+            stop_gen,
+        }
+    }
+
+    fn node_cmd(&self, tag: Option<&str>) -> std::process::Command {
+        node_cmd(
+            &self.deploy,
+            &self.algo_address,
+            &self.algo_mnemonic,
+            &self.bearer,
+            tag,
+        )
+    }
+
+    fn redact(&self, s: &str) -> String {
+        redact_out(s, &self.bearer, &self.algo_mnemonic, &self.deploy)
+    }
+
+    fn docker(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
+        crate::integrations::docker_manager::docker_command()
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+    }
+
+    fn run_up(&self, cmd: &mut std::process::Command, what: &str) -> Result<()> {
+        info!("{what}");
+        let output = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
+        if !output.status.success() {
+            let stderr = self.redact(&String::from_utf8_lossy(&output.stderr));
+            warn!(stderr = %stderr, "Failed to start Diiisco (full output)");
+            anyhow::bail!("Failed to start Diiisco: {}", tail_lines(&stderr, 15));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl diiisco_rebuild::NodeOps for DockerNode {
+    fn image_exists(&self) -> bool {
+        image_built()
+    }
+
+    fn refresh_dockerfile(&self) -> Result<()> {
+        diiisco_rebuild::write_embedded_dockerfile(&self.deploy)?;
+        Ok(())
+    }
+
+    fn image_id(&self, reference: &str) -> Option<String> {
+        let out = self
+            .docker(&["images", "-q", "--no-trunc", reference])
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(str::to_string)
+    }
+
+    fn build(&self, tag: &str) -> Result<()> {
+        let output = self
+            .node_cmd(Some(tag))
+            .args(["compose", "build"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
+        if !output.status.success() {
+            let stderr = self.redact(&String::from_utf8_lossy(&output.stderr));
+            warn!(stderr = %stderr, "Diiisco pre-start image build failed (full output)");
+            anyhow::bail!("Diiisco image build failed: {}", tail_lines(&stderr, 15));
+        }
+        Ok(())
+    }
+
+    fn down(&self) {
+        // Best-effort cleanup of stale containers/networks from prior failed
+        // runs ("network diiisco_default already exists"). Volumes survive.
+        // Failures don't block startup, but they must be visible in logs.
+        info!("Cleaning up stale Diiisco containers/networks");
+        match self
+            .node_cmd(None)
+            .args(["compose", "down", "--remove-orphans"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+        {
+            Ok(o) if !o.status.success() => {
+                warn!(
+                    stderr = %self.redact(&String::from_utf8_lossy(&o.stderr)),
+                    "Diiisco pre-start cleanup reported errors (continuing)"
+                );
+            }
+            Err(e) => {
+                warn!(error = %e, "Diiisco pre-start cleanup failed to run (continuing)");
+            }
+            _ => {}
+        }
+    }
+
+    fn up_plain(&self) -> Result<()> {
+        self.run_up(
+            self.node_cmd(None).args(["compose", "up", "-d"]),
+            "Starting Diiisco containers",
+        )
+    }
+
+    fn up_no_build(&self, tag: Option<&str>) -> Result<()> {
+        self.run_up(
+            self.node_cmd(tag)
+                .args(["compose", "up", "-d", "--no-build"]),
+            "Starting Diiisco containers without building",
+        )
+    }
+
+    /// The node must accept the device key AND reject a request with no
+    /// credentials at all (no Authorization, no x-api-key). Retried while the
+    /// node boots.
+    async fn probe(&self) -> bool {
+        let Ok(client) = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .no_proxy()
+            .build()
+        else {
+            return false;
+        };
+        let rounds = diiisco_rebuild::PROBE_BUDGET_SECS / diiisco_rebuild::PROBE_STEP_SECS;
+        for round in 0..=rounds {
+            if self.stop_requested() {
+                return false;
+            }
+            let with_key = http_status(client.get(PROBE_URL).bearer_auth(&self.bearer)).await;
+            let no_key = http_status(client.get(PROBE_URL)).await;
+            if diiisco_rebuild::probe_verdict(with_key, no_key) {
+                return true;
+            }
+            if round < rounds {
+                tokio::time::sleep(Duration::from_secs(diiisco_rebuild::PROBE_STEP_SECS)).await;
+            }
+        }
+        false
+    }
+
+    fn tag_latest(&self, tag: &str) -> Result<()> {
+        let source = format!("diiisco-node:{tag}");
+        let out = self.docker(&["tag", source.as_str(), diiisco_rebuild::LATEST_REF])?;
+        if !out.status.success() {
+            let stderr = self.redact(&String::from_utf8_lossy(&out.stderr));
+            anyhow::bail!("docker tag failed: {}", tail_lines(&stderr, 5));
+        }
+        Ok(())
+    }
+
+    fn rmi_by_id(&self, id: &str) {
+        match self.docker(&["rmi", id]) {
+            Ok(o) if o.status.success() => info!("Diiisco: removed the previous node image"),
+            Ok(o) => warn!(
+                stderr = %self.redact(&String::from_utf8_lossy(&o.stderr)),
+                "Diiisco: previous node image not removed (continuing)"
+            ),
+            Err(e) => warn!(error = %e, "Diiisco: previous node image not removed (continuing)"),
+        }
+    }
+
+    fn stop_requested(&self) -> bool {
+        diiisco_rebuild::stop_generation() != self.stop_gen
+    }
+}
+
+/// The detached half of start(): plan, build, switch, run.
+async fn run_node(node: DockerNode, deploy: PathBuf, bearer: String) -> Result<()> {
+    let key_fp = diiisco_rebuild::fp12(&bearer);
+    let pin = diiisco_rebuild::pin_sha().unwrap_or_default();
+    let outcome = diiisco_rebuild::run_node_sequence(
+        &node,
+        &deploy,
+        &key_fp,
+        &pin,
+        diiisco_rebuild::unix_now,
+    )
+    .await?;
+    if outcome != diiisco_rebuild::Outcome::Stopped {
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
