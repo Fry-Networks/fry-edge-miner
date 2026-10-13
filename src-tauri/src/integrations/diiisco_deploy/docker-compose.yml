@@ -75,7 +75,8 @@ services:
       ollama-init:
         condition: service_completed_successfully
     ports:
-      - "8181:8181"
+      # Node API is loopback-only: nothing off-device uses it.
+      - "127.0.0.1:8181:8181"
     volumes:
       - diiisco_data:/app/data
     healthcheck:
