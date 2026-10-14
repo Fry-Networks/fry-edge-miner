@@ -25,18 +25,40 @@ RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
-# Unpinned on purpose (BLOCKER-SANDBOX per prompt line 354, 2026-10-14): a pin is
-# only safe together with the gated upgrade rebuild, and that stays disabled
-# (REBUILD_ENABLED = false in diiisco_rebuild.rs) because the node's auth cannot
-# be proven end to end without the Diiisco network. Existing devices keep the
-# image they run; only a missing image is built, from upstream HEAD as before.
-RUN git clone --depth 1 https://github.com/Diiisco-Inc/diiisco-node.git .
+# Upstream is pinned to one reviewed commit, never to moving HEAD. This is the
+# commit the 0.4.37 ship run verified: its template listens on api port 8080 on
+# 127.0.0.1 by default, so the seds below move it to 8181 on all interfaces (the
+# compose publishes it on host loopback only), `/health` is unauthenticated and
+# `/v1/*` is guarded by the bearer. A pin bump changes the image tag, which
+# triggers the one-time gated rebuild.
+ARG DIIISCO_NODE_SHA=45ef1cc8c68a804d716be7b5511a9fece36b0f85
+RUN git init . && \
+    git remote add origin https://github.com/Diiisco-Inc/diiisco-node.git && \
+    git fetch --depth 1 origin "$DIIISCO_NODE_SHA" && \
+    git checkout --detach FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = "$DIIISCO_NODE_SHA"
 
 # Install dependencies. Upstream's package.json has historically imported
 # `json-canonicalize` without declaring it, so `npm install` alone left it
 # missing and the container died at runtime with MODULE_NOT_FOUND (F10).
 # Install it explicitly so the dependency is always present in node_modules.
-RUN npm install && npm install --save json-canonicalize
+# Pinned to exactly 2.0.0: 2.0.1 is a broken publish (no bundles/, though its
+# main is ./bundles/index.umd.js) and `npm install` ignores upstream's bun.lock.
+# The direct spec and the override are both exactly 2.0.0 (npm requires them to
+# agree), so nothing in the tree can pull 2.0.1.
+RUN npm pkg set dependencies.json-canonicalize=2.0.0 overrides.json-canonicalize=2.0.0 && \
+    npm install --save-exact json-canonicalize@2.0.0 && \
+    npm install
+
+# Fail the build unless json-canonicalize is the good 2.0.0 everywhere: the
+# installed version, the bundle its main points at, the integrity of every lock
+# entry, and `npm ls` (which must itself succeed and show no 2.0.1).
+RUN test "$(node -p "require('./node_modules/json-canonicalize/package.json').version")" = "2.0.0" && \
+    test -f node_modules/json-canonicalize/bundles/index.umd.js && \
+    node -e 'const l=require("./package-lock.json");const w="sha512-yyrnK/mEm6Na3ChbJUWueXdapueW0p380RUyTW87XGb1ww8l8hU0pRrGC3vSWHe9CxrbPHX2fGUOZpNiHR0IIg==";const e=Object.entries(l.packages).filter(([p])=>p.endsWith("node_modules/json-canonicalize"));if(e.length===0||e.some(([,v])=>v.integrity!==w)){console.error("json-canonicalize lock integrity mismatch");process.exit(1)}' && \
+    npm ls json-canonicalize --all > /tmp/jc-ls.txt && \
+    grep -q 'json-canonicalize@2\.0\.0' /tmp/jc-ls.txt && \
+    ! grep -q 'json-canonicalize@2\.0\.1' /tmp/jc-ls.txt
 
 # Build args — these are injected at image build time (CI/CD pipeline)
 ARG ALGO_ADDRESS
@@ -69,6 +91,27 @@ RUN (npm run build || npx tsc --noEmitOnError false --skipLibCheck || true) && m
 # The self-starting entry is dist/dev.js (dist/index.js is a library export).
 # Fail the build rather than ship an image whose CMD cannot start.
 RUN test -f dist/dev.js
+
+# dist/dev.js loads FEM's environment override through
+# `[".", "environment", "environment"].join("/")`. The package is "type":
+# "module", so that extensionless specifier cannot resolve, the empty catch
+# hides it, and the node would run without FEM's key. Point it at the real file;
+# if upstream changed that line, fall back to an extensionless copy, which the
+# old specifier does resolve. Exactly one variant runs and logs which.
+RUN if [ ! -f dist/environment/environment.js ]; then \
+      echo "FATAL: dist/environment/environment.js was not built" >&2; exit 1; \
+    fi && \
+    if grep -qF '[".", "environment", "environment"].join("/")' dist/dev.js; then \
+      sed -i 's#\[".", "environment", "environment"\]\.join("/")#"./environment/environment.js"#' dist/dev.js && \
+      grep -qF '"./environment/environment.js"' dist/dev.js && \
+      ! grep -qF '[".", "environment", "environment"].join("/")' dist/dev.js && \
+      echo "dev.js environment import: exact sed applied"; \
+    else \
+      cp dist/environment/environment.js dist/environment/environment && \
+      cmp dist/environment/environment.js dist/environment/environment && \
+      echo "dev.js environment import: fallback copy applied"; \
+    fi && \
+    test -f dist/environment/environment.js
 
 # ── Stage 2: Runtime ────────────────────────────────────────────────────
 FROM node:22-slim

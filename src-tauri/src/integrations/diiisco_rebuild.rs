@@ -3,8 +3,8 @@
 //! The node image bakes the device API key (and now the upstream pin) in at
 //! build time. When either changes (a v0.4.35 device upgrading, or a later pin
 //! bump) the image is rebuilt exactly once under a NEW tag, the node is switched
-//! to it, and only a node that proves the new key (200 with the key, 401
-//! without) is promoted to `latest`. Any failure leaves `latest` — the
+//! to it, and only a node that proves the new key (401 without it, and a
+//! status other than 401/403 with it) is promoted to `latest`. Any failure leaves `latest` — the
 //! current-good image — untouched and retries with a bounded backoff.
 //!
 //! Everything that touches Docker goes through `NodeOps`, so the sequence is
@@ -93,11 +93,10 @@ pub(super) fn pin_for_tag() -> String {
 }
 
 /// Whether an EXISTING node image may be rebuilt on a key/pin change.
-/// BLOCKER-SANDBOX per prompt line 354, 2026-10-14: the new node's auth
-/// (200 with the key) needs the Diiisco network and cannot be proven, so
-/// devices that work today are never rebuilt. Flip only with the pin restored
-/// in the Dockerfile and the probe proven.
-pub(super) const REBUILD_ENABLED: bool = false;
+/// Enabled again with the pin restored in the Dockerfile and the F2 probe
+/// (auth proven by 401 without a key and a non-401/403 with it, since the mesh
+/// is not reachable from a sandbox). An enabled rebuild without a pin errors.
+pub(super) const REBUILD_ENABLED: bool = true;
 
 /// PURE. With the upgrade rebuild disabled, an existing image is never
 /// rebuilt: `BuildNew` becomes `RunExisting`. A missing image is unaffected.
@@ -124,14 +123,30 @@ pub(super) enum InstallStep {
     Unknown,
 }
 
-/// PURE. RED stub.
+/// PURE. Decided under `REBUILD_LOCK`, so a caller that queued behind a build
+/// sees its result: an image that exists with a stamp for this key + pin is
+/// already built; an unprobeable image is never built over.
 pub(super) fn install_step(state: ImageState, stamp_current: bool) -> InstallStep {
-    if stamp_current && state == ImageState::Unknown {
-        InstallStep::AlreadyBuilt
-    } else if stamp_current && state == ImageState::Absent {
-        InstallStep::Unknown
-    } else {
-        InstallStep::Build
+    match state {
+        ImageState::Unknown => InstallStep::Unknown,
+        ImageState::Present if stamp_current => InstallStep::AlreadyBuilt,
+        _ => InstallStep::Build,
+    }
+}
+
+const UNKNOWN_WARN_EVERY_SECS: u64 = 60;
+static LAST_UNKNOWN_WARN: AtomicU64 = AtomicU64::new(0);
+
+/// Warn that the image probe failed, at most once per 60 s.
+pub(super) fn warn_image_unknown() {
+    let now = unix_now();
+    let last = LAST_UNKNOWN_WARN.load(Ordering::SeqCst);
+    if now.saturating_sub(last) >= UNKNOWN_WARN_EVERY_SECS
+        && LAST_UNKNOWN_WARN
+            .compare_exchange(last, now, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    {
+        warn!("Diiisco: could not probe the node image — changing nothing, will re-probe");
     }
 }
 
@@ -141,9 +156,12 @@ pub(super) fn stamp_is_current(dir: &Path, key_fp: &str, pin_sha: &str) -> bool 
     read_stamp(dir).is_some_and(|s| s.tag == tag && s.key_fp == key_fp && s.pin_sha == pin_sha)
 }
 
-/// RED stub.
+/// An enabled rebuild must be pinned: the `UNPINNED` placeholder (a Dockerfile
+/// without a 40-hex pin) is an error, never a silent unpinned build.
 pub(super) fn require_pin_when_enabled(enabled: bool, pin_sha: &str) -> Result<()> {
-    let _ = (enabled, pin_sha);
+    if enabled && !is_hex(pin_sha, 40) {
+        anyhow::bail!("Diiisco rebuild is enabled but the Dockerfile carries no 40-hex pin");
+    }
     Ok(())
 }
 
@@ -340,11 +358,13 @@ pub(super) fn plan_start(
     }
 }
 
-/// PURE. Promotion needs the node to accept the device key AND reject a
-/// request with no credentials; 200 without a key means the auth override was
-/// not loaded.
+/// PURE (F2). Promotion needs the node to reject a request with no credentials
+/// (401; 200 means the auth override did not load) AND to get past auth with the
+/// device key: any real HTTP status other than 401/403. A post-auth 500 ("No
+/// peers available" while the mesh is offline) therefore promotes; 0
+/// (unreachable/timeout) on either side never does.
 pub(super) fn probe_verdict(with_key_status: u16, no_key_status: u16) -> bool {
-    with_key_status == 200 && no_key_status == 401
+    no_key_status == 401 && with_key_status != 0 && with_key_status != 401 && with_key_status != 403
 }
 
 fn marker(secret: &str) -> String {
@@ -409,6 +429,8 @@ pub(super) enum Outcome {
     Upgraded,
     /// Upgrade failed or was interrupted; the old image runs, backoff kept.
     UpgradeFailed,
+    /// The image probe failed: nothing was built, planned, recorded or changed.
+    ImageUnknown,
     /// `stop()` ran meanwhile: nothing was brought up or promoted.
     Stopped,
 }
@@ -467,7 +489,16 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
     require_pin_when_enabled(rebuild_enabled, pin_sha)?;
     let _guard = REBUILD_LOCK.lock().await;
     let now = clock();
-    let have_image = ops.image_state() == ImageState::Present;
+    let have_image = match ops.image_state() {
+        ImageState::Present => true,
+        ImageState::Absent => false,
+        // Never build, never touch the backoff or the stamp, leave the
+        // containers as they are; the next supervisor tick re-probes.
+        ImageState::Unknown => {
+            warn_image_unknown();
+            return Ok(Outcome::ImageUnknown);
+        }
+    };
     let plan = plan_start(
         read_stamp(dir).as_ref(),
         read_backoff(dir).as_ref(),

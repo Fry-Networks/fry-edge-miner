@@ -360,8 +360,12 @@ impl Integration for DiiiscoIntegration {
             diiisco_rebuild::stamp_is_current(&deploy_dir, &key_fp, &pin),
         ) {
             diiisco_rebuild::InstallStep::Build => {}
-            diiisco_rebuild::InstallStep::AlreadyBuilt => return Ok(()),
+            diiisco_rebuild::InstallStep::AlreadyBuilt => {
+                info!("Diiisco image already built by a concurrent caller");
+                return Ok(());
+            }
             diiisco_rebuild::InstallStep::Unknown => {
+                diiisco_rebuild::warn_image_unknown();
                 anyhow::bail!("Diiisco image state could not be determined; not building")
             }
         }
@@ -429,8 +433,9 @@ impl Integration for DiiiscoIntegration {
         // would keep its stale compose forever and never pick up fixes like
         // dropping the conflicting 11434 publish.
         tokio::fs::write(&compose, include_str!("diiisco_deploy/docker-compose.yml")).await?;
-        // Same for the Dockerfile: an upgraded device holds the pre-pin copy,
-        // and the gated rebuild must build the pinned one.
+        // Same for the Dockerfile: it is rewritten from the embedded copy here and
+        // again before every build, so any build (a missing image, or the
+        // enabled upgrade rebuild) uses the pinned source this binary carries.
         diiisco_rebuild::write_embedded_dockerfile(&deploy)?;
 
         // The compose file interpolates ${ALGO_ADDRESS}/${ALGO_MNEMONIC}/
@@ -547,8 +552,10 @@ impl Integration for DiiiscoIntegration {
         }
         // Compose file present but image never built = failed/interrupted
         // install — report not-installed so the toggle path re-runs install.
-        // Only checkable when the Docker engine is reachable.
-        if docker_available() && image_built() != diiisco_rebuild::ImageState::Present {
+        // Only checkable when the Docker engine is reachable. A probe that
+        // itself failed (Unknown) is NOT "not installed": that would trigger an
+        // install on a glitch.
+        if docker_available() && image_built() == diiisco_rebuild::ImageState::Absent {
             return None;
         }
         Some("installed".into())
@@ -762,9 +769,10 @@ impl diiisco_rebuild::NodeOps for DockerNode {
         )
     }
 
-    /// The node must accept the device key AND reject a request with no
-    /// credentials at all (no Authorization, no x-api-key). Retried while the
-    /// node boots.
+    /// F2: the node must reject a request with no credentials at all (401) AND
+    /// let the device key past auth (any real status except 401/403; a 500 "No
+    /// peers available" from an offline mesh counts). Each request is bounded
+    /// to 5 s; retried while the node boots.
     async fn probe(&self) -> bool {
         let Ok(client) = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
@@ -829,7 +837,10 @@ async fn run_node(node: DockerNode, deploy: PathBuf, bearer: String) -> Result<(
         diiisco_rebuild::REBUILD_ENABLED,
     )
     .await?;
-    if outcome != diiisco_rebuild::Outcome::Stopped {
+    if !matches!(
+        outcome,
+        diiisco_rebuild::Outcome::Stopped | diiisco_rebuild::Outcome::ImageUnknown
+    ) {
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
     Ok(())
