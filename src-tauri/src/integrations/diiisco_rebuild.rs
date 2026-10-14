@@ -138,23 +138,54 @@ pub(super) fn read_backoff(dir: &Path) -> Option<Backoff> {
     })
 }
 
-/// Atomic write: tmp file in the same dir, fsync, rename over the target.
+/// Unique temp names: two writers of the same target (start() and a detached
+/// run_node can both write the Dockerfile) must never share a temp file.
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Atomic write: unique tmp file in the same dir, fsync, rename over the
+/// target. On any error the call removes its own temp file.
 fn write_atomic(dir: &Path, name: &str, content: &str) -> std::io::Result<()> {
     use std::io::Write;
     std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!("{name}.tmp"));
-    let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(content.as_bytes())?;
-    f.sync_all()?;
-    drop(f);
-    rename_retrying(|| std::fs::rename(&tmp, dir.join(name)))
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let seq = TMP_SEQ.fetch_add(1, Ordering::SeqCst);
+    let tmp = dir.join(format!(".{name}.{}.{nanos}.{seq}.tmp", std::process::id()));
+    let result = (|| {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        rename_retrying(|| std::fs::rename(&tmp, dir.join(name)))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
-/// The final rename, as a seam: see the retry policy in the real build.
+/// The final rename. On Windows it fails with PermissionDenied while another
+/// process holds the target open (e.g. `docker compose build` reading the
+/// Dockerfile), so that kind alone is retried: 5 attempts, 100 ms apart, at
+/// most 0.4 s of blocking. Callers are sync fns reached from async code, so
+/// the total stays under 0.5 s.
 pub(super) fn rename_retrying<F: FnMut() -> std::io::Result<()>>(
     mut rename: F,
 ) -> std::io::Result<()> {
-    rename()
+    let mut attempt = 1;
+    loop {
+        match rename() {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && attempt < 5 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            other => return other,
+        }
+    }
 }
 
 /// Atomically write the embedded Dockerfile to `<deploy>/diiisco-node/Dockerfile`,
