@@ -338,7 +338,7 @@ impl Integration for DiiiscoIntegration {
         )?;
         let bearer = require_diiisco_bearer(&creds)?;
         let key_fp = diiisco_rebuild::fp12(&bearer);
-        let pin = diiisco_rebuild::pin_sha().unwrap_or_default();
+        let pin = diiisco_rebuild::pin_for_tag();
         let tag = diiisco_rebuild::image_tag(&key_fp, &pin);
         // Same lock as start(): a build never overlaps another build or switch.
         let _rebuild_guard = diiisco_rebuild::REBUILD_LOCK.lock().await;
@@ -792,13 +792,14 @@ impl diiisco_rebuild::NodeOps for DockerNode {
 /// The detached half of start(): plan, build, switch, run.
 async fn run_node(node: DockerNode, deploy: PathBuf, bearer: String) -> Result<()> {
     let key_fp = diiisco_rebuild::fp12(&bearer);
-    let pin = diiisco_rebuild::pin_sha().unwrap_or_default();
+    let pin = diiisco_rebuild::pin_for_tag();
     let outcome = diiisco_rebuild::run_node_sequence(
         &node,
         &deploy,
         &key_fp,
         &pin,
         diiisco_rebuild::unix_now,
+        diiisco_rebuild::REBUILD_ENABLED,
     )
     .await?;
     if outcome != diiisco_rebuild::Outcome::Stopped {

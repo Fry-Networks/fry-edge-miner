@@ -1,10 +1,11 @@
 //! One-time gated rebuild tests. Synthetic values only; key values are never
 //! printed in assertion messages. The Docker side is a recording fake.
 use super::super::diiisco_rebuild::{
-    after_fresh_build, clear_backoff, delay_secs, fp12, image_tag, pin_sha, pin_sha_of, plan_start,
-    probe_verdict, read_backoff, read_stamp, record_attempt, redact_node_output, rename_retrying,
-    run_node_sequence, write_embedded_dockerfile, write_stamp, Backoff, NodeOps, Outcome, Plan,
-    Stamp, BACKOFF_FILE, REBUILD_LOCK, STAMP_FILE,
+    after_fresh_build, clear_backoff, delay_secs, fp12, gate_plan, image_tag, pin_for_tag, pin_sha,
+    pin_sha_of, plan_start, probe_verdict, read_backoff, read_stamp, record_attempt,
+    redact_node_output, rename_retrying, run_node_sequence, write_embedded_dockerfile, write_stamp,
+    Backoff, NodeOps, Outcome, Plan, Stamp, BACKOFF_FILE, REBUILD_ENABLED, REBUILD_LOCK,
+    STAMP_FILE, UNPINNED,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -328,7 +329,7 @@ impl NodeOps for Fake {
 }
 
 async fn run(f: &Fake) -> Result<Outcome> {
-    run_node_sequence(f, &f.dir, &key_fp(), &pin(), || NOW).await
+    run_node_sequence(f, &f.dir, &key_fp(), &pin(), || NOW, true).await
 }
 
 fn s(v: &[&str]) -> Vec<String> {
@@ -665,10 +666,17 @@ async fn the_clock_is_read_only_after_the_lock_is_held() {
     let guard = REBUILD_LOCK.lock().await;
     let (f2, r2) = (Arc::clone(&f), Arc::clone(&reads));
     let h = tokio::spawn(async move {
-        run_node_sequence(&*f2, &f2.dir, &key_fp(), &pin(), move || {
-            r2.fetch_add(1, Ordering::SeqCst);
-            NOW
-        })
+        run_node_sequence(
+            &*f2,
+            &f2.dir,
+            &key_fp(),
+            &pin(),
+            move || {
+                r2.fetch_add(1, Ordering::SeqCst);
+                NOW
+            },
+            true,
+        )
         .await
         .unwrap()
     });
@@ -698,7 +706,7 @@ async fn a_waiter_planning_after_the_winner_sees_the_recorded_attempt() {
     let d = tempfile::tempdir().unwrap();
     record_attempt(d.path(), &tag(), NOW).unwrap();
     let f = Fake::new(d.path());
-    let out = run_node_sequence(&f, &f.dir, &key_fp(), &pin(), || NOW + 1).await;
+    let out = run_node_sequence(&f, &f.dir, &key_fp(), &pin(), || NOW + 1, true).await;
     assert!(out.is_ok_and(|o| o == Outcome::Ran));
     assert_eq!(f.builds.load(Ordering::SeqCst), 0);
 }
@@ -734,22 +742,41 @@ fn hex40_count(text: &str) -> usize {
     re.find_iter(text).count()
 }
 
+// BLOCKER-SANDBOX per prompt line 354, 2026-10-14: the pin assertions below
+// hold the pinned form only while the upgrade rebuild is enabled.
 #[test]
-fn dockerfile_has_exactly_one_pin_on_the_arg_line_and_checks_it_out() {
-    assert_eq!(hex40_count(DOCKERFILE), 1);
+fn dockerfile_pin_form_matches_the_rebuild_switch() {
     let arg: Vec<&str> = DOCKERFILE
         .lines()
         .filter(|l| l.starts_with("ARG DIIISCO_NODE_SHA="))
         .collect();
-    assert_eq!(arg.len(), 1);
-    assert_eq!(hex40_count(arg[0]), 1);
-    assert!(DOCKERFILE.contains("git fetch --depth 1 origin \"$DIIISCO_NODE_SHA\""));
-    assert!(DOCKERFILE.contains("git checkout --detach FETCH_HEAD"));
-    assert!(DOCKERFILE.contains("test \"$(git rev-parse HEAD)\" = \"$DIIISCO_NODE_SHA\""));
-    assert!(
-        !DOCKERFILE.contains("git clone"),
-        "no unpinned clone of upstream HEAD"
-    );
+    if REBUILD_ENABLED {
+        assert_eq!(hex40_count(DOCKERFILE), 1);
+        assert_eq!(arg.len(), 1);
+        assert_eq!(hex40_count(arg[0]), 1);
+        assert!(DOCKERFILE.contains("git fetch --depth 1 origin \"$DIIISCO_NODE_SHA\""));
+        assert!(DOCKERFILE.contains("git checkout --detach FETCH_HEAD"));
+        assert!(DOCKERFILE.contains("test \"$(git rev-parse HEAD)\" = \"$DIIISCO_NODE_SHA\""));
+        assert!(
+            !DOCKERFILE.contains("git clone"),
+            "no unpinned clone of upstream HEAD"
+        );
+    } else {
+        assert_eq!(
+            hex40_count(DOCKERFILE),
+            0,
+            "no pin while the rebuild is disabled"
+        );
+        assert!(arg.is_empty(), "no pin ARG while the rebuild is disabled");
+        let clones: Vec<&str> = DOCKERFILE
+            .lines()
+            .filter(|l| l.starts_with("RUN git clone"))
+            .collect();
+        assert_eq!(
+            clones,
+            vec!["RUN git clone --depth 1 https://github.com/Diiisco-Inc/diiisco-node.git ."]
+        );
+    }
 }
 
 #[test]
@@ -757,10 +784,136 @@ fn pin_parsed_from_the_embedded_dockerfile_equals_the_arg_value() {
     let want = DOCKERFILE
         .lines()
         .find_map(|l| l.strip_prefix("ARG DIIISCO_NODE_SHA="));
-    assert!(want.is_some(), "Dockerfile carries the pin ARG");
-    assert_eq!(pin_sha().as_deref(), want);
+    assert_eq!(
+        pin_sha().as_deref(),
+        want,
+        "pin_sha() is the ARG value, or None without it"
+    );
     assert_eq!(pin_sha_of("ARG DIIISCO_NODE_SHA=nothex"), None);
     assert_eq!(pin_sha_of("ARG DIIISCO_NODE_SHA="), None);
+}
+
+#[test]
+fn rebuild_is_disabled_for_blocker_sandbox() {
+    let enabled = std::hint::black_box(REBUILD_ENABLED);
+    assert!(
+        !enabled,
+        "BLOCKER-SANDBOX 2026-10-14: the upgrade rebuild stays disabled"
+    );
+}
+
+#[test]
+fn rebuild_enabled_implies_a_pin() {
+    assert!(!REBUILD_ENABLED || pin_sha().is_some());
+}
+
+#[test]
+fn gate_plan_never_rebuilds_an_existing_image_when_disabled() {
+    let build = Plan::BuildNew { tag: tag() };
+    assert_eq!(gate_plan(build.clone(), false, true), Plan::RunExisting);
+    assert_eq!(gate_plan(build.clone(), false, false), build);
+    assert_eq!(gate_plan(build.clone(), true, true), build);
+    for p in [Plan::RunExisting, Plan::RunOldDeferred] {
+        assert_eq!(gate_plan(p.clone(), false, true), p);
+        assert_eq!(gate_plan(p.clone(), true, true), p);
+    }
+}
+
+async fn run_disabled(f: &Fake) -> Result<Outcome> {
+    run_node_sequence(f, &f.dir, &key_fp(), &pin(), || NOW, false).await
+}
+
+#[tokio::test]
+async fn disabled_rebuild_runs_a_legacy_image_without_any_build_state() {
+    let d = tempfile::tempdir().unwrap();
+    let f = Fake::new(d.path());
+    assert_eq!(run_disabled(&f).await.unwrap(), Outcome::Ran);
+    assert_eq!(f.calls(), s(&["down", "up_plain"]));
+    assert_eq!(f.builds.load(Ordering::SeqCst), 0);
+    assert!(read_stamp(d.path()).is_none());
+    assert!(read_backoff(d.path()).is_none());
+}
+
+#[tokio::test]
+async fn disabled_rebuild_ignores_a_stale_stamp_and_an_expired_backoff() {
+    let d = tempfile::tempdir().unwrap();
+    write_stamp(d.path(), &stamp_for(&fp12("another-key"), &pin())).unwrap();
+    record_attempt(d.path(), &tag(), NOW - 100_000).unwrap();
+    let f = Fake::new(d.path());
+    assert_eq!(run_disabled(&f).await.unwrap(), Outcome::Ran);
+    assert_eq!(f.calls(), s(&["down", "up_plain"]));
+    assert_eq!(f.builds.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn disabled_rebuild_still_builds_when_there_is_no_image() {
+    let d = tempfile::tempdir().unwrap();
+    let mut f = Fake::new(d.path());
+    f.have_image = false;
+    assert_eq!(run_disabled(&f).await.unwrap(), Outcome::BuiltFresh);
+    let t = tag();
+    assert_eq!(
+        f.calls(),
+        vec![
+            "refresh_dockerfile".to_string(),
+            format!("build:{t}"),
+            format!("tag_latest:{t}"),
+            "down".to_string(),
+            "up_plain".to_string()
+        ]
+    );
+    assert_eq!(read_stamp(d.path()), Some(stamp_for(&key_fp(), &pin())));
+}
+
+#[test]
+fn the_unpinned_placeholder_is_safe_and_never_a_real_pin() {
+    assert!(UNPINNED.bytes().all(|b| b.is_ascii_lowercase()));
+    assert!(UNPINNED.len() != 40);
+    assert!(UNPINNED != pin());
+    assert!(!UNPINNED.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert!(image_tag(&key_fp(), UNPINNED) != image_tag(&key_fp(), &pin()));
+    let p = pin_for_tag();
+    assert!(p == UNPINNED || (p.len() == 40 && p.bytes().all(|b| b.is_ascii_hexdigit())));
+}
+
+#[test]
+fn an_unpinned_stamp_round_trips_but_other_non_hex_pins_are_rejected() {
+    let d = tempfile::tempdir().unwrap();
+    let s = stamp_for(&key_fp(), UNPINNED);
+    write_stamp(d.path(), &s).unwrap();
+    assert_eq!(read_stamp(d.path()), Some(s));
+    std::fs::write(
+        d.path().join(STAMP_FILE),
+        format!("tag={}\nkey_fp={}\npin_sha=notapin\n", tag(), key_fp()),
+    )
+    .unwrap();
+    assert!(read_stamp(d.path()).is_none());
+}
+
+#[test]
+fn an_unpinned_and_a_pinned_stamp_never_satisfy_each_others_plan() {
+    let pinned = stamp_for(&key_fp(), &pin());
+    let unpinned = stamp_for(&key_fp(), UNPINNED);
+    assert!(matches!(
+        plan_start(Some(&pinned), None, &key_fp(), UNPINNED, NOW),
+        Plan::BuildNew { .. }
+    ));
+    assert!(matches!(
+        plan_start(Some(&unpinned), None, &key_fp(), &pin(), NOW),
+        Plan::BuildNew { .. }
+    ));
+    assert_eq!(
+        plan_start(Some(&unpinned), None, &key_fp(), UNPINNED, NOW),
+        Plan::RunExisting
+    );
+}
+
+#[test]
+fn install_and_start_use_the_gated_switch_and_placeholder_pin() {
+    let body = non_test(include_str!("diiisco.rs"));
+    assert!(body.contains("diiisco_rebuild::REBUILD_ENABLED"));
+    assert_eq!(body.matches("diiisco_rebuild::pin_for_tag()").count(), 2);
+    assert!(!body.contains("pin_sha().unwrap_or_default()"));
 }
 
 #[test]

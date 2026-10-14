@@ -83,6 +83,24 @@ pub(super) fn pin_sha() -> Option<String> {
     pin_sha_of(include_str!("diiisco_deploy/diiisco-node/Dockerfile"))
 }
 
+/// Stand-in pin for a Dockerfile that carries none. Lowercase letters only (no
+/// sed/JSON hazard) and not 40 hex, so it can never equal a real pin.
+pub(super) const UNPINNED: &str = "unpinned";
+
+/// The pin that goes into tags and stamps: the real one, else `UNPINNED`.
+pub(super) fn pin_for_tag() -> String {
+    pin_sha().unwrap_or_else(|| UNPINNED.to_string())
+}
+
+/// Whether an EXISTING node image may be rebuilt on a key/pin change.
+pub(super) const REBUILD_ENABLED: bool = true;
+
+/// PURE. With the upgrade rebuild disabled, an existing image is never
+/// rebuilt: `BuildNew` becomes `RunExisting`. A missing image is unaffected.
+pub(super) fn gate_plan(plan: Plan, _rebuild_enabled: bool, _have_image: bool) -> Plan {
+    plan
+}
+
 /// What the running `latest` image was built with. Written only after the new
 /// node has proven itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -390,6 +408,7 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
     key_fp: &str,
     pin_sha: &str,
     clock: C,
+    _rebuild_enabled: bool,
 ) -> Result<Outcome> {
     let _guard = REBUILD_LOCK.lock().await;
     let now = clock();
