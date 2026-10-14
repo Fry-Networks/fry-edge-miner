@@ -183,7 +183,20 @@ fn upgrade_never_rebuilds_an_existing_image() {
     let body = src.split("#[cfg(test)]").next().unwrap();
     let build = concat!("\"compose\", ", "\"build\"");
     assert_eq!(body.matches(build).count(), 2);
-    assert_eq!(body.matches("if !image_built() {").count(), 1);
+    // H1: superseded by operator ruling S2 (2026-10-13). The start() build is
+    // now gated on "image missing OR plan == BuildNew" inside the locked
+    // sequence, so the old single-literal gate no longer exists.
+    assert_eq!(
+        body.matches("diiisco_rebuild::run_node_sequence(").count(),
+        1
+    );
+    assert_eq!(
+        body.matches("diiisco_rebuild::after_fresh_build(").count(),
+        1
+    );
+    let seq = include_str!("diiisco_rebuild.rs");
+    assert_eq!(seq.matches("let must_build = !have_image ||").count(), 1);
+    assert_eq!(seq.matches("ops.build(").count(), 2);
 }
 
 #[test]
