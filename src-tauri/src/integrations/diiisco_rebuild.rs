@@ -408,7 +408,7 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
     key_fp: &str,
     pin_sha: &str,
     clock: C,
-    _rebuild_enabled: bool,
+    rebuild_enabled: bool,
 ) -> Result<Outcome> {
     let _guard = REBUILD_LOCK.lock().await;
     let now = clock();
@@ -420,6 +420,7 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
         pin_sha,
         now,
     );
+    let plan = gate_plan(plan, rebuild_enabled, have_image);
     let tag = image_tag(key_fp, pin_sha);
     // With no image there is nothing to protect, so a backoff never blocks it.
     let must_build = !have_image || matches!(plan, Plan::BuildNew { .. });
