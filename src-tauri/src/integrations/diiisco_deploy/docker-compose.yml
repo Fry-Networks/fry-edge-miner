@@ -66,7 +66,7 @@ services:
         ALGO_ADDRESS: ${ALGO_ADDRESS}
         ALGO_MNEMONIC: ${ALGO_MNEMONIC}
         API_KEY: ${DIIISCO_API_KEY}
-    image: diiisco-node:latest
+    image: diiisco-node:${DIIISCO_IMAGE_TAG:-latest}
     container_name: diiisco-node
     restart: unless-stopped
     depends_on:
@@ -82,7 +82,7 @@ services:
     healthcheck:
       # CMD-SHELL required: exec-form CMD passes "||"/"exit"/"1" as literal
       # curl arguments, which fails every probe.
-      test: ["CMD-SHELL", "curl -sf http://localhost:8181/v1/models || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8181/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5

@@ -98,3 +98,7 @@ pub(super) fn fill_local_key(
 #[cfg(test)]
 #[path = "diiisco_node_key_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "diiisco_rebuild_tests.rs"]
+mod rebuild_tests;
