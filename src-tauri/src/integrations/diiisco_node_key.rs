@@ -102,3 +102,7 @@ mod tests;
 #[cfg(test)]
 #[path = "diiisco_rebuild_tests.rs"]
 mod rebuild_tests;
+
+#[cfg(test)]
+#[path = "diiisco_k38_tests.rs"]
+mod k38_tests;

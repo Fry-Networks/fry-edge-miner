@@ -819,9 +819,42 @@ impl diiisco_rebuild::NodeOps for DockerNode {
         }
     }
 
+    fn discard_candidate(&self, tag: &str) {
+        diiisco_rebuild::discard_candidate_by_id(self, tag)
+    }
+
+    /// `docker ps -q`, then `docker inspect --format {{.Image}} <ids>`: the image
+    /// ID of every running container. Any Docker failure is `None`.
+    fn running_image_ids(&self) -> Option<Vec<String>> {
+        let ps = self.docker(&["ps", "-q"]).ok()?;
+        if !ps.status.success() {
+            return None;
+        }
+        let ids = non_empty_lines(&ps.stdout);
+        if ids.is_empty() {
+            return Some(ids);
+        }
+        let mut args = vec!["inspect", "--format", "{{.Image}}"];
+        args.extend(ids.iter().map(String::as_str));
+        let out = self.docker(&args).ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(non_empty_lines(&out.stdout))
+    }
+
     fn stop_requested(&self) -> bool {
         diiisco_rebuild::stop_generation() != self.stop_gen
     }
+}
+
+fn non_empty_lines(bytes: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// The detached half of start(): plan, build, switch, run.

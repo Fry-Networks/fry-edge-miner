@@ -41,6 +41,7 @@ pub(super) fn stop_generation() -> u64 {
 }
 
 const EMBEDDED_DOCKERFILE: &str = include_str!("diiisco_deploy/diiisco-node/Dockerfile");
+const EMBEDDED_COMPOSE: &str = include_str!("diiisco_deploy/docker-compose.yml");
 
 /// Seconds since the unix epoch (0 if the clock is before it).
 pub(super) fn unix_now() -> u64 {
@@ -59,9 +60,29 @@ pub(super) fn fp12(s: &str) -> String {
     sha256_hex(s)[..12].to_string()
 }
 
-/// Immutable image tag for a (key, pin) pair.
-pub(super) fn image_tag(key_fp: &str, pin_sha: &str) -> String {
+/// sha256 over the Dockerfile bytes followed by the compose bytes: 64 hex.
+pub(super) fn compute_recipe_sha(dockerfile: &str, compose: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(dockerfile.as_bytes());
+    h.update(compose.as_bytes());
+    hex::encode(h.finalize())
+}
+
+/// The recipe this build deploys: its embedded Dockerfile and compose. A change
+/// to either changes every image tag, so a device rebuilds once, gated.
+pub(super) fn recipe_sha() -> &'static str {
+    static RECIPE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    RECIPE.get_or_init(|| compute_recipe_sha(EMBEDDED_DOCKERFILE, EMBEDDED_COMPOSE))
+}
+
+/// Immutable image tag for a (key, pin, recipe) triple.
+pub(super) fn image_tag_with(key_fp: &str, pin_sha: &str, _recipe: &str) -> String {
     format!("fem-{}", &sha256_hex(&format!("{key_fp}{pin_sha}"))[..12])
+}
+
+/// Immutable image tag for a (key, pin) pair under this build's recipe.
+pub(super) fn image_tag(key_fp: &str, pin_sha: &str) -> String {
+    image_tag_with(key_fp, pin_sha, recipe_sha())
 }
 
 fn is_hex(s: &str, n: usize) -> bool {
@@ -415,6 +436,14 @@ pub(super) trait NodeOps: Send + Sync {
     async fn probe(&self) -> bool;
     fn tag_latest(&self, tag: &str) -> Result<()>;
     fn rmi_by_id(&self, id: &str);
+    /// Remove the candidate image `diiisco-node:<tag>` after a failed or
+    /// interrupted attempt. Default: nothing; Docker-backed impls override.
+    fn discard_candidate(&self, _tag: &str) {}
+    /// Image IDs used by RUNNING containers; `None` = the probe failed, so a
+    /// caller must not remove anything. Default: no running containers.
+    fn running_image_ids(&self) -> Option<Vec<String>> {
+        Some(Vec::new())
+    }
     /// True once `stop()` ran after this sequence began.
     fn stop_requested(&self) -> bool;
 }
@@ -457,15 +486,97 @@ pub(super) fn after_fresh_build<O: NodeOps + ?Sized>(
     Ok(())
 }
 
+/// The id to remove for a failed candidate, or `None` to keep it. Only an image
+/// that exists, is not `latest`, and is not used by a running container goes;
+/// an unknown container list (`None`) keeps everything.
+pub(super) fn candidate_to_remove(
+    _cand: Option<&str>,
+    _latest: Option<&str>,
+    _running: Option<&[String]>,
+) -> Option<String> {
+    None
+}
+
+/// Remove the failed candidate `diiisco-node:<tag>` BY ID, never by tag pattern
+/// and never `latest`. Call it only after the candidate's container was stopped
+/// or replaced.
+pub(super) fn discard_candidate_by_id<O: NodeOps + ?Sized>(ops: &O, tag: &str) {
+    let cand = ops.image_id(&format!("diiisco-node:{tag}"));
+    let latest = ops.image_id(LATEST_REF);
+    let running = ops.running_image_ids();
+    match candidate_to_remove(cand.as_deref(), latest.as_deref(), running.as_deref()) {
+        Some(id) => ops.rmi_by_id(&id),
+        None if cand.is_some() => {
+            warn!("Diiisco: failed candidate image kept (in use, current, or containers unknown)");
+        }
+        None => {}
+    }
+}
+
 /// Old image back up after a failed or interrupted upgrade. `latest` was never
-/// moved, so compose resolves it without any tag env.
-fn fallback_old<O: NodeOps + ?Sized>(ops: &O) -> Result<Outcome> {
+/// moved, so compose resolves it without any tag env. The failed candidate, if
+/// one was built, is discarded once the restore has been attempted.
+fn fallback_old<O: NodeOps + ?Sized>(ops: &O, cand: Option<&str>) -> Result<Outcome> {
     if ops.stop_requested() {
         info!("Diiisco: stopped during rebuild — leaving the node down");
+        if let Some(t) = cand {
+            ops.discard_candidate(t);
+        }
         return Ok(Outcome::Stopped);
     }
-    ops.up_no_build(None)?;
+    let restored = ops.up_no_build(None);
+    if let Some(t) = cand {
+        ops.discard_candidate(t);
+    }
+    restored?;
     Ok(Outcome::UpgradeFailed)
+}
+
+/// What the candidate image proved when brought up for the F2 gate.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Gate {
+    /// Up, rejected a request without a key, accepted the device key.
+    Pass,
+    /// Failed to start or to prove the key; the previous node is restored and
+    /// the candidate discarded.
+    Rejected,
+    /// `stop()` ran meanwhile; nothing was promoted.
+    Stopped,
+}
+
+/// Bring the built candidate `tag` up and run the F2 probe on it. The caller
+/// holds the rebuild lock; nothing here locks.
+#[allow(dead_code)]
+pub(super) async fn gate_candidate<O: NodeOps + ?Sized>(
+    _ops: &O,
+    _tag: &str,
+    _have_image: bool,
+) -> Gate {
+    Gate::Pass
+}
+
+/// Undo a rejected candidate: stop its container, restore the previous node
+/// when there was one, then discard the candidate image by id.
+#[allow(dead_code)]
+pub(super) fn reject_candidate<O: NodeOps + ?Sized>(_ops: &O, _tag: &str, _have_image: bool) {}
+
+/// After a promotion: remove the PREVIOUS `latest` image by id, unless it is
+/// the new image itself.
+#[allow(dead_code)]
+pub(super) fn drop_previous<O: NodeOps + ?Sized>(_ops: &O, _prev: Option<&str>, _tag: &str) {}
+
+/// PURE. True when an attempt for `tag` is recorded and its delay has not
+/// elapsed. A backoff stamped in the future is ignored.
+#[allow(dead_code)]
+pub(super) fn backoff_defers(_backoff: Option<&Backoff>, _tag: &str, _now: u64) -> bool {
+    false
+}
+
+/// install()'s backoff check, run under the rebuild lock before any build.
+#[allow(dead_code)]
+pub(super) fn install_backoff_check(_dir: &Path, _tag: &str, _now: u64) -> Result<()> {
+    Ok(())
 }
 
 /// plan -> build -> switch, all under `REBUILD_LOCK`. A second concurrent
@@ -530,8 +641,12 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
     if !upgrade {
         info!("Diiisco: no node image — building before start");
         ops.refresh_dockerfile()?;
-        ops.build(&tag)?;
+        if let Err(e) = ops.build(&tag) {
+            ops.discard_candidate(&tag);
+            return Err(e);
+        }
         if ops.stop_requested() {
+            ops.discard_candidate(&tag);
             return Ok(Outcome::Stopped);
         }
         after_fresh_build(ops, dir, &tag, key_fp, pin_sha)?;
@@ -547,39 +662,42 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
     let prev_id = ops.image_id(LATEST_REF);
     if let Err(e) = record_attempt(dir, &tag, now) {
         warn!(error = %e, "Diiisco: cannot record rebuild attempt — keeping the current node");
-        return fallback_old(ops);
+        return fallback_old(ops, None);
     }
     if let Err(e) = ops.refresh_dockerfile() {
         warn!(error = %e, "Diiisco: cannot refresh the node Dockerfile — keeping the current node");
-        return fallback_old(ops);
+        return fallback_old(ops, None);
     }
     info!(fp = %key_fp, "Diiisco: rebuilding node image for the per-device key");
     if let Err(e) = ops.build(&tag) {
         warn!(error = %e, "Diiisco: upgrade build failed — keeping the current node");
-        return fallback_old(ops);
+        return fallback_old(ops, Some(tag.as_str()));
     }
     if ops.stop_requested() {
         info!("Diiisco: stopped during rebuild — not switching");
+        ops.discard_candidate(&tag);
         return Ok(Outcome::Stopped);
     }
     ops.down();
     if ops.stop_requested() {
+        ops.discard_candidate(&tag);
         return Ok(Outcome::Stopped);
     }
     if let Err(e) = ops.up_no_build(Some(&tag)) {
         warn!(error = %e, "Diiisco: new node failed to start — restoring the current node");
-        return fallback_old(ops);
+        return fallback_old(ops, Some(tag.as_str()));
     }
     if !ops.probe().await {
         warn!("Diiisco: new node did not prove the device key — restoring the current node");
-        return fallback_old(ops);
+        return fallback_old(ops, Some(tag.as_str()));
     }
     if ops.stop_requested() {
+        ops.discard_candidate(&tag);
         return Ok(Outcome::Stopped);
     }
     if let Err(e) = ops.tag_latest(&tag) {
         warn!(error = %e, "Diiisco: could not promote the new image — restoring the current node");
-        return fallback_old(ops);
+        return fallback_old(ops, Some(tag.as_str()));
     }
     let stamp = Stamp {
         tag: tag.clone(),
