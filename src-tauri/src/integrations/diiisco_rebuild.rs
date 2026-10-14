@@ -76,8 +76,11 @@ pub(super) fn recipe_sha() -> &'static str {
 }
 
 /// Immutable image tag for a (key, pin, recipe) triple.
-pub(super) fn image_tag_with(key_fp: &str, pin_sha: &str, _recipe: &str) -> String {
-    format!("fem-{}", &sha256_hex(&format!("{key_fp}{pin_sha}"))[..12])
+pub(super) fn image_tag_with(key_fp: &str, pin_sha: &str, recipe: &str) -> String {
+    format!(
+        "fem-{}",
+        &sha256_hex(&format!("{key_fp}{pin_sha}{recipe}"))[..12]
+    )
 }
 
 /// Immutable image tag for a (key, pin) pair under this build's recipe.
@@ -302,13 +305,18 @@ pub(super) fn write_embedded_dockerfile(deploy: &Path) -> std::io::Result<()> {
     )
 }
 
+/// The stamp file. `recipe_sha` is informational (the tag already folds it in);
+/// `read_stamp` ignores it.
 pub(super) fn write_stamp(dir: &Path, s: &Stamp) -> std::io::Result<()> {
     write_atomic(
         dir,
         STAMP_FILE,
         &format!(
-            "tag={}\nkey_fp={}\npin_sha={}\n",
-            s.tag, s.key_fp, s.pin_sha
+            "tag={}\nkey_fp={}\npin_sha={}\nrecipe_sha={}\n",
+            s.tag,
+            s.key_fp,
+            s.pin_sha,
+            recipe_sha()
         ),
     )
 }
