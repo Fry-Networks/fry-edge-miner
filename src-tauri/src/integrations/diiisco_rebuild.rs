@@ -93,12 +93,19 @@ pub(super) fn pin_for_tag() -> String {
 }
 
 /// Whether an EXISTING node image may be rebuilt on a key/pin change.
-pub(super) const REBUILD_ENABLED: bool = true;
+/// BLOCKER-SANDBOX per prompt line 354, 2026-10-14: the new node's auth
+/// (200 with the key) needs the Diiisco network and cannot be proven, so
+/// devices that work today are never rebuilt. Flip only with the pin restored
+/// in the Dockerfile and the probe proven.
+pub(super) const REBUILD_ENABLED: bool = false;
 
 /// PURE. With the upgrade rebuild disabled, an existing image is never
 /// rebuilt: `BuildNew` becomes `RunExisting`. A missing image is unaffected.
-pub(super) fn gate_plan(plan: Plan, _rebuild_enabled: bool, _have_image: bool) -> Plan {
-    plan
+pub(super) fn gate_plan(plan: Plan, rebuild_enabled: bool, have_image: bool) -> Plan {
+    match plan {
+        Plan::BuildNew { .. } if !rebuild_enabled && have_image => Plan::RunExisting,
+        other => other,
+    }
 }
 
 /// What the running `latest` image was built with. Written only after the new
@@ -136,7 +143,7 @@ pub(super) fn read_stamp(dir: &Path) -> Option<Stamp> {
     let t = std::fs::read_to_string(dir.join(STAMP_FILE)).ok()?;
     let tag = field(&t, "tag").filter(|v| is_tag(v))?;
     let key_fp = field(&t, "key_fp").filter(|v| is_hex(v, 12))?;
-    let pin = field(&t, "pin_sha").filter(|v| is_hex(v, 40))?;
+    let pin = field(&t, "pin_sha").filter(|v| is_hex(v, 40) || *v == UNPINNED)?;
     Some(Stamp {
         tag: tag.into(),
         key_fp: key_fp.into(),
@@ -420,7 +427,13 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
         pin_sha,
         now,
     );
-    let plan = gate_plan(plan, rebuild_enabled, have_image);
+    let gated = gate_plan(plan.clone(), rebuild_enabled, have_image);
+    if gated != plan {
+        info!(
+            "Diiisco: node image upgrade disabled (BLOCKER-SANDBOX) — running the existing image"
+        );
+    }
+    let plan = gated;
     let tag = image_tag(key_fp, pin_sha);
     // With no image there is nothing to protect, so a backoff never blocks it.
     let must_build = !have_image || matches!(plan, Plan::BuildNew { .. });

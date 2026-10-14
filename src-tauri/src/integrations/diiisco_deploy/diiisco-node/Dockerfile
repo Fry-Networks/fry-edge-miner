@@ -25,18 +25,12 @@ RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
-# Upstream is pinned to one reviewed commit, never to moving HEAD. Evidence
-# (B1 review, 2026-10-13): this commit is upstream HEAD as of 2026-10-09; its
-# template listens on api port 8080 on 127.0.0.1 by default, so the seds below
-# move it to 8181 on all interfaces (the compose publishes it on host loopback
-# only), `/health` is unauthenticated and `/v1/*` is guarded by the bearer. A
-# pin bump changes the image tag, which triggers the one-time gated rebuild.
-ARG DIIISCO_NODE_SHA=45ef1cc8c68a804d716be7b5511a9fece36b0f85
-RUN git init . && \
-    git remote add origin https://github.com/Diiisco-Inc/diiisco-node.git && \
-    git fetch --depth 1 origin "$DIIISCO_NODE_SHA" && \
-    git checkout --detach FETCH_HEAD && \
-    test "$(git rev-parse HEAD)" = "$DIIISCO_NODE_SHA"
+# Unpinned on purpose (BLOCKER-SANDBOX per prompt line 354, 2026-10-14): a pin is
+# only safe together with the gated upgrade rebuild, and that stays disabled
+# (REBUILD_ENABLED = false in diiisco_rebuild.rs) because the node's auth cannot
+# be proven end to end without the Diiisco network. Existing devices keep the
+# image they run; only a missing image is built, from upstream HEAD as before.
+RUN git clone --depth 1 https://github.com/Diiisco-Inc/diiisco-node.git .
 
 # Install dependencies. Upstream's package.json has historically imported
 # `json-canonicalize` without declaring it, so `npm install` alone left it
