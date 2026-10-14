@@ -219,7 +219,7 @@ fn probe_verdict_needs_200_with_the_key_and_401_without() {
     assert!(!probe_verdict(0, 0), "connection refused");
     assert!(!probe_verdict(401, 200));
     assert!(!probe_verdict(200, 0));
-    assert!(!probe_verdict(500, 401));
+    assert!(probe_verdict(500, 401), "F2: a post-auth 500 promotes");
 }
 
 // ---------------------------------------------------------------- the fake
@@ -794,11 +794,15 @@ fn pin_parsed_from_the_embedded_dockerfile_equals_the_arg_value() {
 }
 
 #[test]
-fn rebuild_is_disabled_for_blocker_sandbox() {
+fn rebuild_is_enabled_and_pinned() {
     let enabled = std::hint::black_box(REBUILD_ENABLED);
+    assert!(enabled, "the upgrade rebuild is enabled");
+    let pin = pin_sha();
     assert!(
-        !enabled,
-        "BLOCKER-SANDBOX 2026-10-14: the upgrade rebuild stays disabled"
+        pin.as_deref().is_some_and(
+            |p| p.len() == 40 && p.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        ),
+        "an enabled rebuild needs a 40-hex pin in the Dockerfile"
     );
 }
 
@@ -1172,4 +1176,324 @@ fn rename_does_not_retry_other_errors() {
     let (f, calls) = counting_rename(std::io::ErrorKind::NotFound, usize::MAX);
     assert!(rename_retrying(f).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+// ====================================================== 0.4.37 finish (C1)
+
+use super::super::diiisco_rebuild::{
+    install_step, require_pin_when_enabled, stamp_is_current, ImageState, InstallStep,
+};
+
+const JC_200_SHA512: &str =
+    "sha512-yyrnK/mEm6Na3ChbJUWueXdapueW0p380RUyTW87XGb1ww8l8hU0pRrGC3vSWHe9CxrbPHX2fGUOZpNiHR0IIg==";
+const JC_201_SHA512: &str =
+    "sha512-TuGrLM400c1VN8bQsSOiyDEEmRjIVgFvcSehWC+0JJaV4BGl1vYNxHBPVsN5ADUZIcWp75IN1yf+vCZyDjPt1Q==";
+
+#[test]
+fn f2_probe_verdict_table() {
+    // (with-key, no-key) -> promote
+    let table: [(u16, u16, bool); 10] = [
+        (200, 401, true),
+        (500, 401, true),
+        (404, 401, true), // lead ruling: reachable and not 401/403 promotes
+        (401, 401, false),
+        (403, 401, false),
+        (200, 200, false),
+        (500, 200, false),
+        (0, 401, false),
+        (200, 0, false),
+        (0, 0, false),
+    ];
+    for (with_key, no_key, want) in table {
+        assert_eq!(
+            probe_verdict(with_key, no_key),
+            want,
+            "({with_key},{no_key})"
+        );
+    }
+}
+
+/// A recording fake whose image state can be Unknown or flip to Present on build.
+struct Sim {
+    inner: Fake,
+    present: AtomicBool,
+    unknown: bool,
+}
+
+impl Sim {
+    fn new(dir: &Path, present: bool, unknown: bool) -> Self {
+        Sim {
+            inner: Fake::new(dir),
+            present: AtomicBool::new(present),
+            unknown,
+        }
+    }
+}
+
+#[async_trait]
+impl NodeOps for Sim {
+    fn image_exists(&self) -> bool {
+        self.present.load(Ordering::SeqCst)
+    }
+    fn image_state(&self) -> ImageState {
+        if self.unknown {
+            ImageState::Unknown
+        } else if self.image_exists() {
+            ImageState::Present
+        } else {
+            ImageState::Absent
+        }
+    }
+    fn refresh_dockerfile(&self) -> Result<()> {
+        self.inner.refresh_dockerfile()
+    }
+    fn image_id(&self, reference: &str) -> Option<String> {
+        self.inner.image_id(reference)
+    }
+    fn build(&self, t: &str) -> Result<()> {
+        self.inner.build(t)?;
+        self.present.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+    fn down(&self) {
+        self.inner.down()
+    }
+    fn up_plain(&self) -> Result<()> {
+        self.inner.up_plain()
+    }
+    fn up_no_build(&self, t: Option<&str>) -> Result<()> {
+        self.inner.up_no_build(t)
+    }
+    async fn probe(&self) -> bool {
+        self.inner.probe().await
+    }
+    fn tag_latest(&self, t: &str) -> Result<()> {
+        self.inner.tag_latest(t)
+    }
+    fn rmi_by_id(&self, id: &str) {
+        self.inner.rmi_by_id(id)
+    }
+    fn stop_requested(&self) -> bool {
+        self.inner.stop_requested()
+    }
+}
+
+/// install()'s locked section, driven through the same pure steps it uses.
+async fn install_path(sim: &Sim) -> Result<bool> {
+    let _g = REBUILD_LOCK.lock().await;
+    let (kfp, p, t) = (key_fp(), pin(), tag());
+    match install_step(
+        sim.image_state(),
+        stamp_is_current(&sim.inner.dir, &kfp, &p),
+    ) {
+        InstallStep::Build => {
+            sim.build(&t)?;
+            after_fresh_build(sim, &sim.inner.dir, &t, &kfp, &p)?;
+            Ok(true)
+        }
+        InstallStep::AlreadyBuilt => Ok(false),
+        InstallStep::Unknown => anyhow::bail!("image state unknown"),
+    }
+}
+
+fn file_bytes(dir: &Path, name: &str) -> Option<Vec<u8>> {
+    std::fs::read(dir.join(name)).ok()
+}
+
+#[tokio::test]
+async fn unknown_image_state_builds_nothing_and_leaves_state_files_identical() {
+    // stale stamp + a recorded backoff, both must survive byte for byte
+    let d = tempfile::tempdir().unwrap();
+    write_stamp(d.path(), &stamp_for(&fp12("another-key"), &pin())).unwrap();
+    record_attempt(d.path(), &tag(), NOW - 10).unwrap();
+    let (stamp0, backoff0) = (
+        file_bytes(d.path(), STAMP_FILE),
+        file_bytes(d.path(), BACKOFF_FILE),
+    );
+    assert!(stamp0.is_some() && backoff0.is_some());
+    let sim = Sim::new(d.path(), true, true);
+    let out = run_node_sequence(&sim, d.path(), &key_fp(), &pin(), || NOW + 5000, true).await;
+    assert_eq!(format!("{out:?}"), "Ok(ImageUnknown)");
+    assert!(sim.inner.calls().is_empty(), "{:?}", sim.inner.calls());
+    assert_eq!(sim.inner.builds.load(Ordering::SeqCst), 0);
+    assert_eq!(file_bytes(d.path(), STAMP_FILE), stamp0);
+    assert_eq!(file_bytes(d.path(), BACKOFF_FILE), backoff0);
+    // no state at all: nothing is created either
+    let d2 = tempfile::tempdir().unwrap();
+    let sim2 = Sim::new(d2.path(), false, true);
+    let _ = run_node_sequence(&sim2, d2.path(), &key_fp(), &pin(), || NOW, true).await;
+    assert!(sim2.inner.calls().is_empty(), "{:?}", sim2.inner.calls());
+    assert!(
+        dir_names(d2.path()).is_empty(),
+        "{:?}",
+        dir_names(d2.path())
+    );
+}
+
+#[test]
+fn install_step_table() {
+    use ImageState::{Absent, Present, Unknown};
+    assert_eq!(install_step(Present, true), InstallStep::AlreadyBuilt);
+    assert_eq!(install_step(Present, false), InstallStep::Build);
+    assert_eq!(install_step(Absent, true), InstallStep::Build);
+    assert_eq!(install_step(Absent, false), InstallStep::Build);
+    assert_eq!(install_step(Unknown, true), InstallStep::Unknown);
+    assert_eq!(install_step(Unknown, false), InstallStep::Unknown);
+}
+
+#[test]
+fn install_checks_inside_the_lock_before_building_and_maps_unknown() {
+    let body = non_test(include_str!("diiisco.rs"));
+    let install = body.split("async fn install(&self)").nth(1).unwrap();
+    let install = install.split("async fn start(").next().unwrap();
+    let lock = install.find("REBUILD_LOCK.lock()").unwrap();
+    let step = install.find("install_step(").unwrap();
+    let build = install.find("\"compose\", \"build\"").unwrap();
+    assert!(
+        lock < step && step < build,
+        "re-check sits between lock and build"
+    );
+    assert!(install.contains("already built by a concurrent caller"));
+    let iv = body.split("fn installed_version(").nth(1).unwrap();
+    let iv = iv.split("fn collect_poc_data").next().unwrap();
+    assert!(
+        iv.contains("ImageState::Absent"),
+        "only Absent means not installed"
+    );
+    assert!(!iv.contains("!image_built()"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_install_paths_and_start_build_exactly_once() {
+    let d = tempfile::tempdir().unwrap();
+    let sim = Arc::new(Sim::new(d.path(), false, false));
+    let work = async {
+        let (a, b) = (Arc::clone(&sim), Arc::clone(&sim));
+        let i1 = tokio::spawn(async move { install_path(&a).await.unwrap() });
+        let i2 = tokio::spawn(async move { install_path(&b).await.unwrap() });
+        let c = Arc::clone(&sim);
+        let st = tokio::spawn(async move {
+            run_node_sequence(&*c, &c.inner.dir, &key_fp(), &pin(), || NOW, true)
+                .await
+                .unwrap()
+        });
+        let _ = (i1.await.unwrap(), i2.await.unwrap(), st.await.unwrap());
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(20), work)
+        .await
+        .expect("no deadlock");
+    let calls = sim.inner.calls();
+    assert_eq!(sim.inner.builds.load(Ordering::SeqCst), 1, "{calls:?}");
+    let latest = format!("tag_latest:{}", tag());
+    assert_eq!(
+        calls.iter().filter(|c| **c == latest).count(),
+        1,
+        "{calls:?}"
+    );
+    assert!(!calls.iter().any(|c| c.starts_with("rmi:")), "{calls:?}");
+    assert!(stamp_is_current(d.path(), &key_fp(), &pin()));
+}
+
+#[tokio::test]
+async fn nested_start_then_install_path_completes_without_deadlock() {
+    let d = tempfile::tempdir().unwrap();
+    let sim = Sim::new(d.path(), false, false);
+    let work = async {
+        let out = run_node_sequence(&sim, d.path(), &key_fp(), &pin(), || NOW, true)
+            .await
+            .unwrap();
+        let built = install_path(&sim).await.unwrap();
+        (out, built)
+    };
+    let (out, built) = tokio::time::timeout(std::time::Duration::from_secs(10), work)
+        .await
+        .expect("deadlock: the lock is not re-entrant");
+    assert_eq!(out, Outcome::BuiltFresh);
+    assert!(!built, "install path must see the image and the stamp");
+    assert_eq!(sim.inner.builds.load(Ordering::SeqCst), 1);
+    // exactly two lockers (sequence + install), none inside the NodeOps impl
+    let seq = non_test(include_str!("diiisco_rebuild.rs"));
+    let inst = non_test(include_str!("diiisco.rs"));
+    assert_eq!(seq.matches("REBUILD_LOCK.lock()").count(), 1);
+    assert_eq!(inst.matches("REBUILD_LOCK.lock()").count(), 1);
+}
+
+#[tokio::test]
+async fn an_enabled_rebuild_without_a_pin_is_an_error_and_builds_nothing() {
+    assert!(require_pin_when_enabled(true, UNPINNED).is_err());
+    assert!(require_pin_when_enabled(true, &pin()).is_ok());
+    assert!(require_pin_when_enabled(false, UNPINNED).is_ok());
+    let d = tempfile::tempdir().unwrap();
+    let f = Fake::new(d.path());
+    let r = run_node_sequence(&f, d.path(), &key_fp(), UNPINNED, || NOW, true).await;
+    assert!(r.is_err(), "enabled + unpinned must refuse");
+    assert!(f.calls().is_empty(), "{:?}", f.calls());
+    assert_eq!(f.builds.load(Ordering::SeqCst), 0);
+    assert!(dir_names(d.path()).is_empty());
+}
+
+#[test]
+fn dockerfile_restores_the_pinned_fetch() {
+    assert_eq!(hex40_count(DOCKERFILE), 1);
+    assert!(pin_sha().is_some());
+    assert!(DOCKERFILE.contains("git fetch --depth 1 origin \"$DIIISCO_NODE_SHA\""));
+    assert!(DOCKERFILE.contains("git checkout --detach FETCH_HEAD"));
+    assert!(DOCKERFILE.contains("test \"$(git rev-parse HEAD)\" = \"$DIIISCO_NODE_SHA\""));
+    assert!(!DOCKERFILE.contains("git clone"));
+}
+
+#[test]
+fn dockerfile_pins_json_canonicalize_to_2_0_0_with_four_build_assertions() {
+    assert!(DOCKERFILE.contains(
+        "npm pkg set dependencies.json-canonicalize=2.0.0 overrides.json-canonicalize=2.0.0"
+    ));
+    assert!(DOCKERFILE.contains("npm install --save-exact json-canonicalize@2.0.0"));
+    assert!(!DOCKERFILE.contains("npm install --save json-canonicalize"));
+    // (1) installed version
+    assert!(DOCKERFILE.contains(
+        r#"require('./node_modules/json-canonicalize/package.json').version")" = "2.0.0""#
+    ));
+    // (2) the bundle the package main points at
+    assert!(DOCKERFILE.contains("test -f node_modules/json-canonicalize/bundles/index.umd.js"));
+    // (3) every lock entry's integrity
+    assert!(DOCKERFILE.contains("package-lock.json"));
+    assert!(DOCKERFILE.contains("node_modules/json-canonicalize"));
+    assert!(DOCKERFILE.contains(JC_200_SHA512));
+    assert!(
+        !DOCKERFILE.contains(JC_201_SHA512),
+        "the broken 2.0.1 integrity"
+    );
+    // (4) npm ls: errors fail the chain, 2.0.0 present, 2.0.1 absent
+    assert!(DOCKERFILE.contains("npm ls json-canonicalize --all"));
+    assert!(DOCKERFILE.contains("grep -q 'json-canonicalize@2\\.0\\.0'"));
+    assert!(DOCKERFILE.contains("! grep -q 'json-canonicalize@2\\.0\\.1'"));
+}
+
+#[test]
+fn dockerfile_patches_the_dev_js_environment_import_with_a_fallback() {
+    let old = r#"[".", "environment", "environment"].join("/")"#;
+    let new = r#""./environment/environment.js""#;
+    assert!(DOCKERFILE.contains(old));
+    assert!(DOCKERFILE.contains(new));
+    assert!(DOCKERFILE.contains(
+        r##"sed -i 's#\[".", "environment", "environment"\]\.join("/")#"./environment/environment.js"#' dist/dev.js"##
+    ));
+    assert!(DOCKERFILE
+        .contains(r#"! grep -qF '[".", "environment", "environment"].join("/")' dist/dev.js"#));
+    assert!(DOCKERFILE.contains("cp dist/environment/environment.js dist/environment/environment"));
+    assert!(DOCKERFILE.contains("cmp dist/environment/environment.js dist/environment/environment"));
+    assert!(DOCKERFILE.contains("if [ ! -f dist/environment/environment.js ]"));
+    assert!(DOCKERFILE.contains("FATAL"));
+    let dev = DOCKERFILE.find("RUN test -f dist/dev.js").unwrap();
+    let patch = DOCKERFILE.find("fallback copy applied").unwrap();
+    assert!(dev < patch, "patch runs after the dev.js existence check");
+}
+
+#[test]
+fn dockerfile_keeps_port_sed_and_the_cmd() {
+    assert!(DOCKERFILE.contains("s#^    port: 8080,#    port: 8181,\\n    host: \"0.0.0.0\",#"));
+    assert!(DOCKERFILE.contains("grep -q '^    port: 8181,$' src/environment/environment.ts"));
+    assert!(DOCKERFILE.contains("RUN test -f dist/dev.js"));
+    assert!(DOCKERFILE.contains("CMD [\"node\", \"dist/dev.js\"]"));
+    assert!(COMPOSE.contains("curl -sf http://localhost:8181/health || exit 1"));
 }

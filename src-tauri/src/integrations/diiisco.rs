@@ -238,12 +238,24 @@ fn compose_file() -> Result<PathBuf> {
 /// The diiisco-node image is built locally by install(); it is never
 /// published to a registry, so `compose up` must not be allowed to fall back
 /// to pulling it.
-fn image_built() -> bool {
-    crate::integrations::docker_manager::docker_command()
+///
+/// Tri-state: a failed probe (spawn error, timeout, non-zero exit) is `Unknown`,
+/// never "absent".
+fn image_built() -> diiisco_rebuild::ImageState {
+    use diiisco_rebuild::ImageState;
+    match crate::integrations::docker_manager::docker_command()
         .args(["images", "-q", "diiisco-node:latest"])
         .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
-        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-        .unwrap_or(false)
+    {
+        Ok(o) if o.status.success() => {
+            if String::from_utf8_lossy(&o.stdout).trim().is_empty() {
+                ImageState::Absent
+            } else {
+                ImageState::Present
+            }
+        }
+        _ => ImageState::Unknown,
+    }
 }
 
 /// Last `n` lines of subprocess output — full walls of Docker logs go to the
@@ -340,8 +352,19 @@ impl Integration for DiiiscoIntegration {
         let key_fp = diiisco_rebuild::fp12(&bearer);
         let pin = diiisco_rebuild::pin_for_tag();
         let tag = diiisco_rebuild::image_tag(&key_fp, &pin);
+        diiisco_rebuild::require_pin_when_enabled(diiisco_rebuild::REBUILD_ENABLED, &pin)?;
         // Same lock as start(): a build never overlaps another build or switch.
         let _rebuild_guard = diiisco_rebuild::REBUILD_LOCK.lock().await;
+        match diiisco_rebuild::install_step(
+            image_built(),
+            diiisco_rebuild::stamp_is_current(&deploy_dir, &key_fp, &pin),
+        ) {
+            diiisco_rebuild::InstallStep::Build => {}
+            diiisco_rebuild::InstallStep::AlreadyBuilt => return Ok(()),
+            diiisco_rebuild::InstallStep::Unknown => {
+                anyhow::bail!("Diiisco image state could not be determined; not building")
+            }
+        }
         info!("Building Diiisco Docker image");
         let output = node_cmd(
             &deploy_dir,
@@ -525,7 +548,7 @@ impl Integration for DiiiscoIntegration {
         // Compose file present but image never built = failed/interrupted
         // install — report not-installed so the toggle path re-runs install.
         // Only checkable when the Docker engine is reachable.
-        if docker_available() && !image_built() {
+        if docker_available() && image_built() != diiisco_rebuild::ImageState::Present {
             return None;
         }
         Some("installed".into())
@@ -661,6 +684,10 @@ impl DockerNode {
 #[async_trait]
 impl diiisco_rebuild::NodeOps for DockerNode {
     fn image_exists(&self) -> bool {
+        image_built() == diiisco_rebuild::ImageState::Present
+    }
+
+    fn image_state(&self) -> diiisco_rebuild::ImageState {
         image_built()
     }
 

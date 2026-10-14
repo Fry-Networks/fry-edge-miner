@@ -108,6 +108,45 @@ pub(super) fn gate_plan(plan: Plan, rebuild_enabled: bool, have_image: bool) -> 
     }
 }
 
+/// Whether the node image exists. `Unknown` = the Docker probe itself failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ImageState {
+    Present,
+    Absent,
+    Unknown,
+}
+
+/// What install() does once it holds `REBUILD_LOCK`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InstallStep {
+    Build,
+    AlreadyBuilt,
+    Unknown,
+}
+
+/// PURE. RED stub.
+pub(super) fn install_step(state: ImageState, stamp_current: bool) -> InstallStep {
+    if stamp_current && state == ImageState::Unknown {
+        InstallStep::AlreadyBuilt
+    } else if stamp_current && state == ImageState::Absent {
+        InstallStep::Unknown
+    } else {
+        InstallStep::Build
+    }
+}
+
+/// True when the stamp in `dir` is for exactly this key and pin.
+pub(super) fn stamp_is_current(dir: &Path, key_fp: &str, pin_sha: &str) -> bool {
+    let tag = image_tag(key_fp, pin_sha);
+    read_stamp(dir).is_some_and(|s| s.tag == tag && s.key_fp == key_fp && s.pin_sha == pin_sha)
+}
+
+/// RED stub.
+pub(super) fn require_pin_when_enabled(enabled: bool, pin_sha: &str) -> Result<()> {
+    let _ = (enabled, pin_sha);
+    Ok(())
+}
+
 /// What the running `latest` image was built with. Written only after the new
 /// node has proven itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -332,6 +371,14 @@ pub(super) fn redact_node_output(s: &str, secrets: &[&str]) -> String {
 #[async_trait]
 pub(super) trait NodeOps: Send + Sync {
     fn image_exists(&self) -> bool;
+    /// Tri-state probe; the default maps `image_exists`.
+    fn image_state(&self) -> ImageState {
+        if self.image_exists() {
+            ImageState::Present
+        } else {
+            ImageState::Absent
+        }
+    }
     /// Put this build's embedded Dockerfile on disk. Called before every
     /// build: only install() used to write it, so an upgraded device would
     /// otherwise build from a stale (unpinned) copy.
@@ -417,9 +464,10 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
     clock: C,
     rebuild_enabled: bool,
 ) -> Result<Outcome> {
+    require_pin_when_enabled(rebuild_enabled, pin_sha)?;
     let _guard = REBUILD_LOCK.lock().await;
     let now = clock();
-    let have_image = ops.image_exists();
+    let have_image = ops.image_state() == ImageState::Present;
     let plan = plan_start(
         read_stamp(dir).as_ref(),
         read_backoff(dir).as_ref(),
