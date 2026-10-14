@@ -355,8 +355,9 @@ impl Integration for DiiiscoIntegration {
         diiisco_rebuild::require_pin_when_enabled(diiisco_rebuild::REBUILD_ENABLED, &pin)?;
         // Same lock as start(): a build never overlaps another build or switch.
         let _rebuild_guard = diiisco_rebuild::REBUILD_LOCK.lock().await;
+        let state = image_built();
         match diiisco_rebuild::install_step(
-            image_built(),
+            state,
             diiisco_rebuild::stamp_is_current(&deploy_dir, &key_fp, &pin),
         ) {
             diiisco_rebuild::InstallStep::Build => {}
@@ -369,8 +370,29 @@ impl Integration for DiiiscoIntegration {
                 anyhow::bail!("Diiisco image state could not be determined; not building")
             }
         }
+        // A failed attempt for this target backs off: the startup recovery and
+        // the Docker watcher call install() again on every cycle.
+        let now = diiisco_rebuild::unix_now();
+        diiisco_rebuild::install_backoff_check(&deploy_dir, &tag, now)?;
+        let have_image = state == diiisco_rebuild::ImageState::Present;
+        let node = DockerNode::new(
+            deploy_dir.clone(),
+            algo_address.clone(),
+            algo_mnemonic.clone(),
+            bearer.clone(),
+            diiisco_rebuild::stop_generation(),
+        );
+        let prev_id = if have_image {
+            diiisco_rebuild::NodeOps::image_id(&node, diiisco_rebuild::LATEST_REF)
+        } else {
+            None
+        };
+        // Recorded before the build and cleared only on success, so an
+        // interrupted install counts as a failed one.
+        diiisco_rebuild::record_attempt(&deploy_dir, &tag, now)
+            .map_err(|e| anyhow::anyhow!("cannot record the rebuild attempt: {e}"))?;
         info!("Building Diiisco Docker image");
-        let output = node_cmd(
+        let built = node_cmd(
             &deploy_dir,
             &algo_address,
             &algo_mnemonic,
@@ -380,7 +402,14 @@ impl Integration for DiiiscoIntegration {
         .args(["compose", "build"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
+        .output_bounded(crate::supervisor::platform::LONG_TIMEOUT);
+        let output = match built {
+            Ok(o) => o,
+            Err(e) => {
+                diiisco_rebuild::NodeOps::discard_candidate(&node, &tag);
+                return Err(e.into());
+            }
+        };
 
         if !output.status.success() {
             let stderr = redact_out(
@@ -390,18 +419,26 @@ impl Integration for DiiiscoIntegration {
                 &deploy_dir,
             );
             warn!(stderr = %stderr, "docker compose build failed (full output)");
+            diiisco_rebuild::NodeOps::discard_candidate(&node, &tag);
             anyhow::bail!("docker compose build failed: {}", tail_lines(&stderr, 15));
+        }
+        // F2: the candidate runs and proves the device key before it becomes
+        // `latest`; a rejected one is removed and the previous node restored.
+        match diiisco_rebuild::gate_candidate(&node, &tag, have_image).await {
+            diiisco_rebuild::Gate::Pass => {}
+            diiisco_rebuild::Gate::Rejected => anyhow::bail!(
+                "the new Diiisco node did not prove the device key; the previous node image was kept"
+            ),
+            diiisco_rebuild::Gate::Stopped => return Ok(()),
         }
         // `latest` is the single moving alias for the current-good image; tag
         // it BEFORE the stamp so an env-less recovery `up` finds it.
-        let node = DockerNode::new(
-            deploy_dir.clone(),
-            algo_address,
-            algo_mnemonic,
-            bearer,
-            diiisco_rebuild::stop_generation(),
-        );
-        diiisco_rebuild::after_fresh_build(&node, &deploy_dir, &tag, &key_fp, &pin)?;
+        if let Err(e) = diiisco_rebuild::after_fresh_build(&node, &deploy_dir, &tag, &key_fp, &pin)
+        {
+            diiisco_rebuild::reject_candidate(&node, &tag, have_image);
+            return Err(e);
+        }
+        diiisco_rebuild::drop_previous(&node, prev_id.as_deref(), &tag);
         info!("Diiisco install complete — image built with per-device wallet");
         Ok(())
     }

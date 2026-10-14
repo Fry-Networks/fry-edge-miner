@@ -548,7 +548,6 @@ fn fallback_old<O: NodeOps + ?Sized>(ops: &O, cand: Option<&str>) -> Result<Outc
 }
 
 /// What the candidate image proved when brought up for the F2 gate.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Gate {
     /// Up, rejected a request without a key, accepted the device key.
@@ -561,36 +560,87 @@ pub(super) enum Gate {
 }
 
 /// Bring the built candidate `tag` up and run the F2 probe on it. The caller
-/// holds the rebuild lock; nothing here locks.
-#[allow(dead_code)]
+/// holds the rebuild lock; nothing here locks, so it is safe under it.
 pub(super) async fn gate_candidate<O: NodeOps + ?Sized>(
-    _ops: &O,
-    _tag: &str,
-    _have_image: bool,
+    ops: &O,
+    tag: &str,
+    have_image: bool,
 ) -> Gate {
+    if ops.stop_requested() {
+        ops.discard_candidate(tag);
+        return Gate::Stopped;
+    }
+    if have_image {
+        ops.down();
+        if ops.stop_requested() {
+            ops.discard_candidate(tag);
+            return Gate::Stopped;
+        }
+    }
+    if let Err(e) = ops.up_no_build(Some(tag)) {
+        warn!(error = %e, "Diiisco: the new node failed to start");
+        reject_candidate(ops, tag, have_image);
+        return Gate::Rejected;
+    }
+    if !ops.probe().await {
+        warn!("Diiisco: the new node did not prove the device key");
+        reject_candidate(ops, tag, have_image);
+        return Gate::Rejected;
+    }
+    if ops.stop_requested() {
+        ops.discard_candidate(tag);
+        return Gate::Stopped;
+    }
     Gate::Pass
 }
 
 /// Undo a rejected candidate: stop its container, restore the previous node
-/// when there was one, then discard the candidate image by id.
-#[allow(dead_code)]
-pub(super) fn reject_candidate<O: NodeOps + ?Sized>(_ops: &O, _tag: &str, _have_image: bool) {}
+/// when there was one, then discard the candidate image by id. After a `stop()`
+/// nothing is brought up.
+pub(super) fn reject_candidate<O: NodeOps + ?Sized>(ops: &O, tag: &str, have_image: bool) {
+    if !ops.stop_requested() {
+        ops.down();
+        if have_image {
+            if let Err(e) = ops.up_no_build(None) {
+                warn!(error = %e, "Diiisco: could not restore the previous node");
+            }
+        }
+    }
+    ops.discard_candidate(tag);
+}
 
 /// After a promotion: remove the PREVIOUS `latest` image by id, unless it is
 /// the new image itself.
-#[allow(dead_code)]
-pub(super) fn drop_previous<O: NodeOps + ?Sized>(_ops: &O, _prev: Option<&str>, _tag: &str) {}
+pub(super) fn drop_previous<O: NodeOps + ?Sized>(ops: &O, prev: Option<&str>, tag: &str) {
+    let Some(prev) = prev else {
+        return;
+    };
+    let new_id = ops.image_id(&format!("diiisco-node:{tag}"));
+    if Some(prev) != new_id.as_deref() {
+        ops.rmi_by_id(prev);
+    }
+}
 
 /// PURE. True when an attempt for `tag` is recorded and its delay has not
 /// elapsed. A backoff stamped in the future is ignored.
-#[allow(dead_code)]
-pub(super) fn backoff_defers(_backoff: Option<&Backoff>, _tag: &str, _now: u64) -> bool {
-    false
+pub(super) fn backoff_defers(backoff: Option<&Backoff>, tag: &str, now: u64) -> bool {
+    backoff
+        .filter(|b| b.tag == tag)
+        .and_then(|b| {
+            now.checked_sub(b.last_unix)
+                .map(|el| el < delay_secs(b.attempts))
+        })
+        .unwrap_or(false)
 }
 
-/// install()'s backoff check, run under the rebuild lock before any build.
-#[allow(dead_code)]
-pub(super) fn install_backoff_check(_dir: &Path, _tag: &str, _now: u64) -> Result<()> {
+/// install()'s backoff check, run under the rebuild lock before any build: a
+/// failed attempt for this target is not retried by every recovery cycle.
+pub(super) fn install_backoff_check(dir: &Path, tag: &str, now: u64) -> Result<()> {
+    if backoff_defers(read_backoff(dir).as_ref(), tag, now) {
+        anyhow::bail!(
+            "Diiisco node image rebuild is backing off after a failed attempt; will retry later"
+        );
+    }
     Ok(())
 }
 
