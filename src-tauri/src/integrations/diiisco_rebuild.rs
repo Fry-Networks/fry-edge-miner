@@ -147,7 +147,14 @@ fn write_atomic(dir: &Path, name: &str, content: &str) -> std::io::Result<()> {
     f.write_all(content.as_bytes())?;
     f.sync_all()?;
     drop(f);
-    std::fs::rename(&tmp, dir.join(name))
+    rename_retrying(|| std::fs::rename(&tmp, dir.join(name)))
+}
+
+/// The final rename, as a seam: see the retry policy in the real build.
+pub(super) fn rename_retrying<F: FnMut() -> std::io::Result<()>>(
+    mut rename: F,
+) -> std::io::Result<()> {
+    rename()
 }
 
 /// Atomically write the embedded Dockerfile to `<deploy>/diiisco-node/Dockerfile`,

@@ -2,9 +2,9 @@
 //! printed in assertion messages. The Docker side is a recording fake.
 use super::super::diiisco_rebuild::{
     after_fresh_build, clear_backoff, delay_secs, fp12, image_tag, pin_sha, pin_sha_of, plan_start,
-    probe_verdict, read_backoff, read_stamp, record_attempt, redact_node_output, run_node_sequence,
-    write_embedded_dockerfile, write_stamp, Backoff, NodeOps, Outcome, Plan, Stamp, BACKOFF_FILE,
-    REBUILD_LOCK, STAMP_FILE,
+    probe_verdict, read_backoff, read_stamp, record_attempt, redact_node_output, rename_retrying,
+    run_node_sequence, write_embedded_dockerfile, write_stamp, Backoff, NodeOps, Outcome, Plan,
+    Stamp, BACKOFF_FILE, REBUILD_LOCK, STAMP_FILE,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -866,4 +866,157 @@ fn start_gate_is_image_missing_or_plan_build_and_attempt_is_recorded_first() {
         "upgrade records then builds"
     );
     assert!(rec < build, "B4: record the attempt BEFORE the build");
+}
+
+// ------------------------------------- C1-RACE: shared temp file, rename retry
+
+fn dir_names(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn concurrent_dockerfile_writes_all_succeed() {
+    let d = tempfile::tempdir().unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let (b, p) = (Arc::clone(&barrier), d.path().to_path_buf());
+            std::thread::spawn(move || {
+                b.wait();
+                let mut errs = Vec::new();
+                for _ in 0..50 {
+                    if let Err(e) = write_embedded_dockerfile(&p) {
+                        errs.push(e.to_string());
+                    }
+                }
+                errs
+            })
+        })
+        .collect();
+    let errs: Vec<String> = handles
+        .into_iter()
+        .flat_map(|h| h.join().unwrap_or_else(|_| vec!["thread panicked".into()]))
+        .collect();
+    assert!(
+        errs.is_empty(),
+        "{} writes failed, e.g. {:?}",
+        errs.len(),
+        errs.first()
+    );
+    let node = d.path().join("diiisco-node");
+    let got = std::fs::read_to_string(node.join("Dockerfile"));
+    assert!(
+        got.is_ok_and(|g| g == DOCKERFILE),
+        "final content is the embedded Dockerfile"
+    );
+    assert_eq!(
+        dir_names(&node),
+        vec!["Dockerfile".to_string()],
+        "no temp files left"
+    );
+}
+
+#[test]
+fn concurrent_stamp_writes_and_reads_never_fail_or_tear() {
+    let d = tempfile::tempdir().unwrap();
+    let stamp = stamp_for(&key_fp(), &pin());
+    write_stamp(d.path(), &stamp).unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(8));
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let (b, p, s) = (Arc::clone(&barrier), d.path().to_path_buf(), stamp.clone());
+        handles.push(std::thread::spawn(move || {
+            b.wait();
+            let mut bad = Vec::new();
+            for _ in 0..50 {
+                if i % 2 == 0 {
+                    if let Err(e) = write_stamp(&p, &s) {
+                        bad.push(format!("write: {e}"));
+                    }
+                } else if read_stamp(&p).as_ref() != Some(&s) {
+                    bad.push("read: absent or torn".to_string());
+                }
+            }
+            bad
+        }));
+    }
+    let bad: Vec<String> = handles
+        .into_iter()
+        .flat_map(|h| h.join().unwrap_or_else(|_| vec!["thread panicked".into()]))
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "{} failures, e.g. {:?}",
+        bad.len(),
+        bad.first()
+    );
+    assert_eq!(
+        dir_names(d.path()),
+        vec![STAMP_FILE.to_string()],
+        "no temp files left"
+    );
+}
+
+#[test]
+fn a_failed_write_removes_its_own_temp_file() {
+    let d = tempfile::tempdir().unwrap();
+    // The target name is an existing directory, so the final rename must fail.
+    std::fs::create_dir(d.path().join(STAMP_FILE)).unwrap();
+    let r = write_stamp(d.path(), &stamp_for(&key_fp(), &pin()));
+    assert!(r.is_err(), "renaming a file over a directory must fail");
+    assert_eq!(
+        dir_names(d.path()),
+        vec![STAMP_FILE.to_string()],
+        "the failed write must not leave its temp file behind"
+    );
+}
+
+fn counting_rename(
+    fail_with: std::io::ErrorKind,
+    fail_times: usize,
+) -> (impl FnMut() -> std::io::Result<()>, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&calls);
+    let f = move || {
+        let n = c.fetch_add(1, Ordering::SeqCst);
+        if n < fail_times {
+            Err(std::io::Error::from(fail_with))
+        } else {
+            Ok(())
+        }
+    };
+    (f, calls)
+}
+
+#[test]
+fn rename_retries_a_sharing_violation_until_it_succeeds() {
+    let (f, calls) = counting_rename(std::io::ErrorKind::PermissionDenied, 2);
+    assert!(rename_retrying(f).is_ok());
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn rename_gives_up_after_five_attempts_within_half_a_second() {
+    let (f, calls) = counting_rename(std::io::ErrorKind::PermissionDenied, usize::MAX);
+    let t = std::time::Instant::now();
+    let r = rename_retrying(f);
+    assert!(r.is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied));
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
+    assert!(
+        t.elapsed() < std::time::Duration::from_millis(500),
+        "{:?}",
+        t.elapsed()
+    );
+}
+
+#[test]
+fn rename_does_not_retry_other_errors() {
+    let (f, calls) = counting_rename(std::io::ErrorKind::NotFound, usize::MAX);
+    assert!(rename_retrying(f).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
