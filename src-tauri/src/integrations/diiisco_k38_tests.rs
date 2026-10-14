@@ -171,7 +171,8 @@ impl NodeOps for K {
     }
     fn tag_latest(&self, t: &str) -> Result<()> {
         self.rec(format!("tag_latest:{t}"));
-        *self.stamp_at_tag_latest.lock().unwrap() = Some(read_stamp(&self.dir).is_some());
+        *self.stamp_at_tag_latest.lock().unwrap() =
+            Some(stamp_is_current(&self.dir, &key_fp(), &pin()));
         if !self.tag_ok {
             anyhow::bail!("fake tag failed");
         }
@@ -649,11 +650,12 @@ async fn install_flow(k: &K, now: u64) -> Result<Flow> {
     } else {
         None
     };
-    record_attempt(&k.dir, &t, now)?;
     if let Err(e) = k.build(&t) {
+        record_attempt(&k.dir, &t, now)?;
         k.discard_candidate(&t);
         return Err(e);
     }
+    record_attempt(&k.dir, &t, now)?;
     match gate_candidate(k, &t, have_image).await {
         Gate::Pass => {
             if let Err(e) = after_fresh_build(k, &k.dir, &t, &kf, &p) {
@@ -889,8 +891,8 @@ fn install_runs_backoff_and_gate_in_order_inside_the_lock() {
         "REBUILD_LOCK.lock()",
         "install_step(",
         "install_backoff_check(",
-        "record_attempt(",
         "\"compose\", \"build\"",
+        "record_attempt(",
         "gate_candidate(",
         "after_fresh_build(",
         "drop_previous(",
@@ -909,14 +911,36 @@ fn every_failed_upgrade_exit_discards_its_candidate() {
     assert_eq!(seq_src.matches("fallback_old(ops, None)").count(), 2);
 }
 
+/// Drop all whitespace so a scan survives rustfmt wrapping (needles go through
+/// the same function).
+fn squash(text: &str) -> String {
+    text.split_whitespace().collect()
+}
+
 #[test]
 fn docker_node_uses_ps_inspect_and_rmi_by_id_only() {
-    let body = non_test(include_str!("diiisco.rs"));
-    assert!(body.contains("self.docker(&[\"ps\", \"-q\"])"));
-    assert!(body.contains("vec![\"inspect\", \"--format\", \"{{.Image}}\"]"));
-    assert!(body.contains("self.docker(&[\"images\", \"-q\", \"--no-trunc\", reference])"));
+    let body = squash(non_test(include_str!("diiisco.rs")));
+    assert!(body.contains(&squash("self.docker(&[\"ps\", \"-q\"])")));
+    assert!(body.contains(&squash("vec![\"inspect\", \"--format\", \"{{.Image}}\"]")));
+    assert!(body.contains(&squash(
+        "self.docker(&[\"images\", \"-q\", \"--no-trunc\", reference])"
+    )));
     assert_eq!(body.matches("\"rmi\"").count(), 1);
-    assert!(body.contains("self.docker(&[\"rmi\", id])"));
+    assert!(body.contains(&squash("self.docker(&[\"rmi\", id])")));
+}
+
+#[test]
+fn install_records_its_attempt_only_after_the_build_has_run() {
+    let body = non_test(include_str!("diiisco.rs"));
+    let install = body.split("async fn install(&self)").nth(1).unwrap();
+    let install = install.split("async fn start(").next().unwrap();
+    let build = install.find("\"compose\", \"build\"").unwrap();
+    for needle in ["record_attempt(", "record_install_attempt("] {
+        for (i, _) in install.match_indices(needle) {
+            assert!(build < i, "{needle} at {i} precedes the build at {build}");
+        }
+        assert!(install.contains(needle), "{needle} missing");
+    }
 }
 
 // ------------------------------------------------------- K3 (Dockerfile)

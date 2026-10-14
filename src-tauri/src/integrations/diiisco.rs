@@ -387,10 +387,6 @@ impl Integration for DiiiscoIntegration {
         } else {
             None
         };
-        // Recorded before the build and cleared only on success, so an
-        // interrupted install counts as a failed one.
-        diiisco_rebuild::record_attempt(&deploy_dir, &tag, now)
-            .map_err(|e| anyhow::anyhow!("cannot record the rebuild attempt: {e}"))?;
         info!("Building Diiisco Docker image");
         let built = node_cmd(
             &deploy_dir,
@@ -406,6 +402,7 @@ impl Integration for DiiiscoIntegration {
         let output = match built {
             Ok(o) => o,
             Err(e) => {
+                record_install_attempt(&deploy_dir, &tag);
                 diiisco_rebuild::NodeOps::discard_candidate(&node, &tag);
                 return Err(e.into());
             }
@@ -419,8 +416,18 @@ impl Integration for DiiiscoIntegration {
                 &deploy_dir,
             );
             warn!(stderr = %stderr, "docker compose build failed (full output)");
+            record_install_attempt(&deploy_dir, &tag);
             diiisco_rebuild::NodeOps::discard_candidate(&node, &tag);
             anyhow::bail!("docker compose build failed: {}", tail_lines(&stderr, 15));
+        }
+        // Recorded only once the build has finished (cleared on success), so an
+        // install dropped by the outer timeout mid-build leaves no backoff,
+        // while a failed build or a failed F2 gate blocks re-entry.
+        if let Err(e) =
+            diiisco_rebuild::record_attempt(&deploy_dir, &tag, diiisco_rebuild::unix_now())
+        {
+            diiisco_rebuild::NodeOps::discard_candidate(&node, &tag);
+            anyhow::bail!("cannot record the rebuild attempt: {e}");
         }
         // F2: the candidate runs and proves the device key before it becomes
         // `latest`; a rejected one is removed and the previous node restored.
@@ -646,6 +653,13 @@ fn node_cmd(
         }
     }
     c
+}
+
+/// Best-effort record of a failed install attempt for `tag`.
+fn record_install_attempt(deploy: &std::path::Path, tag: &str) {
+    if let Err(e) = diiisco_rebuild::record_attempt(deploy, tag, diiisco_rebuild::unix_now()) {
+        warn!(error = %e, "Diiisco: cannot record the failed install attempt");
+    }
 }
 
 /// Docker output with the bearer and the device key masked, for any log line
