@@ -498,11 +498,18 @@ pub(super) fn after_fresh_build<O: NodeOps + ?Sized>(
 /// that exists, is not `latest`, and is not used by a running container goes;
 /// an unknown container list (`None`) keeps everything.
 pub(super) fn candidate_to_remove(
-    _cand: Option<&str>,
-    _latest: Option<&str>,
-    _running: Option<&[String]>,
+    cand: Option<&str>,
+    latest: Option<&str>,
+    running: Option<&[String]>,
 ) -> Option<String> {
-    None
+    let cand = cand?;
+    if latest == Some(cand) {
+        return None;
+    }
+    if running?.iter().any(|r| r == cand) {
+        return None;
+    }
+    Some(cand.to_string())
 }
 
 /// Remove the failed candidate `diiisco-node:<tag>` BY ID, never by tag pattern
