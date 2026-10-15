@@ -714,7 +714,18 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
             ops.discard_candidate(&tag);
             return Ok(Outcome::Stopped);
         }
-        after_fresh_build(ops, dir, &tag, key_fp, pin_sha)?;
+        match gate_candidate(ops, &tag, false).await {
+            Gate::Pass => after_fresh_build(ops, dir, &tag, key_fp, pin_sha)?,
+            Gate::Rejected => {
+                if let Err(e) = record_attempt(dir, &tag, now) {
+                    warn!(error = %e, "Diiisco: cannot record rebuild attempt after a rejected fresh node");
+                }
+                anyhow::bail!(
+                    "the new Diiisco node did not prove the device key on start; nothing was promoted"
+                );
+            }
+            Gate::Stopped => return Ok(Outcome::Stopped),
+        }
         ops.down();
         if ops.stop_requested() {
             return Ok(Outcome::Stopped);
