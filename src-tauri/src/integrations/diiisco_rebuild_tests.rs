@@ -486,6 +486,8 @@ async fn a_missing_image_builds_even_inside_a_backoff_and_tags_before_stamping()
         vec![
             "refresh_dockerfile".to_string(),
             format!("build:{t}"),
+            format!("up_no_build:{t}"),
+            "probe".to_string(),
             format!("tag_latest:{t}"),
             "down".to_string(),
             "up_plain".to_string()
@@ -861,6 +863,8 @@ async fn disabled_rebuild_still_builds_when_there_is_no_image() {
         vec![
             "refresh_dockerfile".to_string(),
             format!("build:{t}"),
+            format!("up_no_build:{t}"),
+            "probe".to_string(),
             format!("tag_latest:{t}"),
             "down".to_string(),
             "up_plain".to_string()
