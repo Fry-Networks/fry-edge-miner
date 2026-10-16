@@ -496,12 +496,10 @@ pub(super) trait NodeOps: Send + Sync {
     }
     fn rmi_by_id(&self, id: &str);
     /// The tag recorded in the current image stamp, if any.
-    #[allow(dead_code)]
     fn stamp_tag(&self) -> Option<String> {
         None
     }
     /// Re-point `diiisco-node:<tag>` at image `id`. Default: nothing.
-    #[allow(dead_code)]
     fn retag_alias(&self, _tag: &str, _id: &str) -> Result<()> {
         Ok(())
     }
@@ -614,7 +612,19 @@ pub(super) fn discard_candidate_by_id<O: NodeOps + ?Sized>(ops: &O, tag: &str) {
     let (cand, latest) = (cand.into_id(), latest.into_id());
     let running = ops.running_image_ids();
     match candidate_to_remove(cand.as_deref(), latest.as_deref(), running.as_deref()) {
-        Some(id) => ops.rmi_labeled(&id, "failed candidate image"),
+        Some(id) => {
+            ops.rmi_labeled(&id, "failed candidate image");
+            // A rebuild of the stamped tag re-points `diiisco-node:<tag>` at
+            // the candidate; removing the candidate by id takes that alias
+            // with it, so give `latest` its alias back.
+            if ops.stamp_tag().as_deref() == Some(tag) {
+                if let Some(latest) = latest.as_deref() {
+                    if let Err(e) = ops.retag_alias(tag, latest) {
+                        warn!(error = %e, "Diiisco: could not restore the image alias");
+                    }
+                }
+            }
+        }
         None if cand.is_some() => {
             warn!("Diiisco: failed candidate image kept (in use, current, or containers unknown)");
         }

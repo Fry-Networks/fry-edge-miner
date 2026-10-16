@@ -895,6 +895,19 @@ impl diiisco_rebuild::NodeOps for DockerNode {
         Ok(())
     }
 
+    fn stamp_tag(&self) -> Option<String> {
+        diiisco_rebuild::read_stamp(&self.deploy).map(|s| s.tag)
+    }
+
+    fn retag_alias(&self, tag: &str, id: &str) -> Result<()> {
+        let out = self.docker(&["tag", id, &format!("diiisco-node:{tag}")])?;
+        if !out.status.success() {
+            let stderr = self.redact(&String::from_utf8_lossy(&out.stderr));
+            anyhow::bail!("docker tag failed: {}", tail_lines(&stderr, 5));
+        }
+        Ok(())
+    }
+
     fn retag_latest(&self, id: &str) -> Result<()> {
         let out = self.docker(&["tag", id, diiisco_rebuild::LATEST_REF])?;
         if !out.status.success() {
