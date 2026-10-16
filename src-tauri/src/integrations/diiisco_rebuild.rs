@@ -495,6 +495,16 @@ pub(super) trait NodeOps: Send + Sync {
         Ok(())
     }
     fn rmi_by_id(&self, id: &str);
+    /// The tag recorded in the current image stamp, if any.
+    #[allow(dead_code)]
+    fn stamp_tag(&self) -> Option<String> {
+        None
+    }
+    /// Re-point `diiisco-node:<tag>` at image `id`. Default: nothing.
+    #[allow(dead_code)]
+    fn retag_alias(&self, _tag: &str, _id: &str) -> Result<()> {
+        Ok(())
+    }
     /// `rmi_by_id` with a name for what is being removed, used in the log
     /// line. Default: ignores the name.
     fn rmi_labeled(&self, id: &str, _what: &str) {

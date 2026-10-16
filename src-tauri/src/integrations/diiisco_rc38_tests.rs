@@ -45,6 +45,8 @@ struct R {
     tag_ok: bool,
     stop_on_build: bool,
     build_ok: bool,
+    /// The tag in the current image stamp.
+    stamp_tag: Option<String>,
     /// References whose lookup FAILS (docker error), as opposed to absent.
     error_refs: Vec<String>,
 }
@@ -66,6 +68,7 @@ impl R {
             tag_ok: true,
             stop_on_build: false,
             build_ok: true,
+            stamp_tag: None,
             error_refs: Vec::new(),
         }
     }
@@ -180,6 +183,13 @@ impl NodeOps for R {
         }
         self.promoted.store(true, Ordering::SeqCst);
         self.present.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+    fn stamp_tag(&self) -> Option<String> {
+        self.stamp_tag.clone()
+    }
+    fn retag_alias(&self, t: &str, id: &str) -> Result<()> {
+        self.rec(format!("retag_alias:{t}:{id}"));
         Ok(())
     }
     fn retag_latest(&self, id: &str) -> Result<()> {
@@ -677,4 +687,56 @@ fn g7_docker_node_has_no_fixed_previous_image_wording() {
     let body = src.split("#[cfg(test)]").next().unwrap();
     assert!(!body.contains("removed the previous node image"));
     assert!(!body.contains("previous node image not removed"));
+}
+
+// ------------------------------------------------------------------- G8
+
+#[test]
+fn g8_a_failed_candidate_that_took_the_stamp_tag_gives_the_alias_back() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    r.stamp_tag = Some(tag());
+    *r.container.lock().unwrap() = Some(OLD.into());
+    discard_candidate_by_id(&r, &tag());
+    let c = r.calls();
+    assert!(
+        c.contains(&format!("retag_alias:{}:{OLD}", tag())),
+        "the alias must be re-pointed at latest: {c:?}"
+    );
+    assert!(
+        at(&c, &format!("rmi:{NEW}")) < at(&c, &format!("retag_alias:{}:{OLD}", tag())),
+        "latest keeps its fem- alias: {c:?}"
+    );
+}
+
+#[test]
+fn g8_no_alias_is_touched_when_the_stamp_tag_is_another_tag() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    r.stamp_tag = Some("fem-000000000000".into());
+    *r.container.lock().unwrap() = Some(OLD.into());
+    discard_candidate_by_id(&r, &tag());
+    let c = r.calls();
+    assert!(
+        c.contains(&format!("rmi:{NEW}")),
+        "control: the candidate went: {c:?}"
+    );
+    assert!(!r.has_prefix("retag_alias"), "{c:?}");
+}
+
+#[test]
+fn g8_nothing_is_retagged_when_the_candidate_is_kept() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    r.stamp_tag = Some(tag());
+    r.error_refs = vec![LATEST_REF.to_string()];
+    discard_candidate_by_id(&r, &tag());
+    assert!(
+        !r.has_prefix("rmi") && !r.has_prefix("retag_alias"),
+        "{:?}",
+        r.calls()
+    );
 }
