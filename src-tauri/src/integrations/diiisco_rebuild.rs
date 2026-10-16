@@ -339,8 +339,22 @@ pub(super) fn record_attempt(dir: &Path, tag: &str, now: u64) -> std::io::Result
 
 /// Put the backoff back as it was before an attempt that turned out to be a
 /// user stop (a stop is not a failure): the previous record, or none.
-#[allow(dead_code)]
-pub(super) fn rollback_attempt(_dir: &Path, _prior: Option<Backoff>) {}
+pub(super) fn rollback_attempt(dir: &Path, prior: Option<Backoff>) {
+    let Some(b) = prior else {
+        clear_backoff(dir);
+        return;
+    };
+    if let Err(e) = write_atomic(
+        dir,
+        BACKOFF_FILE,
+        &format!(
+            "attempts={}\nlast={}\ntag={}\n",
+            b.attempts, b.last_unix, b.tag
+        ),
+    ) {
+        warn!(error = %e, "Diiisco: could not restore the rebuild backoff");
+    }
+}
 
 pub(super) fn clear_backoff(dir: &Path) {
     if let Err(e) = std::fs::remove_file(dir.join(BACKOFF_FILE)) {

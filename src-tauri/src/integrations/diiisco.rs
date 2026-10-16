@@ -423,6 +423,7 @@ impl Integration for DiiiscoIntegration {
         // Recorded only once the build has finished (cleared on success), so an
         // install dropped by the outer timeout mid-build leaves no backoff,
         // while a failed build or a failed F2 gate blocks re-entry.
+        let prior_backoff = diiisco_rebuild::read_backoff(&deploy_dir);
         if let Err(e) =
             diiisco_rebuild::record_attempt(&deploy_dir, &tag, diiisco_rebuild::unix_now())
         {
@@ -436,7 +437,12 @@ impl Integration for DiiiscoIntegration {
             diiisco_rebuild::Gate::Rejected => anyhow::bail!(
                 "the new Diiisco node did not prove the device key; the previous node image was kept"
             ),
-            diiisco_rebuild::Gate::Stopped => return Ok(()),
+            diiisco_rebuild::Gate::Stopped => {
+                // A user stop is not a failed attempt and promoted nothing:
+                // no backoff, and callers must not treat this as installed.
+                diiisco_rebuild::rollback_attempt(&deploy_dir, prior_backoff);
+                anyhow::bail!("Diiisco install was stopped; nothing was promoted")
+            }
         }
         // `latest` is the single moving alias for the current-good image; tag
         // it BEFORE the stamp so an env-less recovery `up` finds it.
