@@ -96,3 +96,30 @@ fn health_check_asks_for_the_container_before_it_sends_the_http_request() {
     );
     assert!(at("node_container_running()") < at("health_gate("));
 }
+
+// ------------------------------------------- the `docker ps -q` verdict
+
+use super::parse_node_running;
+
+#[test]
+fn an_id_line_means_the_node_container_is_running() {
+    assert_eq!(parse_node_running(true, b"3f9a1c0d2b7e\n"), Some(true));
+    assert_eq!(parse_node_running(true, b"3f9a1c0d2b7e"), Some(true));
+}
+
+#[test]
+fn empty_or_blank_output_means_not_running() {
+    assert_eq!(parse_node_running(true, b""), Some(false));
+    assert_eq!(parse_node_running(true, b"\n  \n\t\n"), Some(false));
+}
+
+#[test]
+fn a_failed_docker_call_is_unknown_whatever_it_printed() {
+    assert_eq!(parse_node_running(false, b""), None);
+    assert_eq!(parse_node_running(false, b"3f9a1c0d2b7e\n"), None);
+    // and unknown becomes Unhealthy, never Healthy
+    assert!(matches!(
+        health_gate(parse_node_running(false, b"")),
+        Err(HealthStatus::Unhealthy(m)) if m == "cannot verify node container"
+    ));
+}
