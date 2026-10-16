@@ -4,8 +4,8 @@
 //! container still uses conflicts, as Docker does. Synthetic values only.
 use super::super::diiisco_rebuild::{
     discard_candidate_by_id, drop_previous, fp12, gate_candidate, image_tag, read_backoff,
-    read_stamp, reject_candidate, rollback_latest, run_node_sequence, Gate, ImageLookup, NodeOps,
-    Outcome, LATEST_REF, STAMP_FILE,
+    read_stamp, record_attempt, reject_candidate, rollback_attempt, rollback_latest,
+    run_node_sequence, Gate, ImageLookup, NodeOps, Outcome, LATEST_REF, STAMP_FILE,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -489,5 +489,49 @@ fn m4_install_rolls_latest_back_before_rejecting_a_candidate_whose_stamp_failed(
     assert!(
         a < r && r < j,
         "after_fresh_build {a}, rollback_latest {r}, reject {j}"
+    );
+}
+
+// ------------------------------------------------------------------- m5
+
+#[test]
+fn m5_rollback_attempt_restores_the_prior_record_or_clears_it() {
+    let d = tempfile::tempdir().unwrap();
+    record_attempt(d.path(), &tag(), 10).unwrap();
+    rollback_attempt(d.path(), None);
+    assert!(read_backoff(d.path()).is_none(), "no prior record: cleared");
+
+    record_attempt(d.path(), &tag(), 10).unwrap();
+    let prior = read_backoff(d.path());
+    record_attempt(d.path(), &tag(), 99).unwrap();
+    assert_eq!(read_backoff(d.path()).map(|b| b.attempts), Some(2));
+    rollback_attempt(d.path(), prior.clone());
+    assert_eq!(read_backoff(d.path()), prior, "the prior record is back");
+}
+
+#[test]
+fn m5_install_reports_a_stopped_gate_as_an_error_and_undoes_its_attempt() {
+    let src = include_str!("diiisco.rs");
+    let body = src.split("#[cfg(test)]").next().unwrap();
+    let install = body.split("async fn install(&self)").nth(1).unwrap();
+    let install = install.split("async fn start(").next().unwrap();
+    assert!(
+        !install.contains("Gate::Stopped => return Ok(())"),
+        "a stopped install must not look installed"
+    );
+    let arm = install
+        .split("Gate::Stopped =>")
+        .nth(1)
+        .unwrap_or("")
+        .split("// `latest`")
+        .next()
+        .unwrap_or("");
+    assert!(arm.contains("rollback_attempt("), "arm: {arm}");
+    assert!(arm.contains("bail!("), "arm: {arm}");
+    let prior = install.find("read_backoff(").unwrap_or(usize::MAX);
+    let record = install.find("record_attempt(").unwrap();
+    assert!(
+        prior < record,
+        "the prior record is read before the new one"
     );
 }
