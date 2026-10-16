@@ -789,17 +789,24 @@ impl DockerNode {
     }
 
     /// The single `docker rmi <id>` call site. `what` names the image in the log.
-    fn rmi_logged(&self, id: &str, what: &str) {
+    fn rmi_logged(&self, id: &str, what: &str) -> bool {
         match self.docker(&["rmi", id]) {
             Ok(o) if o.status.success() => {
-                info!("{}", diiisco_rebuild::rmi_log_text(what, true))
+                info!("{}", diiisco_rebuild::rmi_log_text(what, true));
+                true
             }
-            Ok(o) => warn!(
-                stderr = %self.redact(&String::from_utf8_lossy(&o.stderr)),
-                "{}",
-                diiisco_rebuild::rmi_log_text(what, false)
-            ),
-            Err(e) => warn!(error = %e, "{}", diiisco_rebuild::rmi_log_text(what, false)),
+            Ok(o) => {
+                warn!(
+                    stderr = %self.redact(&String::from_utf8_lossy(&o.stderr)),
+                    "{}",
+                    diiisco_rebuild::rmi_log_text(what, false)
+                );
+                false
+            }
+            Err(e) => {
+                warn!(error = %e, "{}", diiisco_rebuild::rmi_log_text(what, false));
+                false
+            }
         }
     }
 
@@ -1047,12 +1054,11 @@ impl diiisco_rebuild::NodeOps for DockerNode {
     }
 
     fn rmi_by_id(&self, id: &str) {
-        self.rmi_logged(id, "image")
+        self.rmi_logged(id, "image");
     }
 
     fn rmi_labeled(&self, id: &str, what: &str) -> bool {
-        self.rmi_logged(id, what);
-        true
+        self.rmi_logged(id, what)
     }
 
     fn discard_candidate(&self, tag: &str) {

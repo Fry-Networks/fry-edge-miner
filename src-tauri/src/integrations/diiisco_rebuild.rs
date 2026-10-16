@@ -527,7 +527,8 @@ pub(super) trait NodeOps: Send + Sync {
         Ok(())
     }
     /// `rmi_by_id` with a name for what is being removed, used in the log
-    /// line. Default: ignores the name.
+    /// line; true when the image was removed. Default: ignores the name and
+    /// assumes success (`rmi_by_id` has no result).
     fn rmi_labeled(&self, id: &str, _what: &str) -> bool {
         self.rmi_by_id(id);
         true
@@ -759,8 +760,10 @@ pub(super) fn sweep_stale_candidates<O: NodeOps + ?Sized>(
         new_id,
     };
     for id in sweep_targets(&sets, &|id| ops.image_built_by_fem(id)) {
-        ops.rmi_labeled(&id, "stale candidate image");
-        ledger_remove(dir, &id);
+        // Only a removal that happened takes the id off the ledger.
+        if ops.rmi_labeled(&id, "stale candidate image") {
+            ledger_remove(dir, &id);
+        }
     }
 }
 
@@ -819,7 +822,11 @@ pub(super) fn discard_candidate_by_id<O: NodeOps + ?Sized>(ops: &O, tag: &str) {
     let running = ops.running_image_ids();
     match candidate_to_remove(cand.as_deref(), latest.as_deref(), running.as_deref()) {
         Some(id) => {
-            ops.rmi_labeled(&id, "failed candidate image");
+            if !ops.rmi_labeled(&id, "failed candidate image") {
+                // Still there: keep its ledger entry and leave fem-<tag> where it is.
+                warn!("Diiisco: failed candidate image not removed (kept on the ledger)");
+                return;
+            }
             ops.forget_candidate(&id);
             // A rebuild of the stamped tag re-points `diiisco-node:<tag>` at
             // the candidate; removing the candidate by id takes that alias
