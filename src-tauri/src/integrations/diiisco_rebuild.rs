@@ -495,6 +495,35 @@ pub(super) trait NodeOps: Send + Sync {
         Ok(())
     }
     fn rmi_by_id(&self, id: &str);
+    /// Image ids of ALL containers, running or stopped; `None` = unknown.
+    #[allow(dead_code)]
+    fn all_container_image_ids(&self) -> Option<Vec<String>> {
+        Some(Vec::new())
+    }
+    /// Images of repo `diiisco-node` with their tags; `None` = unknown.
+    #[allow(dead_code)]
+    fn list_node_images(&self) -> Option<Vec<ImageRef>> {
+        Some(Vec::new())
+    }
+    /// Count of dangling (untagged) images, for the log only.
+    #[allow(dead_code)]
+    fn dangling_image_count(&self) -> Option<usize> {
+        Some(0)
+    }
+    /// True when the image's history shows it was built from FEM's Dockerfile.
+    #[allow(dead_code)]
+    fn image_built_by_fem(&self, _id: &str) -> bool {
+        false
+    }
+    /// Record the id of the just-built candidate `tag` in the candidate
+    /// ledger and return it. Default: nothing recorded, no id.
+    #[allow(dead_code)]
+    fn record_candidate(&self, _tag: &str) -> Option<String> {
+        None
+    }
+    /// A candidate image was removed: drop it from the ledger.
+    #[allow(dead_code)]
+    fn forget_candidate(&self, _id: &str) {}
     /// The tag recorded in the current image stamp, if any.
     fn stamp_tag(&self) -> Option<String> {
         None
@@ -556,6 +585,66 @@ pub(super) fn after_fresh_build<O: NodeOps + ?Sized>(
     )?;
     clear_backoff(dir);
     Ok(())
+}
+
+/// One image of repo `diiisco-node`: its id and its tag (`None` = untagged).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ImageRef {
+    pub id: String,
+    pub tag: Option<String>,
+}
+
+#[allow(dead_code)]
+pub(super) const LEDGER_FILE: &str = "candidate-ids.ledger";
+
+#[allow(dead_code)]
+pub(super) fn ledger_read(_dir: &Path) -> Vec<String> {
+    Vec::new()
+}
+
+#[allow(dead_code)]
+pub(super) fn ledger_add(_dir: &Path, _id: &str) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub(super) fn ledger_remove(_dir: &Path, _id: &str) {}
+
+/// Parse `docker images ... --format "{{.ID}} {{.Tag}}"` output.
+#[allow(dead_code)]
+pub(super) fn parse_image_listing(_text: &str) -> Vec<ImageRef> {
+    Vec::new()
+}
+
+/// True when a `docker history` dump shows FEM's Dockerfile built the image.
+#[allow(dead_code)]
+pub(super) fn history_is_fem(_text: &str) -> bool {
+    false
+}
+
+/// What the sweep decides from.
+#[allow(dead_code)]
+pub(super) struct SweepSets<'a> {
+    pub ledger: &'a [String],
+    pub images: &'a [ImageRef],
+    pub containers: &'a [String],
+    pub running: &'a [String],
+    pub new_id: &'a str,
+}
+
+/// PURE. The image ids a successful promotion may remove.
+#[allow(dead_code)]
+pub(super) fn sweep_targets(_s: &SweepSets, _fem_built: &dyn Fn(&str) -> bool) -> Vec<String> {
+    Vec::new()
+}
+
+/// After a successful promotion: remove stale FEM-created candidate images.
+#[allow(dead_code)]
+pub(super) fn sweep_stale_candidates<O: NodeOps + ?Sized>(
+    _ops: &O,
+    _dir: &Path,
+    _new_id: Option<&str>,
+) {
 }
 
 /// The log line for one image removal: it names WHAT was removed (the previous

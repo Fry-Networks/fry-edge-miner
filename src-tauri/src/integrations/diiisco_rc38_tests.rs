@@ -3,9 +3,10 @@
 //! container (stopped), only `down` removes it, and `rmi` of an image a
 //! container still uses conflicts, as Docker does. Synthetic values only.
 use super::super::diiisco_rebuild::{
-    discard_candidate_by_id, drop_previous, fp12, gate_candidate, image_tag, read_backoff,
-    read_stamp, record_attempt, reject_candidate, rmi_log_text, rollback_attempt, rollback_latest,
-    run_node_sequence, Gate, ImageLookup, NodeOps, Outcome, BACKOFF_FILE, LATEST_REF, STAMP_FILE,
+    discard_candidate_by_id, drop_previous, fp12, gate_candidate, image_tag, ledger_add,
+    ledger_read, ledger_remove, read_backoff, read_stamp, record_attempt, reject_candidate,
+    rmi_log_text, rollback_attempt, rollback_latest, run_node_sequence, Gate, ImageLookup,
+    ImageRef, NodeOps, Outcome, BACKOFF_FILE, LATEST_REF, STAMP_FILE,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -47,6 +48,12 @@ struct R {
     build_ok: bool,
     /// The tag in the current image stamp.
     stamp_tag: Option<String>,
+    /// `diiisco-node` images as listed (`None` = the listing failed).
+    images: Option<Vec<ImageRef>>,
+    /// The running-container list is unknown (docker failed).
+    running_unknown: bool,
+    /// Ids whose history shows FEM's Dockerfile.
+    fem_ids: Vec<String>,
     /// References whose lookup FAILS (docker error), as opposed to absent.
     error_refs: Vec<String>,
 }
@@ -69,6 +76,9 @@ impl R {
             stop_on_build: false,
             build_ok: true,
             stamp_tag: None,
+            images: Some(Vec::new()),
+            running_unknown: false,
+            fem_ids: Vec::new(),
             error_refs: Vec::new(),
         }
     }
@@ -185,6 +195,20 @@ impl NodeOps for R {
         self.present.store(true, Ordering::SeqCst);
         Ok(())
     }
+    fn list_node_images(&self) -> Option<Vec<ImageRef>> {
+        self.images.clone()
+    }
+    fn image_built_by_fem(&self, id: &str) -> bool {
+        self.fem_ids.iter().any(|f| f == id)
+    }
+    fn record_candidate(&self, t: &str) -> Option<String> {
+        self.rec(format!("record_candidate:{t}"));
+        ledger_add(&self.dir, NEW).ok()?;
+        Some(NEW.into())
+    }
+    fn forget_candidate(&self, id: &str) {
+        ledger_remove(&self.dir, id);
+    }
     fn stamp_tag(&self) -> Option<String> {
         self.stamp_tag.clone()
     }
@@ -216,6 +240,9 @@ impl NodeOps for R {
     }
     /// `compose stop` leaves a stopped container: not running, still present.
     fn running_image_ids(&self) -> Option<Vec<String>> {
+        if self.running_unknown {
+            return None;
+        }
         let c = self.container.lock().unwrap().clone();
         Some(if self.stop.load(Ordering::SeqCst) {
             Vec::new()
@@ -739,4 +766,176 @@ fn g8_nothing_is_retagged_when_the_candidate_is_kept() {
         "{:?}",
         r.calls()
     );
+}
+
+// ----------------------------------------------------- G2: the promotion sweep
+
+const STALE: &str = "sha256:stale";
+const LEG: &str = "sha256:legacy";
+
+fn swept(r: &R, id: &str) -> bool {
+    r.calls().contains(&format!("rmi:{id}"))
+}
+
+fn no_sweep(r: &R) -> bool {
+    !r.calls()
+        .iter()
+        .any(|c| c == "rmi_label:stale candidate image")
+}
+
+fn stale_world(r: &mut R, dir: &Path) {
+    ledger_add(dir, STALE).unwrap();
+    r.images = Some(vec![
+        ImageRef {
+            id: LEG.into(),
+            tag: Some("fem-0123456789ab".into()),
+        },
+        ImageRef {
+            id: "sha256:foreign".into(),
+            tag: Some("v1".into()),
+        },
+    ]);
+    r.fem_ids = vec![LEG.into()];
+}
+
+#[tokio::test]
+async fn g2_a_promoted_upgrade_sweeps_stale_candidates_and_nothing_else() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    stale_world(&mut r, d.path());
+    assert_eq!(seq(&r).await.ok(), Some(Outcome::Upgraded));
+    let c = r.calls();
+    assert!(swept(&r, STALE) && swept(&r, LEG), "{c:?}");
+    assert!(!swept(&r, "sha256:foreign"), "{c:?}");
+    assert!(!swept(&r, NEW), "the promoted image stays: {c:?}");
+    assert!(
+        c.contains(&"rmi_label:stale candidate image".to_string()),
+        "{c:?}"
+    );
+    assert!(
+        at(&c, &format!("tag_latest:{}", tag())) < at(&c, &format!("rmi:{STALE}")),
+        "sweep only after the promotion: {c:?}"
+    );
+    assert!(
+        ledger_read(d.path()).is_empty(),
+        "the swept and promoted ids are off the ledger"
+    );
+}
+
+#[tokio::test]
+async fn g2_a_promoted_fresh_start_sweeps_stale_candidates() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), false);
+    stale_world(&mut r, d.path());
+    assert_eq!(seq(&r).await.ok(), Some(Outcome::BuiltFresh));
+    let c = r.calls();
+    assert!(swept(&r, STALE) && swept(&r, LEG), "{c:?}");
+    assert!(!swept(&r, NEW) && !swept(&r, "sha256:foreign"), "{c:?}");
+}
+
+#[tokio::test]
+async fn g2_no_sweep_after_a_failed_promotion() {
+    // upgrade: probe rejects / tag fails / stamp fails; fresh: probe rejects
+    type Setup = fn(&mut R, &Path);
+    let cases: [(&str, bool, Setup); 4] = [
+        ("upgrade probe", true, |r, _| r.probe_ok = false),
+        ("upgrade tag", true, |r, _| r.tag_ok = false),
+        ("upgrade stamp", true, |_, d| break_stamp(d)),
+        ("fresh probe", false, |r, _| r.probe_ok = false),
+    ];
+    for (name, have_image, set) in cases {
+        let d = tempfile::tempdir().unwrap();
+        let mut r = R::new(d.path(), have_image);
+        stale_world(&mut r, d.path());
+        set(&mut r, d.path());
+        let _ = seq(&r).await;
+        assert!(
+            !swept(&r, STALE) && !swept(&r, LEG),
+            "{name}: {:?}",
+            r.calls()
+        );
+        assert!(no_sweep(&r), "{name}: {:?}", r.calls());
+    }
+}
+
+#[tokio::test]
+async fn g2_no_sweep_after_a_stop() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    stale_world(&mut r, d.path());
+    r.stop_on_probe = true;
+    assert_eq!(seq(&r).await.ok(), Some(Outcome::Stopped));
+    assert!(!swept(&r, STALE) && !swept(&r, LEG), "{:?}", r.calls());
+}
+
+#[tokio::test]
+async fn g2_unknown_container_state_removes_nothing() {
+    for what in ["running", "listing"] {
+        let d = tempfile::tempdir().unwrap();
+        let mut r = R::new(d.path(), true);
+        stale_world(&mut r, d.path());
+        // the promotion itself needs the running list for nothing; only the sweep reads it
+        if what == "running" {
+            r.running_unknown = true;
+        } else {
+            r.images = None;
+        }
+        assert_eq!(seq(&r).await.ok(), Some(Outcome::Upgraded), "{what}");
+        assert!(
+            !swept(&r, STALE) && !swept(&r, LEG),
+            "{what}: {:?}",
+            r.calls()
+        );
+    }
+}
+
+#[tokio::test]
+async fn g2_the_candidate_is_recorded_in_the_ledger_right_after_its_build() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.probe_ok = false;
+    let _ = seq(&r).await;
+    let c = r.calls();
+    let b = at(&c, &format!("build:{}", tag()));
+    assert_eq!(
+        at(&c, &format!("record_candidate:{}", tag())),
+        b + 1,
+        "the ledger entry follows the build immediately: {c:?}"
+    );
+}
+
+#[test]
+fn g2_install_records_the_candidate_and_sweeps_after_the_previous_image_is_dropped() {
+    let src = include_str!("diiisco.rs");
+    let body = src.split("#[cfg(test)]").next().unwrap();
+    let install = body.split("async fn install(&self)").nth(1).unwrap();
+    let install = install.split("async fn start(").next().unwrap();
+    let at = |n: &str| install.find(n).unwrap_or(usize::MAX);
+    assert!(
+        at("\"compose\", \"build\"") < at("record_candidate("),
+        "ledger after the build"
+    );
+    assert!(
+        at("record_candidate(") < at("gate_candidate("),
+        "ledger before the gate"
+    );
+    assert!(
+        at("drop_previous(") < at("sweep_stale_candidates("),
+        "sweep after drop_previous"
+    );
+    assert_ne!(at("sweep_stale_candidates("), usize::MAX);
+}
+
+#[test]
+fn g2_the_sweep_adds_no_second_rmi_site() {
+    let src = include_str!("diiisco.rs");
+    let body = src.split("#[cfg(test)]").next().unwrap();
+    assert_eq!(body.matches("\"rmi\"").count(), 1);
+    let reb = include_str!("diiisco_rebuild.rs");
+    let reb = reb.split("#[cfg(test)]").next().unwrap();
+    assert!(
+        !reb.contains("\"rmi\""),
+        "the rebuild module never builds a docker rmi argv"
+    );
+    assert!(!reb.contains("prune"), "no prune anywhere");
 }

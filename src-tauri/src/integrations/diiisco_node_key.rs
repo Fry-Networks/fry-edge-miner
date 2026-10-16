@@ -114,3 +114,7 @@ mod start_gate_tests;
 #[cfg(test)]
 #[path = "diiisco_rc38_tests.rs"]
 mod rc38_tests;
+
+#[cfg(test)]
+#[path = "diiisco_sweep_tests.rs"]
+mod sweep_tests;
