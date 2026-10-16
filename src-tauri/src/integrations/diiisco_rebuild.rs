@@ -748,9 +748,6 @@ pub(super) fn sweep_stale_candidates<O: NodeOps + ?Sized>(
         warn!("Diiisco: stale-candidate sweep skipped (Docker state unknown)");
         return;
     };
-    if let Some(n) = ops.dangling_image_count().filter(|n| *n > 0) {
-        info!("Diiisco: {n} dangling image(s) left in place (not attributable to FEM)");
-    }
     let ledger = ledger_read(dir);
     let sets = SweepSets {
         ledger: &ledger,
@@ -764,6 +761,11 @@ pub(super) fn sweep_stale_candidates<O: NodeOps + ?Sized>(
         if ops.rmi_labeled(&id, "stale candidate image") {
             ledger_remove(dir, &id);
         }
+    }
+    // Counted after the removals: a dangling ledger candidate that was just
+    // removed is not "left in place".
+    if let Some(n) = ops.dangling_image_count().filter(|n| *n > 0) {
+        info!("Diiisco: {n} dangling image(s) left in place (not attributable to FEM)");
     }
 }
 
