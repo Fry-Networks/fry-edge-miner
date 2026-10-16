@@ -198,8 +198,9 @@ pub(super) struct Stamp {
     pub pin_sha: String,
 }
 
-/// One recorded rebuild attempt for `tag`. Recorded BEFORE the build and
-/// cleared only on success, so an interrupted build counts as a failed one.
+/// One recorded rebuild attempt for `tag`. Recorded once the build has
+/// finished (a failed build too) and cleared only on success; a build that a
+/// stop interrupted leaves no record.
 /// Keyed by the target tag: a new key or pin is not held back by an old
 /// failure, while retries of the same target honour the delay.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,6 +338,25 @@ pub(super) fn record_attempt(dir: &Path, tag: &str, now: u64) -> std::io::Result
     )
 }
 
+/// Put the backoff back as it was before an attempt that turned out to be a
+/// user stop (a stop is not a failure): the previous record, or none.
+pub(super) fn rollback_attempt(dir: &Path, prior: Option<Backoff>) {
+    let Some(b) = prior else {
+        clear_backoff(dir);
+        return;
+    };
+    if let Err(e) = write_atomic(
+        dir,
+        BACKOFF_FILE,
+        &format!(
+            "attempts={}\nlast={}\ntag={}\n",
+            b.attempts, b.last_unix, b.tag
+        ),
+    ) {
+        warn!(error = %e, "Diiisco: could not restore the rebuild backoff");
+    }
+}
+
 pub(super) fn clear_backoff(dir: &Path) {
     if let Err(e) = std::fs::remove_file(dir.join(BACKOFF_FILE)) {
         if e.kind() != std::io::ErrorKind::NotFound {
@@ -415,6 +435,25 @@ pub(super) fn redact_node_output(s: &str, secrets: &[&str]) -> String {
         .into_owned()
 }
 
+/// The result of an image lookup: a lookup that FAILED is not an absent image.
+/// Callers keep everything on `Error` (no removal, no guard bypass).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ImageLookup {
+    Present(String),
+    Absent,
+    Error,
+}
+
+impl ImageLookup {
+    /// The id when the image is known to exist; `Absent` and `Error` are `None`.
+    pub(super) fn into_id(self) -> Option<String> {
+        match self {
+            ImageLookup::Present(id) => Some(id),
+            ImageLookup::Absent | ImageLookup::Error => None,
+        }
+    }
+}
+
 /// Everything the sequence needs from Docker. Output handed back in errors is
 /// already redacted.
 #[async_trait]
@@ -433,6 +472,13 @@ pub(super) trait NodeOps: Send + Sync {
     /// otherwise build from a stale (unpinned) copy.
     fn refresh_dockerfile(&self) -> Result<()>;
     fn image_id(&self, reference: &str) -> Option<String>;
+    /// Tri-state lookup; the default maps `image_id` (no error channel).
+    fn image_lookup(&self, reference: &str) -> ImageLookup {
+        match self.image_id(reference) {
+            Some(id) => ImageLookup::Present(id),
+            None => ImageLookup::Absent,
+        }
+    }
     /// `compose build` with `DIIISCO_IMAGE_TAG=<tag>`.
     fn build(&self, tag: &str) -> Result<()>;
     fn down(&self);
@@ -443,7 +489,50 @@ pub(super) trait NodeOps: Send + Sync {
     /// The AM3 auth probe, with bounded retries while the node boots.
     async fn probe(&self) -> bool;
     fn tag_latest(&self, tag: &str) -> Result<()>;
+    /// Point `diiisco-node:latest` back at image `id` (undoing `tag_latest`).
+    /// Default: nothing; Docker-backed impls override.
+    fn retag_latest(&self, _id: &str) -> Result<()> {
+        Ok(())
+    }
     fn rmi_by_id(&self, id: &str);
+    /// Image ids of ALL containers, running or stopped; `None` = unknown.
+    fn all_container_image_ids(&self) -> Option<Vec<String>> {
+        Some(Vec::new())
+    }
+    /// Images of repo `diiisco-node` with their tags; `None` = unknown.
+    fn list_node_images(&self) -> Option<Vec<ImageRef>> {
+        Some(Vec::new())
+    }
+    /// Count of dangling (untagged) images, for the log only.
+    fn dangling_image_count(&self) -> Option<usize> {
+        Some(0)
+    }
+    /// True when the image's history shows it was built from FEM's Dockerfile.
+    fn image_built_by_fem(&self, _id: &str) -> bool {
+        false
+    }
+    /// Record the id of the just-built candidate `tag` in the candidate
+    /// ledger and return it. Default: nothing recorded, no id.
+    fn record_candidate(&self, _tag: &str) -> Option<String> {
+        None
+    }
+    /// A candidate image was removed: drop it from the ledger.
+    fn forget_candidate(&self, _id: &str) {}
+    /// The tag recorded in the current image stamp, if any.
+    fn stamp_tag(&self) -> Option<String> {
+        None
+    }
+    /// Re-point `diiisco-node:<tag>` at image `id`. Default: nothing.
+    fn retag_alias(&self, _tag: &str, _id: &str) -> Result<()> {
+        Ok(())
+    }
+    /// `rmi_by_id` with a name for what is being removed, used in the log
+    /// line; true when the image was removed. Default: ignores the name and
+    /// assumes success (`rmi_by_id` has no result).
+    fn rmi_labeled(&self, id: &str, _what: &str) -> bool {
+        self.rmi_by_id(id);
+        true
+    }
     /// Remove the candidate image `diiisco-node:<tag>` after a failed or
     /// interrupted attempt. Default: nothing; Docker-backed impls override.
     fn discard_candidate(&self, _tag: &str) {}
@@ -494,6 +583,212 @@ pub(super) fn after_fresh_build<O: NodeOps + ?Sized>(
     Ok(())
 }
 
+/// One image of repo `diiisco-node`: its id and its tag (`None` = untagged).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ImageRef {
+    pub id: String,
+    pub tag: Option<String>,
+}
+
+pub(super) const LEDGER_FILE: &str = "candidate-ids.ledger";
+
+pub(super) fn ledger_read(dir: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(dir.join(LEDGER_FILE)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if is_image_id(line) && !out.iter().any(|x| x == line) {
+            out.push(line.to_string());
+        }
+    }
+    out
+}
+
+/// `sha256:` plus exactly 64 lowercase hex digits: the only shape a ledger
+/// line or a listed id may have (it later reaches an argv, so nothing else is
+/// accepted).
+fn is_image_id(s: &str) -> bool {
+    s.strip_prefix("sha256:").is_some_and(|h| is_hex(h, 64))
+}
+
+fn write_ledger(dir: &Path, ids: &[String]) -> std::io::Result<()> {
+    let mut text = ids.join("\n");
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    write_atomic(dir, LEDGER_FILE, &text)
+}
+
+pub(super) fn ledger_add(dir: &Path, id: &str) -> std::io::Result<()> {
+    if !is_image_id(id) {
+        return Ok(());
+    }
+    let mut ids = ledger_read(dir);
+    if ids.iter().any(|x| x == id) {
+        return Ok(());
+    }
+    ids.push(id.to_string());
+    if ids.len() > LEDGER_MAX {
+        ids.drain(..ids.len() - LEDGER_MAX);
+    }
+    write_ledger(dir, &ids)
+}
+
+pub(super) fn ledger_remove(dir: &Path, id: &str) {
+    let ids = ledger_read(dir);
+    if !ids.iter().any(|x| x == id) {
+        return;
+    }
+    let kept: Vec<String> = ids.into_iter().filter(|x| x != id).collect();
+    if let Err(e) = write_ledger(dir, &kept) {
+        warn!(error = %e, "Diiisco: could not update the candidate ledger");
+    }
+}
+
+/// Parse `docker images ... --format "{{.ID}} {{.Tag}}"` output.
+pub(super) fn parse_image_listing(text: &str) -> Vec<ImageRef> {
+    text.lines()
+        .filter_map(|l| {
+            let mut parts = l.split_whitespace();
+            let (id, tag) = (parts.next()?, parts.next()?);
+            (parts.next().is_none() && is_image_id(id)).then(|| ImageRef {
+                id: id.to_string(),
+                tag: (tag != "<none>").then(|| tag.to_string()),
+            })
+        })
+        .collect()
+}
+
+/// True when a `docker history` dump shows FEM's Dockerfile built the image.
+pub(super) fn history_is_fem(text: &str) -> bool {
+    FEM_HISTORY_MARKS.iter().all(|m| text.contains(m))
+}
+
+/// Lines of the final stage of FEM's node Dockerfile, identical in every FEM
+/// Dockerfile since v0.4.37 (`docker history` never shows the builder stage):
+/// the `/build/` copy source, the data dir and the entry point together.
+const FEM_HISTORY_MARKS: [&str; 3] = ["/build/node_modules", "mkdir -p /app/data", "dist/dev.js"];
+
+/// At most this many candidate ids are remembered (oldest dropped).
+const LEDGER_MAX: usize = 64;
+
+/// What the sweep decides from.
+pub(super) struct SweepSets<'a> {
+    pub ledger: &'a [String],
+    pub images: &'a [ImageRef],
+    pub containers: &'a [String],
+    pub running: &'a [String],
+    pub new_id: &'a str,
+}
+
+/// PURE. The image ids a successful promotion may remove.
+///
+/// Never the promoted image, the image of any container (running or stopped),
+/// or an image carrying the `latest` tag. Then either a ledger id (a candidate
+/// this FEM built) or a legacy candidate: every tag of the id is
+/// `fem-<12 hex>` (repo `diiisco-node`, as listed) and its history shows FEM's
+/// Dockerfile. An id with any other tag is somebody's image and stays.
+pub(super) fn sweep_targets(s: &SweepSets, fem_built: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let tags_of = |id: &str| -> Vec<Option<&str>> {
+        s.images
+            .iter()
+            .filter(|i| i.id == id)
+            .map(|i| i.tag.as_deref())
+            .collect()
+    };
+    let protected = |id: &str| {
+        id == s.new_id
+            || s.containers.iter().any(|c| c == id)
+            || s.running.iter().any(|c| c == id)
+            || tags_of(id).contains(&Some("latest"))
+    };
+    let all_fem_tags = |id: &str| tags_of(id).iter().all(|t| t.is_some_and(is_tag));
+    let mut out: Vec<String> = Vec::new();
+    let mut take = |id: &str| {
+        if !out.iter().any(|x| x == id) {
+            out.push(id.to_string());
+        }
+    };
+    for id in s.ledger {
+        if is_image_id(id) && !protected(id) && tags_of(id).iter().all(|t| t.is_none_or(is_tag)) {
+            take(id);
+        }
+    }
+    for img in s.images {
+        let id = img.id.as_str();
+        if is_image_id(id) && !protected(id) && all_fem_tags(id) && fem_built(id) {
+            take(id);
+        }
+    }
+    out
+}
+
+/// After a successful promotion: remove stale FEM-created candidate images.
+///
+/// Fail-closed: without the promoted image's id, or with any unknown listing
+/// (images, containers, running), nothing is removed. Dangling unlabeled
+/// images cannot be attributed to FEM and are only counted. Removal is by id,
+/// through the one `rmi_labeled` path; there is no prune.
+pub(super) fn sweep_stale_candidates<O: NodeOps + ?Sized>(
+    ops: &O,
+    dir: &Path,
+    new_id: Option<&str>,
+) {
+    let Some(new_id) = new_id else {
+        return;
+    };
+    // The promoted image is no longer a candidate.
+    ledger_remove(dir, new_id);
+    let (Some(running), Some(containers), Some(images)) = (
+        ops.running_image_ids(),
+        ops.all_container_image_ids(),
+        ops.list_node_images(),
+    ) else {
+        warn!("Diiisco: stale-candidate sweep skipped (Docker state unknown)");
+        return;
+    };
+    if let Some(n) = ops.dangling_image_count().filter(|n| *n > 0) {
+        info!("Diiisco: {n} dangling image(s) left in place (not attributable to FEM)");
+    }
+    let ledger = ledger_read(dir);
+    let sets = SweepSets {
+        ledger: &ledger,
+        images: &images,
+        containers: &containers,
+        running: &running,
+        new_id,
+    };
+    for id in sweep_targets(&sets, &|id| ops.image_built_by_fem(id)) {
+        // Only a removal that happened takes the id off the ledger.
+        if ops.rmi_labeled(&id, "stale candidate image") {
+            ledger_remove(dir, &id);
+        }
+    }
+}
+
+/// The log line for one image removal: it names WHAT was removed (the previous
+/// node image, a failed candidate, a stale candidate), never a fixed phrase.
+pub(super) fn rmi_log_text(what: &str, removed: bool) -> String {
+    if removed {
+        format!("Diiisco: removed the {what}")
+    } else {
+        format!("Diiisco: {what} not removed (continuing)")
+    }
+}
+
+/// Undo `tag_latest` after a promotion failed later (the stamp could not be
+/// written): `latest` goes back to the previous image so the node that is
+/// restored is the old, proven one. No previous image = nothing to restore.
+pub(super) fn rollback_latest<O: NodeOps + ?Sized>(ops: &O, prev: Option<&str>) {
+    let Some(prev) = prev else {
+        return;
+    };
+    if let Err(e) = ops.retag_latest(prev) {
+        warn!(error = %e, "Diiisco: could not point latest back at the previous image");
+    }
+}
+
 /// The id to remove for a failed candidate, or `None` to keep it. Only an image
 /// that exists, is not `latest`, and is not used by a running container goes;
 /// an unknown container list (`None`) keeps everything.
@@ -516,11 +811,34 @@ pub(super) fn candidate_to_remove(
 /// and never `latest`. Call it only after the candidate's container was stopped
 /// or replaced.
 pub(super) fn discard_candidate_by_id<O: NodeOps + ?Sized>(ops: &O, tag: &str) {
-    let cand = ops.image_id(&format!("diiisco-node:{tag}"));
-    let latest = ops.image_id(LATEST_REF);
+    let cand = ops.image_lookup(&format!("diiisco-node:{tag}"));
+    let latest = ops.image_lookup(LATEST_REF);
+    if cand == ImageLookup::Error || latest == ImageLookup::Error {
+        // A failed lookup is not an absent image: keep everything.
+        warn!("Diiisco: failed candidate image kept (image lookup failed)");
+        return;
+    }
+    let (cand, latest) = (cand.into_id(), latest.into_id());
     let running = ops.running_image_ids();
     match candidate_to_remove(cand.as_deref(), latest.as_deref(), running.as_deref()) {
-        Some(id) => ops.rmi_by_id(&id),
+        Some(id) => {
+            if !ops.rmi_labeled(&id, "failed candidate image") {
+                // Still there: keep its ledger entry and leave fem-<tag> where it is.
+                warn!("Diiisco: failed candidate image not removed (kept on the ledger)");
+                return;
+            }
+            ops.forget_candidate(&id);
+            // A rebuild of the stamped tag re-points `diiisco-node:<tag>` at
+            // the candidate; removing the candidate by id takes that alias
+            // with it, so give `latest` its alias back.
+            if ops.stamp_tag().as_deref() == Some(tag) {
+                if let Some(latest) = latest.as_deref() {
+                    if let Err(e) = ops.retag_alias(tag, latest) {
+                        warn!(error = %e, "Diiisco: could not restore the image alias");
+                    }
+                }
+            }
+        }
         None if cand.is_some() => {
             warn!("Diiisco: failed candidate image kept (in use, current, or containers unknown)");
         }
@@ -535,7 +853,7 @@ fn fallback_old<O: NodeOps + ?Sized>(ops: &O, cand: Option<&str>) -> Result<Outc
     if ops.stop_requested() {
         info!("Diiisco: stopped during rebuild — leaving the node down");
         if let Some(t) = cand {
-            ops.discard_candidate(t);
+            stopped_cleanup(ops, t);
         }
         return Ok(Outcome::Stopped);
     }
@@ -578,32 +896,46 @@ pub(super) async fn gate_candidate<O: NodeOps + ?Sized>(
         }
     }
     if let Err(e) = ops.up_no_build(Some(tag)) {
+        if ops.stop_requested() {
+            stopped_cleanup(ops, tag);
+            return Gate::Stopped;
+        }
         warn!(error = %e, "Diiisco: the new node failed to start");
         reject_candidate(ops, tag, have_image);
         return Gate::Rejected;
     }
-    if !ops.probe().await {
+    // The real probe returns false when it sees a stop, so a false probe with
+    // a stop pending is a stop, not a rejection (no backoff, no error).
+    let proved = ops.probe().await;
+    if ops.stop_requested() {
+        stopped_cleanup(ops, tag);
+        return Gate::Stopped;
+    }
+    if !proved {
         warn!("Diiisco: the new node did not prove the device key");
         reject_candidate(ops, tag, have_image);
         return Gate::Rejected;
     }
-    if ops.stop_requested() {
-        ops.discard_candidate(tag);
-        return Gate::Stopped;
-    }
     Gate::Pass
 }
 
-/// Undo a rejected candidate: stop its container, restore the previous node
-/// when there was one, then discard the candidate image by id. After a `stop()`
-/// nothing is brought up.
+/// A stop is pending and the candidate's container may still exist (`stop()`
+/// only stops it): remove the container, then the candidate image by id, and
+/// bring nothing up. Without the `down` the stopped container keeps the image
+/// and the removal conflicts (the K1 leak).
+fn stopped_cleanup<O: NodeOps + ?Sized>(ops: &O, tag: &str) {
+    ops.down();
+    ops.discard_candidate(tag);
+}
+
+/// Undo a rejected candidate: remove its container, restore the previous node
+/// when there was one and no stop is pending, then discard the candidate image
+/// by id. After a `stop()` nothing is brought up.
 pub(super) fn reject_candidate<O: NodeOps + ?Sized>(ops: &O, tag: &str, have_image: bool) {
-    if !ops.stop_requested() {
-        ops.down();
-        if have_image {
-            if let Err(e) = ops.up_no_build(None) {
-                warn!(error = %e, "Diiisco: could not restore the previous node");
-            }
+    ops.down();
+    if have_image && !ops.stop_requested() {
+        if let Err(e) = ops.up_no_build(None) {
+            warn!(error = %e, "Diiisco: could not restore the previous node");
         }
     }
     ops.discard_candidate(tag);
@@ -615,9 +947,20 @@ pub(super) fn drop_previous<O: NodeOps + ?Sized>(ops: &O, prev: Option<&str>, ta
     let Some(prev) = prev else {
         return;
     };
-    let new_id = ops.image_id(&format!("diiisco-node:{tag}"));
-    if Some(prev) != new_id.as_deref() {
-        ops.rmi_by_id(prev);
+    if previous_to_remove(ops, prev, tag) {
+        ops.rmi_labeled(prev, "previous node image");
+    }
+}
+
+/// True when the PREVIOUS image may go: the new image's id is known and
+/// differs from it. A failed lookup keeps the previous image.
+fn previous_to_remove<O: NodeOps + ?Sized>(ops: &O, prev: &str, tag: &str) -> bool {
+    match ops.image_lookup(&format!("diiisco-node:{tag}")) {
+        ImageLookup::Error => {
+            warn!("Diiisco: previous node image kept (image lookup failed)");
+            false
+        }
+        found => found.into_id().as_deref() != Some(prev),
     }
 }
 
@@ -642,6 +985,14 @@ pub(super) fn install_backoff_check(dir: &Path, tag: &str, now: u64) -> Result<(
         );
     }
     Ok(())
+}
+
+/// Record the attempt of a build that failed (or could not start); a failure
+/// to record only warns.
+fn note_failed_attempt(dir: &Path, tag: &str, now: u64) {
+    if let Err(e) = record_attempt(dir, tag, now) {
+        warn!(error = %e, "Diiisco: cannot record the failed rebuild attempt");
+    }
 }
 
 /// plan -> build -> switch, all under `REBUILD_LOCK`. A second concurrent
@@ -710,12 +1061,22 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
             ops.discard_candidate(&tag);
             return Err(e);
         }
+        let cand_id = ops.record_candidate(&tag);
         if ops.stop_requested() {
             ops.discard_candidate(&tag);
             return Ok(Outcome::Stopped);
         }
         match gate_candidate(ops, &tag, false).await {
-            Gate::Pass => after_fresh_build(ops, dir, &tag, key_fp, pin_sha)?,
+            Gate::Pass => {
+                if let Err(e) = after_fresh_build(ops, dir, &tag, key_fp, pin_sha) {
+                    // The proven candidate is still running: remove it too.
+                    stopped_cleanup(ops, &tag);
+                    if let Err(re) = record_attempt(dir, &tag, now) {
+                        warn!(error = %re, "Diiisco: cannot record rebuild attempt after a failed promotion");
+                    }
+                    return Err(e);
+                }
+            }
             Gate::Rejected => {
                 if let Err(e) = record_attempt(dir, &tag, now) {
                     warn!(error = %e, "Diiisco: cannot record rebuild attempt after a rejected fresh node");
@@ -731,49 +1092,64 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
             return Ok(Outcome::Stopped);
         }
         ops.up_plain()?;
+        sweep_stale_candidates(ops, dir, cand_id.as_deref());
         return Ok(Outcome::BuiltFresh);
     }
 
     // Upgrade: the old container keeps running while the new image builds.
-    let prev_id = ops.image_id(LATEST_REF);
-    if let Err(e) = record_attempt(dir, &tag, now) {
-        warn!(error = %e, "Diiisco: cannot record rebuild attempt — keeping the current node");
-        return fallback_old(ops, None);
-    }
+    let prev_id = ops.image_lookup(LATEST_REF).into_id();
+    // The attempt is recorded once the build has finished (like install()):
+    // a build interrupted by a stop leaves no backoff, a failed one does.
+    let prior_backoff = read_backoff(dir);
+    // A stop that lands after the attempt was recorded is not a failure.
+    let unless_stopped = |out: Result<Outcome>| {
+        if matches!(out, Ok(Outcome::Stopped)) {
+            rollback_attempt(dir, prior_backoff.clone());
+        }
+        out
+    };
     if let Err(e) = ops.refresh_dockerfile() {
         warn!(error = %e, "Diiisco: cannot refresh the node Dockerfile — keeping the current node");
+        note_failed_attempt(dir, &tag, now);
         return fallback_old(ops, None);
     }
     info!(fp = %key_fp, "Diiisco: rebuilding node image for the per-device key");
     if let Err(e) = ops.build(&tag) {
         warn!(error = %e, "Diiisco: upgrade build failed — keeping the current node");
+        note_failed_attempt(dir, &tag, now);
         return fallback_old(ops, Some(tag.as_str()));
     }
+    let cand_id = ops.record_candidate(&tag);
     if ops.stop_requested() {
         info!("Diiisco: stopped during rebuild — not switching");
         ops.discard_candidate(&tag);
         return Ok(Outcome::Stopped);
     }
+    if let Err(e) = record_attempt(dir, &tag, now) {
+        warn!(error = %e, "Diiisco: cannot record rebuild attempt — keeping the current node");
+        ops.discard_candidate(&tag);
+        return fallback_old(ops, None);
+    }
     ops.down();
     if ops.stop_requested() {
         ops.discard_candidate(&tag);
-        return Ok(Outcome::Stopped);
+        return unless_stopped(Ok(Outcome::Stopped));
     }
     if let Err(e) = ops.up_no_build(Some(&tag)) {
         warn!(error = %e, "Diiisco: new node failed to start — restoring the current node");
-        return fallback_old(ops, Some(tag.as_str()));
+        return unless_stopped(fallback_old(ops, Some(tag.as_str())));
     }
     if !ops.probe().await {
         warn!("Diiisco: new node did not prove the device key — restoring the current node");
-        return fallback_old(ops, Some(tag.as_str()));
+        return unless_stopped(fallback_old(ops, Some(tag.as_str())));
     }
     if ops.stop_requested() {
-        ops.discard_candidate(&tag);
-        return Ok(Outcome::Stopped);
+        stopped_cleanup(ops, &tag);
+        return unless_stopped(Ok(Outcome::Stopped));
     }
     if let Err(e) = ops.tag_latest(&tag) {
         warn!(error = %e, "Diiisco: could not promote the new image — restoring the current node");
-        return fallback_old(ops, Some(tag.as_str()));
+        return unless_stopped(fallback_old(ops, Some(tag.as_str())));
     }
     let stamp = Stamp {
         tag: tag.clone(),
@@ -781,13 +1157,18 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
         pin_sha: pin_sha.to_string(),
     };
     if let Err(e) = write_stamp(dir, &stamp) {
-        warn!(error = %e, "Diiisco: could not write the image stamp (will retry after backoff)");
-        return Ok(Outcome::Upgraded);
+        // The new image is `latest` but unstamped: undo the promotion so the
+        // restored node, the stamp and `latest` agree, and discard the
+        // candidate (the backoff stays, so the retry waits).
+        warn!(error = %e, "Diiisco: could not write the image stamp — restoring the current node");
+        rollback_latest(ops, prev_id.as_deref());
+        let cand = Some(tag.as_str());
+        return unless_stopped(fallback_old(ops, cand));
     }
     clear_backoff(dir);
-    let new_id = ops.image_id(&format!("diiisco-node:{tag}"));
-    if let Some(prev) = prev_id.filter(|p| Some(p) != new_id.as_ref()) {
-        ops.rmi_by_id(&prev);
+    if let Some(prev) = prev_id.filter(|p| previous_to_remove(ops, p, &tag)) {
+        ops.rmi_labeled(&prev, "previous node image");
     }
+    sweep_stale_candidates(ops, dir, cand_id.as_deref());
     Ok(Outcome::Upgraded)
 }

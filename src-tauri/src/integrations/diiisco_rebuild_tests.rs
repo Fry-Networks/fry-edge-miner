@@ -428,8 +428,8 @@ async fn stop_during_the_build_brings_nothing_up_and_promotes_nothing() {
     assert!(read_stamp(d.path()).is_none());
     assert_eq!(
         read_backoff(d.path()).map(|b| b.attempts),
-        Some(1),
-        "the interrupted attempt stays recorded"
+        None,
+        "an interrupted build leaves no backoff"
     );
 }
 
@@ -1026,7 +1026,7 @@ fn start_gate_is_image_missing_or_plan_build_and_attempt_is_recorded_first() {
         rec.is_some() && build.is_some(),
         "upgrade records then builds"
     );
-    assert!(rec < build, "B4: record the attempt BEFORE the build");
+    assert!(rec > build, "B4: record the attempt AFTER the build");
 }
 
 // ------------------------------------- C1-RACE: shared temp file, rename retry

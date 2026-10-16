@@ -17,6 +17,65 @@ mod diiisco_rebuild;
 
 const HEALTH_URL: &str = "http://localhost:8181/health";
 
+/// What the node-health HTTP request came back with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpProbe {
+    Status(reqwest::StatusCode),
+    Refused,
+    Timeout,
+}
+
+/// The `docker` argv that lists the running `diiisco-node` container.
+fn node_container_ps_args() -> Vec<&'static str> {
+    vec![
+        "ps",
+        "--filter",
+        "name=^/?diiisco-node$",
+        "--filter",
+        "status=running",
+        "-q",
+    ]
+}
+
+/// Is the `diiisco-node` container running? `None` = docker could not say.
+fn node_container_running() -> Option<bool> {
+    let out = crate::integrations::docker_manager::docker_command()
+        .args(node_container_ps_args())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+        .ok()?;
+    parse_node_running(out.status.success(), &out.stdout)
+}
+
+/// The verdict of the `docker ps -q` call: a failed command is unknown
+/// (`None`); otherwise the node runs when at least one id line came back.
+fn parse_node_running(success: bool, stdout: &[u8]) -> Option<bool> {
+    success.then(|| !non_empty_lines(stdout).is_empty())
+}
+
+/// Before the HTTP probe: is the node container there at all? `None` = the
+/// check itself failed.
+fn health_gate(node_running: Option<bool>) -> Result<(), HealthStatus> {
+    match node_running {
+        Some(true) => Ok(()),
+        // Something else answering on :8181 is not the node.
+        Some(false) => Err(HealthStatus::Stopped),
+        None => Err(HealthStatus::Unhealthy(
+            "cannot verify node container".to_string(),
+        )),
+    }
+}
+
+fn http_health(probe: HttpProbe) -> HealthStatus {
+    match probe {
+        HttpProbe::Status(s) if s.is_success() => HealthStatus::Healthy,
+        HttpProbe::Status(s) => HealthStatus::Unhealthy(format!("HTTP {s}")),
+        HttpProbe::Refused => HealthStatus::Stopped,
+        HttpProbe::Timeout => HealthStatus::Unhealthy("Timeout".to_string()),
+    }
+}
+
 /// B6: what the user is told when hardwareapi has no Algorand wallet for this
 /// device yet. A missing wallet is a provisioning state, not a fault — the old
 /// "Device has no Algorand wallet — re-register or contact support" read as a
@@ -383,7 +442,7 @@ impl Integration for DiiiscoIntegration {
             diiisco_rebuild::stop_generation(),
         );
         let prev_id = if have_image {
-            diiisco_rebuild::NodeOps::image_id(&node, diiisco_rebuild::LATEST_REF)
+            diiisco_rebuild::NodeOps::image_lookup(&node, diiisco_rebuild::LATEST_REF).into_id()
         } else {
             None
         };
@@ -423,6 +482,9 @@ impl Integration for DiiiscoIntegration {
         // Recorded only once the build has finished (cleared on success), so an
         // install dropped by the outer timeout mid-build leaves no backoff,
         // while a failed build or a failed F2 gate blocks re-entry.
+        // The candidate's id goes on the ledger the sweep works from.
+        let cand_id = diiisco_rebuild::NodeOps::record_candidate(&node, &tag);
+        let prior_backoff = diiisco_rebuild::read_backoff(&deploy_dir);
         if let Err(e) =
             diiisco_rebuild::record_attempt(&deploy_dir, &tag, diiisco_rebuild::unix_now())
         {
@@ -436,16 +498,25 @@ impl Integration for DiiiscoIntegration {
             diiisco_rebuild::Gate::Rejected => anyhow::bail!(
                 "the new Diiisco node did not prove the device key; the previous node image was kept"
             ),
-            diiisco_rebuild::Gate::Stopped => return Ok(()),
+            diiisco_rebuild::Gate::Stopped => {
+                // A user stop is not a failed attempt and promoted nothing:
+                // no backoff, and callers must not treat this as installed.
+                diiisco_rebuild::rollback_attempt(&deploy_dir, prior_backoff);
+                anyhow::bail!("Diiisco install was stopped; nothing was promoted")
+            }
         }
         // `latest` is the single moving alias for the current-good image; tag
         // it BEFORE the stamp so an env-less recovery `up` finds it.
         if let Err(e) = diiisco_rebuild::after_fresh_build(&node, &deploy_dir, &tag, &key_fp, &pin)
         {
+            // `latest` may already point at the candidate: restore it first so
+            // the previous node comes back and the candidate can be removed.
+            diiisco_rebuild::rollback_latest(&node, prev_id.as_deref());
             diiisco_rebuild::reject_candidate(&node, &tag, have_image);
             return Err(e);
         }
         diiisco_rebuild::drop_previous(&node, prev_id.as_deref(), &tag);
+        diiisco_rebuild::sweep_stale_candidates(&node, &deploy_dir, cand_id.as_deref());
         info!("Diiisco install complete — image built with per-device wallet");
         Ok(())
     }
@@ -560,22 +631,27 @@ impl Integration for DiiiscoIntegration {
                 super::docker_manager::docker_status(),
             ));
         }
+        // A 2xx from :8181 only counts while the node container is running.
+        let running = node_container_running();
+        if let Err(status) = health_gate(running) {
+            return status;
+        }
         let token = diiisco_bearer_token();
         if token.is_empty() {
             warn!("No DIIISCO_BEARER_TOKEN set — health check may fail");
         }
         let client = reqwest::Client::new();
-        match tokio::time::timeout(
+        let probe = match tokio::time::timeout(
             tokio::time::Duration::from_secs(5),
             client.get(HEALTH_URL).bearer_auth(token).send(),
         )
         .await
         {
-            Ok(Ok(resp)) if resp.status().is_success() => HealthStatus::Healthy,
-            Ok(Ok(resp)) => HealthStatus::Unhealthy(format!("HTTP {}", resp.status())),
-            Ok(Err(_)) => HealthStatus::Stopped, // connection refused = not running
-            Err(_) => HealthStatus::Unhealthy("Timeout".to_string()),
-        }
+            Ok(Ok(resp)) => HttpProbe::Status(resp.status()),
+            Ok(Err(_)) => HttpProbe::Refused, // connection refused = not running
+            Err(_) => HttpProbe::Timeout,
+        };
+        http_health(probe)
     }
 
     async fn check_update(&self) -> Result<Option<String>> {
@@ -716,6 +792,28 @@ impl DockerNode {
         redact_out(s, &self.bearer, &self.algo_mnemonic, &self.deploy)
     }
 
+    /// The single `docker rmi <id>` call site. `what` names the image in the log.
+    fn rmi_logged(&self, id: &str, what: &str) -> bool {
+        match self.docker(&["rmi", id]) {
+            Ok(o) if o.status.success() => {
+                info!("{}", diiisco_rebuild::rmi_log_text(what, true));
+                true
+            }
+            Ok(o) => {
+                warn!(
+                    stderr = %self.redact(&String::from_utf8_lossy(&o.stderr)),
+                    "{}",
+                    diiisco_rebuild::rmi_log_text(what, false)
+                );
+                false
+            }
+            Err(e) => {
+                warn!(error = %e, "{}", diiisco_rebuild::rmi_log_text(what, false));
+                false
+            }
+        }
+    }
+
     fn docker(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
         crate::integrations::docker_manager::docker_command()
             .args(args)
@@ -755,14 +853,26 @@ impl diiisco_rebuild::NodeOps for DockerNode {
     }
 
     fn image_id(&self, reference: &str) -> Option<String> {
-        let out = self
-            .docker(&["images", "-q", "--no-trunc", reference])
-            .ok()?;
+        diiisco_rebuild::NodeOps::image_lookup(self, reference).into_id()
+    }
+
+    /// A failed command (spawn, timeout, non-zero exit) is `Error`, never an
+    /// absent image.
+    fn image_lookup(&self, reference: &str) -> diiisco_rebuild::ImageLookup {
+        use diiisco_rebuild::ImageLookup;
+        let Ok(out) = self.docker(&["images", "-q", "--no-trunc", reference]) else {
+            return ImageLookup::Error;
+        };
+        if !out.status.success() {
+            return ImageLookup::Error;
+        }
         String::from_utf8_lossy(&out.stdout)
             .lines()
             .map(str::trim)
             .find(|l| !l.is_empty())
-            .map(str::to_string)
+            .map_or(ImageLookup::Absent, |id| {
+                ImageLookup::Present(id.to_string())
+            })
     }
 
     fn build(&self, tag: &str) -> Result<()> {
@@ -859,15 +969,100 @@ impl diiisco_rebuild::NodeOps for DockerNode {
         Ok(())
     }
 
-    fn rmi_by_id(&self, id: &str) {
-        match self.docker(&["rmi", id]) {
-            Ok(o) if o.status.success() => info!("Diiisco: removed the previous node image"),
-            Ok(o) => warn!(
-                stderr = %self.redact(&String::from_utf8_lossy(&o.stderr)),
-                "Diiisco: previous node image not removed (continuing)"
-            ),
-            Err(e) => warn!(error = %e, "Diiisco: previous node image not removed (continuing)"),
+    /// `docker ps -aq`, then `docker inspect --format {{.Image}} <ids>`: the
+    /// image ID of EVERY container, stopped ones included. Any failure = `None`.
+    fn all_container_image_ids(&self) -> Option<Vec<String>> {
+        let ps = self.docker(&["ps", "-aq"]).ok()?;
+        if !ps.status.success() {
+            return None;
         }
+        let ids = non_empty_lines(&ps.stdout);
+        if ids.is_empty() {
+            return Some(ids);
+        }
+        let mut args = vec!["inspect", "--format", "{{.Image}}"];
+        args.extend(ids.iter().map(String::as_str));
+        let out = self.docker(&args).ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(non_empty_lines(&out.stdout))
+    }
+
+    fn list_node_images(&self) -> Option<Vec<diiisco_rebuild::ImageRef>> {
+        let out = self
+            .docker(&[
+                "images",
+                "diiisco-node",
+                "--no-trunc",
+                "--format",
+                "{{.ID}} {{.Tag}}",
+            ])
+            .ok()?;
+        out.status
+            .success()
+            .then(|| diiisco_rebuild::parse_image_listing(&String::from_utf8_lossy(&out.stdout)))
+    }
+
+    fn dangling_image_count(&self) -> Option<usize> {
+        let out = self
+            .docker(&["images", "--filter", "dangling=true", "-q", "--no-trunc"])
+            .ok()?;
+        out.status
+            .success()
+            .then(|| non_empty_lines(&out.stdout).len())
+    }
+
+    fn image_built_by_fem(&self, id: &str) -> bool {
+        self.docker(&["history", "--no-trunc", "--format", "{{.CreatedBy}}", id])
+            .is_ok_and(|o| {
+                o.status.success()
+                    && diiisco_rebuild::history_is_fem(&String::from_utf8_lossy(&o.stdout))
+            })
+    }
+
+    fn record_candidate(&self, tag: &str) -> Option<String> {
+        let id = self
+            .image_lookup(&format!("diiisco-node:{tag}"))
+            .into_id()?;
+        if let Err(e) = diiisco_rebuild::ledger_add(&self.deploy, &id) {
+            warn!(error = %e, "Diiisco: could not record the candidate image id");
+        }
+        Some(id)
+    }
+
+    fn forget_candidate(&self, id: &str) {
+        diiisco_rebuild::ledger_remove(&self.deploy, id);
+    }
+
+    fn stamp_tag(&self) -> Option<String> {
+        diiisco_rebuild::read_stamp(&self.deploy).map(|s| s.tag)
+    }
+
+    fn retag_alias(&self, tag: &str, id: &str) -> Result<()> {
+        let out = self.docker(&["tag", id, &format!("diiisco-node:{tag}")])?;
+        if !out.status.success() {
+            let stderr = self.redact(&String::from_utf8_lossy(&out.stderr));
+            anyhow::bail!("docker tag failed: {}", tail_lines(&stderr, 5));
+        }
+        Ok(())
+    }
+
+    fn retag_latest(&self, id: &str) -> Result<()> {
+        let out = self.docker(&["tag", id, diiisco_rebuild::LATEST_REF])?;
+        if !out.status.success() {
+            let stderr = self.redact(&String::from_utf8_lossy(&out.stderr));
+            anyhow::bail!("docker tag failed: {}", tail_lines(&stderr, 5));
+        }
+        Ok(())
+    }
+
+    fn rmi_by_id(&self, id: &str) {
+        self.rmi_logged(id, "image");
+    }
+
+    fn rmi_labeled(&self, id: &str, what: &str) -> bool {
+        self.rmi_logged(id, what)
     }
 
     fn discard_candidate(&self, tag: &str) {
@@ -1125,3 +1320,7 @@ mod diiisco_cred_c9_tests;
 #[cfg(test)]
 #[path = "diiisco_resolve_c9_tests.rs"]
 mod diiisco_resolve_c9_tests;
+
+#[cfg(test)]
+#[path = "diiisco_health_tests.rs"]
+mod diiisco_health_tests;
