@@ -1092,3 +1092,51 @@ async fn g2_unknown_stopped_container_state_removes_nothing() {
     assert_eq!(seq(&r).await.ok(), Some(Outcome::Upgraded));
     assert!(!touched(&r, STALE) && !touched(&r, LEG), "{:?}", r.calls());
 }
+
+// ------------------------------------- R3: a failed promotion with nothing to roll back to
+
+#[tokio::test]
+async fn r3_fresh_stamp_failure_with_no_previous_image_keeps_latest_and_sweeps_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    break_stamp(d.path());
+    let mut r = R::new(d.path(), false);
+    stale_world(&mut r, d.path());
+    assert!(seq(&r).await.is_err(), "the install reports the failure");
+    let c = r.calls();
+    assert!(
+        last(&c, "down") > at(&c, &format!("tag_latest:{}", tag())),
+        "the node is downed: {c:?}"
+    );
+    assert!(
+        r.promoted.load(Ordering::SeqCst) && r.present.load(Ordering::SeqCst),
+        "latest is kept: {c:?}"
+    );
+    assert!(
+        !c.iter().any(|x| x.starts_with("rmi")),
+        "nothing is removed: {c:?}"
+    );
+    assert!(!c.iter().any(|x| x.starts_with("retag")), "{c:?}");
+    assert!(
+        !r.container.lock().unwrap().is_some(),
+        "no container left behind"
+    );
+}
+
+#[tokio::test]
+async fn r3_upgrade_stamp_failure_with_an_unknown_previous_image_keeps_everything() {
+    let d = tempfile::tempdir().unwrap();
+    break_stamp(d.path());
+    let mut r = R::new(d.path(), true);
+    stale_world(&mut r, d.path());
+    r.error_refs = vec![LATEST_REF.to_string()];
+    let out = seq(&r).await.ok();
+    let c = r.calls();
+    assert_eq!(out, Some(Outcome::UpgradeFailed), "{c:?}");
+    assert!(
+        !c.iter().any(|x| x.starts_with("rmi")),
+        "nothing is removed: {c:?}"
+    );
+    assert!(!c.iter().any(|x| x.starts_with("retag")), "{c:?}");
+    assert!(read_stamp(d.path()).is_none());
+    assert_eq!(read_backoff(d.path()).map(|b| b.attempts), Some(1));
+}
