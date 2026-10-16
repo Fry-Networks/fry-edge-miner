@@ -415,6 +415,16 @@ pub(super) fn redact_node_output(s: &str, secrets: &[&str]) -> String {
         .into_owned()
 }
 
+/// The result of an image lookup: a lookup that FAILED is not an absent image.
+/// Callers keep everything on `Error` (no removal, no guard bypass).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(super) enum ImageLookup {
+    Present(String),
+    Absent,
+    Error,
+}
+
 /// Everything the sequence needs from Docker. Output handed back in errors is
 /// already redacted.
 #[async_trait]
@@ -433,6 +443,14 @@ pub(super) trait NodeOps: Send + Sync {
     /// otherwise build from a stale (unpinned) copy.
     fn refresh_dockerfile(&self) -> Result<()>;
     fn image_id(&self, reference: &str) -> Option<String>;
+    /// Tri-state lookup; the default maps `image_id` (no error channel).
+    #[allow(dead_code)]
+    fn image_lookup(&self, reference: &str) -> ImageLookup {
+        match self.image_id(reference) {
+            Some(id) => ImageLookup::Present(id),
+            None => ImageLookup::Absent,
+        }
+    }
     /// `compose build` with `DIIISCO_IMAGE_TAG=<tag>`.
     fn build(&self, tag: &str) -> Result<()>;
     fn down(&self);

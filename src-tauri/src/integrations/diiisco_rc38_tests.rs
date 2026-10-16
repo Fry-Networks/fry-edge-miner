@@ -3,8 +3,9 @@
 //! container (stopped), only `down` removes it, and `rmi` of an image a
 //! container still uses conflicts, as Docker does. Synthetic values only.
 use super::super::diiisco_rebuild::{
-    fp12, gate_candidate, image_tag, read_backoff, read_stamp, reject_candidate, run_node_sequence,
-    Gate, NodeOps, Outcome, LATEST_REF,
+    discard_candidate_by_id, drop_previous, fp12, gate_candidate, image_tag, read_backoff,
+    read_stamp, reject_candidate, run_node_sequence, Gate, ImageLookup, NodeOps, Outcome,
+    LATEST_REF,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -42,6 +43,8 @@ struct R {
     probe_ok: bool,
     up_ok: bool,
     tag_ok: bool,
+    /// References whose lookup FAILS (docker error), as opposed to absent.
+    error_refs: Vec<String>,
 }
 
 impl R {
@@ -59,6 +62,7 @@ impl R {
             probe_ok: true,
             up_ok: true,
             tag_ok: true,
+            error_refs: Vec::new(),
         }
     }
 
@@ -105,6 +109,16 @@ impl NodeOps for R {
             );
         }
         self.cand_exists.load(Ordering::SeqCst).then(|| NEW.into())
+    }
+    fn image_lookup(&self, reference: &str) -> ImageLookup {
+        if self.error_refs.iter().any(|r| r == reference) {
+            self.rec(format!("image_id:{reference}"));
+            return ImageLookup::Error;
+        }
+        match self.image_id(reference) {
+            Some(id) => ImageLookup::Present(id),
+            None => ImageLookup::Absent,
+        }
     }
     fn build(&self, t: &str) -> Result<()> {
         self.rec(format!("build:{t}"));
@@ -325,4 +339,80 @@ async fn k1_fresh_failed_promotion_downs_and_discards_the_running_candidate() {
     assert!(c.contains(&format!("rmi:{NEW}")), "{c:?}");
     assert!(read_stamp(d.path()).is_none());
     assert_eq!(read_backoff(d.path()).map(|b| b.attempts), Some(1));
+}
+
+// ------------------------------------------------------------------- m6
+
+fn cand_ref() -> String {
+    format!("diiisco-node:{}", tag())
+}
+
+#[test]
+fn m6_a_failed_latest_lookup_keeps_the_candidate() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    r.error_refs = vec![LATEST_REF.to_string()];
+    discard_candidate_by_id(&r, &tag());
+    let c = r.calls();
+    assert!(
+        !r.has_prefix("rmi"),
+        "an unknown latest must keep the image: {c:?}"
+    );
+}
+
+#[test]
+fn m6_a_failed_candidate_lookup_keeps_everything() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    r.error_refs = vec![cand_ref()];
+    discard_candidate_by_id(&r, &tag());
+    assert!(!r.has_prefix("rmi"), "{:?}", r.calls());
+}
+
+#[test]
+fn m6_an_absent_latest_still_lets_the_candidate_go() {
+    // control for the two tests above: absent is not an error
+    let d = tempfile::tempdir().unwrap();
+    let r = R::new(d.path(), false);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    discard_candidate_by_id(&r, &tag());
+    assert!(r.calls().contains(&format!("rmi:{NEW}")), "{:?}", r.calls());
+}
+
+#[test]
+fn m6_a_failed_new_image_lookup_never_removes_the_previous_image() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    r.error_refs = vec![cand_ref()];
+    *r.container.lock().unwrap() = None; // the previous node is already replaced
+    drop_previous(&r, Some(OLD), &tag());
+    assert!(!r.has_prefix("rmi"), "{:?}", r.calls());
+}
+
+#[test]
+fn m6_drop_previous_with_a_known_different_new_image_removes_the_previous() {
+    // control: the lookup succeeds, so the previous image goes
+    let d = tempfile::tempdir().unwrap();
+    let r = R::new(d.path(), true);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    *r.container.lock().unwrap() = None; // the previous node is already replaced
+    drop_previous(&r, Some(OLD), &tag());
+    assert!(r.calls().contains(&format!("rmi:{OLD}")), "{:?}", r.calls());
+}
+
+#[tokio::test]
+async fn m6_an_upgrade_whose_new_image_lookup_fails_keeps_the_previous_image() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.error_refs = vec![cand_ref()];
+    // the promotion itself succeeds; only the post-promotion lookup fails
+    assert_eq!(seq(&r).await.ok(), Some(Outcome::Upgraded));
+    assert!(
+        !r.calls().contains(&format!("rmi:{OLD}")),
+        "{:?}",
+        r.calls()
+    );
 }
