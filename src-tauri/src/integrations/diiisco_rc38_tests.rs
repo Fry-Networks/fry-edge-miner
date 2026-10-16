@@ -5,7 +5,7 @@
 use super::super::diiisco_rebuild::{
     discard_candidate_by_id, drop_previous, fp12, gate_candidate, image_tag, read_backoff,
     read_stamp, record_attempt, reject_candidate, rollback_attempt, rollback_latest,
-    run_node_sequence, Gate, ImageLookup, NodeOps, Outcome, LATEST_REF, STAMP_FILE,
+    run_node_sequence, Gate, ImageLookup, NodeOps, Outcome, BACKOFF_FILE, LATEST_REF, STAMP_FILE,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -43,6 +43,8 @@ struct R {
     probe_ok: bool,
     up_ok: bool,
     tag_ok: bool,
+    stop_on_build: bool,
+    build_ok: bool,
     /// References whose lookup FAILS (docker error), as opposed to absent.
     error_refs: Vec<String>,
 }
@@ -62,6 +64,8 @@ impl R {
             probe_ok: true,
             up_ok: true,
             tag_ok: true,
+            stop_on_build: false,
+            build_ok: true,
             error_refs: Vec::new(),
         }
     }
@@ -123,6 +127,12 @@ impl NodeOps for R {
     fn build(&self, t: &str) -> Result<()> {
         self.rec(format!("build:{t}"));
         self.cand_exists.store(true, Ordering::SeqCst);
+        if self.stop_on_build {
+            self.stop.store(true, Ordering::SeqCst);
+        }
+        if !self.build_ok {
+            anyhow::bail!("fake build failed");
+        }
         Ok(())
     }
     fn down(&self) {
@@ -534,4 +544,67 @@ fn m5_install_reports_a_stopped_gate_as_an_error_and_undoes_its_attempt() {
         prior < record,
         "the prior record is read before the new one"
     );
+}
+
+// ------------------------------------------------------------------- G6
+
+#[test]
+fn g6_the_upgrade_records_its_attempt_after_the_build_like_install() {
+    let seq_src = include_str!("diiisco_rebuild.rs");
+    let body = seq_src.split("#[cfg(test)]").next().unwrap();
+    let upgrade = body.split("// Upgrade:").nth(1).unwrap();
+    let rec = upgrade.find("record_attempt(dir").unwrap_or(usize::MAX);
+    let build = upgrade.find("ops.build(").unwrap();
+    assert!(build < rec, "build at {build}, first record at {rec}");
+}
+
+#[tokio::test]
+async fn g6_a_stop_during_the_upgrade_build_leaves_no_backoff() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.stop_on_build = true;
+    assert_eq!(seq(&r).await.ok(), Some(Outcome::Stopped));
+    assert!(
+        read_backoff(d.path()).is_none(),
+        "an interrupted build is not a failure"
+    );
+}
+
+#[tokio::test]
+async fn g6_a_failed_upgrade_build_still_records_an_attempt() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.build_ok = false;
+    assert_eq!(seq(&r).await.ok(), Some(Outcome::UpgradeFailed));
+    assert_eq!(read_backoff(d.path()).map(|b| b.attempts), Some(1));
+}
+
+#[tokio::test]
+async fn g6_a_stop_in_the_gate_restores_the_backoff_it_found() {
+    let d = tempfile::tempdir().unwrap();
+    // an old, expired attempt for this target
+    let old = std::fs::write(
+        d.path().join(BACKOFF_FILE),
+        format!("attempts=1\nlast=1000000\ntag={}\n", tag()),
+    );
+    old.unwrap();
+    let prior = read_backoff(d.path());
+    assert!(prior.is_some());
+    let mut r = R::new(d.path(), true);
+    r.stop_on_probe = true;
+    r.probe_ok = false;
+    assert_eq!(seq(&r).await.ok(), Some(Outcome::Stopped));
+    assert_eq!(
+        read_backoff(d.path()),
+        prior,
+        "a stop is not a failed attempt"
+    );
+}
+
+#[tokio::test]
+async fn g6_a_promoted_upgrade_clears_the_backoff() {
+    let d = tempfile::tempdir().unwrap();
+    let r = R::new(d.path(), true);
+    assert_eq!(seq(&r).await.ok(), Some(Outcome::Upgraded));
+    assert!(read_backoff(d.path()).is_none());
 }
