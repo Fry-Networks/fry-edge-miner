@@ -383,7 +383,7 @@ impl Integration for DiiiscoIntegration {
             diiisco_rebuild::stop_generation(),
         );
         let prev_id = if have_image {
-            diiisco_rebuild::NodeOps::image_id(&node, diiisco_rebuild::LATEST_REF)
+            diiisco_rebuild::NodeOps::image_lookup(&node, diiisco_rebuild::LATEST_REF).into_id()
         } else {
             None
         };
@@ -755,14 +755,26 @@ impl diiisco_rebuild::NodeOps for DockerNode {
     }
 
     fn image_id(&self, reference: &str) -> Option<String> {
-        let out = self
-            .docker(&["images", "-q", "--no-trunc", reference])
-            .ok()?;
+        diiisco_rebuild::NodeOps::image_lookup(self, reference).into_id()
+    }
+
+    /// A failed command (spawn, timeout, non-zero exit) is `Error`, never an
+    /// absent image.
+    fn image_lookup(&self, reference: &str) -> diiisco_rebuild::ImageLookup {
+        use diiisco_rebuild::ImageLookup;
+        let Ok(out) = self.docker(&["images", "-q", "--no-trunc", reference]) else {
+            return ImageLookup::Error;
+        };
+        if !out.status.success() {
+            return ImageLookup::Error;
+        }
         String::from_utf8_lossy(&out.stdout)
             .lines()
             .map(str::trim)
             .find(|l| !l.is_empty())
-            .map(str::to_string)
+            .map_or(ImageLookup::Absent, |id| {
+                ImageLookup::Present(id.to_string())
+            })
     }
 
     fn build(&self, tag: &str) -> Result<()> {

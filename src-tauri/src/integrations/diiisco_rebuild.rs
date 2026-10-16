@@ -418,11 +418,20 @@ pub(super) fn redact_node_output(s: &str, secrets: &[&str]) -> String {
 /// The result of an image lookup: a lookup that FAILED is not an absent image.
 /// Callers keep everything on `Error` (no removal, no guard bypass).
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(super) enum ImageLookup {
     Present(String),
     Absent,
     Error,
+}
+
+impl ImageLookup {
+    /// The id when the image is known to exist; `Absent` and `Error` are `None`.
+    pub(super) fn into_id(self) -> Option<String> {
+        match self {
+            ImageLookup::Present(id) => Some(id),
+            ImageLookup::Absent | ImageLookup::Error => None,
+        }
+    }
 }
 
 /// Everything the sequence needs from Docker. Output handed back in errors is
@@ -444,7 +453,6 @@ pub(super) trait NodeOps: Send + Sync {
     fn refresh_dockerfile(&self) -> Result<()>;
     fn image_id(&self, reference: &str) -> Option<String>;
     /// Tri-state lookup; the default maps `image_id` (no error channel).
-    #[allow(dead_code)]
     fn image_lookup(&self, reference: &str) -> ImageLookup {
         match self.image_id(reference) {
             Some(id) => ImageLookup::Present(id),
@@ -534,8 +542,14 @@ pub(super) fn candidate_to_remove(
 /// and never `latest`. Call it only after the candidate's container was stopped
 /// or replaced.
 pub(super) fn discard_candidate_by_id<O: NodeOps + ?Sized>(ops: &O, tag: &str) {
-    let cand = ops.image_id(&format!("diiisco-node:{tag}"));
-    let latest = ops.image_id(LATEST_REF);
+    let cand = ops.image_lookup(&format!("diiisco-node:{tag}"));
+    let latest = ops.image_lookup(LATEST_REF);
+    if cand == ImageLookup::Error || latest == ImageLookup::Error {
+        // A failed lookup is not an absent image: keep everything.
+        warn!("Diiisco: failed candidate image kept (image lookup failed)");
+        return;
+    }
+    let (cand, latest) = (cand.into_id(), latest.into_id());
     let running = ops.running_image_ids();
     match candidate_to_remove(cand.as_deref(), latest.as_deref(), running.as_deref()) {
         Some(id) => ops.rmi_by_id(&id),
@@ -647,9 +661,20 @@ pub(super) fn drop_previous<O: NodeOps + ?Sized>(ops: &O, prev: Option<&str>, ta
     let Some(prev) = prev else {
         return;
     };
-    let new_id = ops.image_id(&format!("diiisco-node:{tag}"));
-    if Some(prev) != new_id.as_deref() {
+    if previous_to_remove(ops, prev, tag) {
         ops.rmi_by_id(prev);
+    }
+}
+
+/// True when the PREVIOUS image may go: the new image's id is known and
+/// differs from it. A failed lookup keeps the previous image.
+fn previous_to_remove<O: NodeOps + ?Sized>(ops: &O, prev: &str, tag: &str) -> bool {
+    match ops.image_lookup(&format!("diiisco-node:{tag}")) {
+        ImageLookup::Error => {
+            warn!("Diiisco: previous node image kept (image lookup failed)");
+            false
+        }
+        found => found.into_id().as_deref() != Some(prev),
     }
 }
 
@@ -776,7 +801,7 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
     }
 
     // Upgrade: the old container keeps running while the new image builds.
-    let prev_id = ops.image_id(LATEST_REF);
+    let prev_id = ops.image_lookup(LATEST_REF).into_id();
     if let Err(e) = record_attempt(dir, &tag, now) {
         warn!(error = %e, "Diiisco: cannot record rebuild attempt — keeping the current node");
         return fallback_old(ops, None);
@@ -826,8 +851,7 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
         return Ok(Outcome::Upgraded);
     }
     clear_backoff(dir);
-    let new_id = ops.image_id(&format!("diiisco-node:{tag}"));
-    if let Some(prev) = prev_id.filter(|p| Some(p) != new_id.as_ref()) {
+    if let Some(prev) = prev_id.filter(|p| previous_to_remove(ops, p, &tag)) {
         ops.rmi_by_id(&prev);
     }
     Ok(Outcome::Upgraded)
