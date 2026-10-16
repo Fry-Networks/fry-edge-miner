@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 const NOW: u64 = 2_000_000;
-const OLD: &str = "sha256:old";
-const NEW: &str = "sha256:new";
+const OLD: &str = "sha256:cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4";
+const NEW: &str = "sha256:11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437";
 
 fn key_fp() -> String {
     fp12(&format!("sk-fem-{}", "ab".repeat(32)))
@@ -784,8 +784,8 @@ fn g8_nothing_is_retagged_when_the_candidate_is_kept() {
 
 // ----------------------------------------------------- G2: the promotion sweep
 
-const STALE: &str = "sha256:stale";
-const LEG: &str = "sha256:legacy";
+const STALE: &str = "sha256:a03f2386ae06b21109577020844df367857b72c2fcce384c1896fed98a89c82b";
+const LEG: &str = "sha256:c49fea7425fa7f8699897a97c159c6690267d9003bb78c53fafa8fc15c325d84";
 
 fn swept(r: &R, id: &str) -> bool {
     r.calls().contains(&format!("rmi:{id}"))
@@ -805,7 +805,7 @@ fn stale_world(r: &mut R, dir: &Path) {
             tag: Some("fem-0123456789ab".into()),
         },
         ImageRef {
-            id: "sha256:foreign".into(),
+            id: "sha256:656771905e1ef731f65cd0a0d9fb061238380a1a012e6abdf846ecc7d2ea36fd".into(),
             tag: Some("v1".into()),
         },
     ]);
@@ -820,7 +820,13 @@ async fn g2_a_promoted_upgrade_sweeps_stale_candidates_and_nothing_else() {
     assert_eq!(seq(&r).await.ok(), Some(Outcome::Upgraded));
     let c = r.calls();
     assert!(swept(&r, STALE) && swept(&r, LEG), "{c:?}");
-    assert!(!swept(&r, "sha256:foreign"), "{c:?}");
+    assert!(
+        !swept(
+            &r,
+            "sha256:656771905e1ef731f65cd0a0d9fb061238380a1a012e6abdf846ecc7d2ea36fd"
+        ),
+        "{c:?}"
+    );
     assert!(!swept(&r, NEW), "the promoted image stays: {c:?}");
     assert!(
         c.contains(&"rmi_label:stale candidate image".to_string()),
@@ -844,7 +850,14 @@ async fn g2_a_promoted_fresh_start_sweeps_stale_candidates() {
     assert_eq!(seq(&r).await.ok(), Some(Outcome::BuiltFresh));
     let c = r.calls();
     assert!(swept(&r, STALE) && swept(&r, LEG), "{c:?}");
-    assert!(!swept(&r, NEW) && !swept(&r, "sha256:foreign"), "{c:?}");
+    assert!(
+        !swept(&r, NEW)
+            && !swept(
+                &r,
+                "sha256:656771905e1ef731f65cd0a0d9fb061238380a1a012e6abdf846ecc7d2ea36fd"
+            ),
+        "{c:?}"
+    );
 }
 
 #[tokio::test]
