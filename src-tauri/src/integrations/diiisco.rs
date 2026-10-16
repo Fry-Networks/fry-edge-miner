@@ -45,9 +45,13 @@ fn node_container_running() -> Option<bool> {
         .stderr(std::process::Stdio::piped())
         .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
         .ok()?;
-    out.status
-        .success()
-        .then(|| !non_empty_lines(&out.stdout).is_empty())
+    parse_node_running(out.status.success(), &out.stdout)
+}
+
+/// The verdict of the `docker ps -q` call: a failed command is unknown
+/// (`None`); otherwise the node runs when at least one id line came back.
+fn parse_node_running(success: bool, stdout: &[u8]) -> Option<bool> {
+    success.then(|| !non_empty_lines(stdout).is_empty())
 }
 
 /// Before the HTTP probe: is the node container there at all? `None` = the
