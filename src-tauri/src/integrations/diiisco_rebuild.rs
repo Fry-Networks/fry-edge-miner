@@ -198,8 +198,9 @@ pub(super) struct Stamp {
     pub pin_sha: String,
 }
 
-/// One recorded rebuild attempt for `tag`. Recorded BEFORE the build and
-/// cleared only on success, so an interrupted build counts as a failed one.
+/// One recorded rebuild attempt for `tag`. Recorded once the build has
+/// finished (a failed build too) and cleared only on success; a build that a
+/// stop interrupted leaves no record.
 /// Keyed by the target tag: a new key or pin is not held back by an old
 /// failure, while retries of the same target honour the delay.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -737,6 +738,14 @@ pub(super) fn install_backoff_check(dir: &Path, tag: &str, now: u64) -> Result<(
     Ok(())
 }
 
+/// Record the attempt of a build that failed (or could not start); a failure
+/// to record only warns.
+fn note_failed_attempt(dir: &Path, tag: &str, now: u64) {
+    if let Err(e) = record_attempt(dir, tag, now) {
+        warn!(error = %e, "Diiisco: cannot record the failed rebuild attempt");
+    }
+}
+
 /// plan -> build -> switch, all under `REBUILD_LOCK`. A second concurrent
 /// caller waits here, re-plans, sees the stamp and runs the image: one build.
 ///
@@ -838,17 +847,25 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
 
     // Upgrade: the old container keeps running while the new image builds.
     let prev_id = ops.image_lookup(LATEST_REF).into_id();
-    if let Err(e) = record_attempt(dir, &tag, now) {
-        warn!(error = %e, "Diiisco: cannot record rebuild attempt — keeping the current node");
-        return fallback_old(ops, None);
-    }
+    // The attempt is recorded once the build has finished (like install()):
+    // a build interrupted by a stop leaves no backoff, a failed one does.
+    let prior_backoff = read_backoff(dir);
+    // A stop that lands after the attempt was recorded is not a failure.
+    let unless_stopped = |out: Result<Outcome>| {
+        if matches!(out, Ok(Outcome::Stopped)) {
+            rollback_attempt(dir, prior_backoff.clone());
+        }
+        out
+    };
     if let Err(e) = ops.refresh_dockerfile() {
         warn!(error = %e, "Diiisco: cannot refresh the node Dockerfile — keeping the current node");
+        note_failed_attempt(dir, &tag, now);
         return fallback_old(ops, None);
     }
     info!(fp = %key_fp, "Diiisco: rebuilding node image for the per-device key");
     if let Err(e) = ops.build(&tag) {
         warn!(error = %e, "Diiisco: upgrade build failed — keeping the current node");
+        note_failed_attempt(dir, &tag, now);
         return fallback_old(ops, Some(tag.as_str()));
     }
     if ops.stop_requested() {
@@ -856,26 +873,31 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
         ops.discard_candidate(&tag);
         return Ok(Outcome::Stopped);
     }
+    if let Err(e) = record_attempt(dir, &tag, now) {
+        warn!(error = %e, "Diiisco: cannot record rebuild attempt — keeping the current node");
+        ops.discard_candidate(&tag);
+        return fallback_old(ops, None);
+    }
     ops.down();
     if ops.stop_requested() {
         ops.discard_candidate(&tag);
-        return Ok(Outcome::Stopped);
+        return unless_stopped(Ok(Outcome::Stopped));
     }
     if let Err(e) = ops.up_no_build(Some(&tag)) {
         warn!(error = %e, "Diiisco: new node failed to start — restoring the current node");
-        return fallback_old(ops, Some(tag.as_str()));
+        return unless_stopped(fallback_old(ops, Some(tag.as_str())));
     }
     if !ops.probe().await {
         warn!("Diiisco: new node did not prove the device key — restoring the current node");
-        return fallback_old(ops, Some(tag.as_str()));
+        return unless_stopped(fallback_old(ops, Some(tag.as_str())));
     }
     if ops.stop_requested() {
         stopped_cleanup(ops, &tag);
-        return Ok(Outcome::Stopped);
+        return unless_stopped(Ok(Outcome::Stopped));
     }
     if let Err(e) = ops.tag_latest(&tag) {
         warn!(error = %e, "Diiisco: could not promote the new image — restoring the current node");
-        return fallback_old(ops, Some(tag.as_str()));
+        return unless_stopped(fallback_old(ops, Some(tag.as_str())));
     }
     let stamp = Stamp {
         tag: tag.clone(),
@@ -889,7 +911,7 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
         warn!(error = %e, "Diiisco: could not write the image stamp — restoring the current node");
         rollback_latest(ops, prev_id.as_deref());
         let cand = Some(tag.as_str());
-        return fallback_old(ops, cand);
+        return unless_stopped(fallback_old(ops, cand));
     }
     clear_backoff(dir);
     if let Some(prev) = prev_id.filter(|p| previous_to_remove(ops, p, &tag)) {
