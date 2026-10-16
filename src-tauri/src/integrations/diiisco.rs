@@ -442,6 +442,9 @@ impl Integration for DiiiscoIntegration {
         // it BEFORE the stamp so an env-less recovery `up` finds it.
         if let Err(e) = diiisco_rebuild::after_fresh_build(&node, &deploy_dir, &tag, &key_fp, &pin)
         {
+            // `latest` may already point at the candidate: restore it first so
+            // the previous node comes back and the candidate can be removed.
+            diiisco_rebuild::rollback_latest(&node, prev_id.as_deref());
             diiisco_rebuild::reject_candidate(&node, &tag, have_image);
             return Err(e);
         }
@@ -864,6 +867,15 @@ impl diiisco_rebuild::NodeOps for DockerNode {
     fn tag_latest(&self, tag: &str) -> Result<()> {
         let source = format!("diiisco-node:{tag}");
         let out = self.docker(&["tag", source.as_str(), diiisco_rebuild::LATEST_REF])?;
+        if !out.status.success() {
+            let stderr = self.redact(&String::from_utf8_lossy(&out.stderr));
+            anyhow::bail!("docker tag failed: {}", tail_lines(&stderr, 5));
+        }
+        Ok(())
+    }
+
+    fn retag_latest(&self, id: &str) -> Result<()> {
+        let out = self.docker(&["tag", id, diiisco_rebuild::LATEST_REF])?;
         if !out.status.success() {
             let stderr = self.redact(&String::from_utf8_lossy(&out.stderr));
             anyhow::bail!("docker tag failed: {}", tail_lines(&stderr, 5));

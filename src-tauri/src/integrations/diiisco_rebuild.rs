@@ -471,7 +471,6 @@ pub(super) trait NodeOps: Send + Sync {
     fn tag_latest(&self, tag: &str) -> Result<()>;
     /// Point `diiisco-node:latest` back at image `id` (undoing `tag_latest`).
     /// Default: nothing; Docker-backed impls override.
-    #[allow(dead_code)]
     fn retag_latest(&self, _id: &str) -> Result<()> {
         Ok(())
     }
@@ -529,8 +528,14 @@ pub(super) fn after_fresh_build<O: NodeOps + ?Sized>(
 /// Undo `tag_latest` after a promotion failed later (the stamp could not be
 /// written): `latest` goes back to the previous image so the node that is
 /// restored is the old, proven one. No previous image = nothing to restore.
-#[allow(dead_code)]
-pub(super) fn rollback_latest<O: NodeOps + ?Sized>(_ops: &O, _prev: Option<&str>) {}
+pub(super) fn rollback_latest<O: NodeOps + ?Sized>(ops: &O, prev: Option<&str>) {
+    let Some(prev) = prev else {
+        return;
+    };
+    if let Err(e) = ops.retag_latest(prev) {
+        warn!(error = %e, "Diiisco: could not point latest back at the previous image");
+    }
+}
 
 /// The id to remove for a failed candidate, or `None` to keep it. Only an image
 /// that exists, is not `latest`, and is not used by a running container goes;
@@ -859,8 +864,13 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
         pin_sha: pin_sha.to_string(),
     };
     if let Err(e) = write_stamp(dir, &stamp) {
-        warn!(error = %e, "Diiisco: could not write the image stamp (will retry after backoff)");
-        return Ok(Outcome::Upgraded);
+        // The new image is `latest` but unstamped: undo the promotion so the
+        // restored node, the stamp and `latest` agree, and discard the
+        // candidate (the backoff stays, so the retry waits).
+        warn!(error = %e, "Diiisco: could not write the image stamp — restoring the current node");
+        rollback_latest(ops, prev_id.as_deref());
+        let cand = Some(tag.as_str());
+        return fallback_old(ops, cand);
     }
     clear_backoff(dir);
     if let Some(prev) = prev_id.filter(|p| previous_to_remove(ops, p, &tag)) {
