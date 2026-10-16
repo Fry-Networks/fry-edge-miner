@@ -535,7 +535,7 @@ fn fallback_old<O: NodeOps + ?Sized>(ops: &O, cand: Option<&str>) -> Result<Outc
     if ops.stop_requested() {
         info!("Diiisco: stopped during rebuild — leaving the node down");
         if let Some(t) = cand {
-            ops.discard_candidate(t);
+            stopped_cleanup(ops, t);
         }
         return Ok(Outcome::Stopped);
     }
@@ -578,32 +578,46 @@ pub(super) async fn gate_candidate<O: NodeOps + ?Sized>(
         }
     }
     if let Err(e) = ops.up_no_build(Some(tag)) {
+        if ops.stop_requested() {
+            stopped_cleanup(ops, tag);
+            return Gate::Stopped;
+        }
         warn!(error = %e, "Diiisco: the new node failed to start");
         reject_candidate(ops, tag, have_image);
         return Gate::Rejected;
     }
-    if !ops.probe().await {
+    // The real probe returns false when it sees a stop, so a false probe with
+    // a stop pending is a stop, not a rejection (no backoff, no error).
+    let proved = ops.probe().await;
+    if ops.stop_requested() {
+        stopped_cleanup(ops, tag);
+        return Gate::Stopped;
+    }
+    if !proved {
         warn!("Diiisco: the new node did not prove the device key");
         reject_candidate(ops, tag, have_image);
         return Gate::Rejected;
     }
-    if ops.stop_requested() {
-        ops.discard_candidate(tag);
-        return Gate::Stopped;
-    }
     Gate::Pass
 }
 
-/// Undo a rejected candidate: stop its container, restore the previous node
-/// when there was one, then discard the candidate image by id. After a `stop()`
-/// nothing is brought up.
+/// A stop is pending and the candidate's container may still exist (`stop()`
+/// only stops it): remove the container, then the candidate image by id, and
+/// bring nothing up. Without the `down` the stopped container keeps the image
+/// and the removal conflicts (the K1 leak).
+fn stopped_cleanup<O: NodeOps + ?Sized>(ops: &O, tag: &str) {
+    ops.down();
+    ops.discard_candidate(tag);
+}
+
+/// Undo a rejected candidate: remove its container, restore the previous node
+/// when there was one and no stop is pending, then discard the candidate image
+/// by id. After a `stop()` nothing is brought up.
 pub(super) fn reject_candidate<O: NodeOps + ?Sized>(ops: &O, tag: &str, have_image: bool) {
-    if !ops.stop_requested() {
-        ops.down();
-        if have_image {
-            if let Err(e) = ops.up_no_build(None) {
-                warn!(error = %e, "Diiisco: could not restore the previous node");
-            }
+    ops.down();
+    if have_image && !ops.stop_requested() {
+        if let Err(e) = ops.up_no_build(None) {
+            warn!(error = %e, "Diiisco: could not restore the previous node");
         }
     }
     ops.discard_candidate(tag);
@@ -715,7 +729,16 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
             return Ok(Outcome::Stopped);
         }
         match gate_candidate(ops, &tag, false).await {
-            Gate::Pass => after_fresh_build(ops, dir, &tag, key_fp, pin_sha)?,
+            Gate::Pass => {
+                if let Err(e) = after_fresh_build(ops, dir, &tag, key_fp, pin_sha) {
+                    // The proven candidate is still running: remove it too.
+                    stopped_cleanup(ops, &tag);
+                    if let Err(re) = record_attempt(dir, &tag, now) {
+                        warn!(error = %re, "Diiisco: cannot record rebuild attempt after a failed promotion");
+                    }
+                    return Err(e);
+                }
+            }
             Gate::Rejected => {
                 if let Err(e) = record_attempt(dir, &tag, now) {
                     warn!(error = %e, "Diiisco: cannot record rebuild attempt after a rejected fresh node");
@@ -768,7 +791,7 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
         return fallback_old(ops, Some(tag.as_str()));
     }
     if ops.stop_requested() {
-        ops.discard_candidate(&tag);
+        stopped_cleanup(ops, &tag);
         return Ok(Outcome::Stopped);
     }
     if let Err(e) = ops.tag_latest(&tag) {
