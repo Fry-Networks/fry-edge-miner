@@ -60,6 +60,8 @@ struct R {
     stopped_containers: Vec<String>,
     /// `docker ps -a` / inspect failed.
     containers_unknown: bool,
+    /// Dangling (untagged) images; the count drops as they are removed.
+    dangling_ids: Vec<String>,
     /// References whose lookup FAILS (docker error), as opposed to absent.
     error_refs: Vec<String>,
 }
@@ -88,6 +90,7 @@ impl R {
             rmi_fail_ids: Vec::new(),
             stopped_containers: Vec::new(),
             containers_unknown: false,
+            dangling_ids: Vec::new(),
             error_refs: Vec::new(),
         }
     }
@@ -232,6 +235,17 @@ impl NodeOps for R {
         let mut ids: Vec<String> = self.container.lock().unwrap().clone().into_iter().collect();
         ids.extend(self.stopped_containers.iter().cloned());
         Some(ids)
+    }
+    /// Dangling images still present: the ones not yet removed by an rmi.
+    fn dangling_image_count(&self) -> Option<usize> {
+        let removed = self.calls();
+        let left = self
+            .dangling_ids
+            .iter()
+            .filter(|d| !removed.contains(&format!("rmi:{d}")))
+            .count();
+        self.rec(format!("dangling_count:{left}"));
+        Some(left)
     }
     fn list_node_images(&self) -> Option<Vec<ImageRef>> {
         self.images.clone()
@@ -1139,4 +1153,39 @@ async fn r3_upgrade_stamp_failure_with_an_unknown_previous_image_keeps_everythin
     assert!(!c.iter().any(|x| x.starts_with("retag")), "{c:?}");
     assert!(read_stamp(d.path()).is_none());
     assert_eq!(read_backoff(d.path()).map(|b| b.attempts), Some(1));
+}
+
+// ------------------------------------------------------- A1: dangling count after the sweep
+
+#[tokio::test]
+async fn a1_the_dangling_count_is_taken_after_the_sweep_and_reports_what_is_left() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    stale_world(&mut r, d.path());
+    // STALE is a dangling ledger candidate the sweep removes; the other dangling
+    // image cannot be attributed to FEM and stays.
+    let left = "sha256:bcc12028440528d3ec4245283943160e4358c84fda17a1da4469c29910432c8a";
+    r.dangling_ids = vec![STALE.to_string(), left.to_string()];
+    assert_eq!(seq(&r).await.ok(), Some(Outcome::Upgraded));
+    let c = r.calls();
+    let counted = c
+        .iter()
+        .position(|x| x.starts_with("dangling_count:"))
+        .unwrap_or(usize::MAX);
+    let last_stale_rmi = c
+        .iter()
+        .rposition(|x| x == "rmi_label:stale candidate image")
+        .unwrap_or(usize::MAX);
+    assert!(
+        c.contains(&format!("rmi:{STALE}")),
+        "control: the dangling ledger image went: {c:?}"
+    );
+    assert!(
+        counted != usize::MAX && last_stale_rmi != usize::MAX && counted > last_stale_rmi,
+        "the dangling count must follow every stale removal: {c:?}"
+    );
+    assert!(
+        c.contains(&"dangling_count:1".to_string()),
+        "only the unattributable image is left in place: {c:?}"
+    );
 }
