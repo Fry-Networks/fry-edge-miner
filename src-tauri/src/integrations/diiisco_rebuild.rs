@@ -497,7 +497,6 @@ pub(super) trait NodeOps: Send + Sync {
     fn rmi_by_id(&self, id: &str);
     /// `rmi_by_id` with a name for what is being removed, used in the log
     /// line. Default: ignores the name.
-    #[allow(dead_code)]
     fn rmi_labeled(&self, id: &str, _what: &str) {
         self.rmi_by_id(id)
     }
@@ -553,9 +552,12 @@ pub(super) fn after_fresh_build<O: NodeOps + ?Sized>(
 
 /// The log line for one image removal: it names WHAT was removed (the previous
 /// node image, a failed candidate, a stale candidate), never a fixed phrase.
-#[allow(dead_code)]
-pub(super) fn rmi_log_text(_what: &str, _removed: bool) -> String {
-    "Diiisco: removed the previous node image".to_string()
+pub(super) fn rmi_log_text(what: &str, removed: bool) -> String {
+    if removed {
+        format!("Diiisco: removed the {what}")
+    } else {
+        format!("Diiisco: {what} not removed (continuing)")
+    }
 }
 
 /// Undo `tag_latest` after a promotion failed later (the stamp could not be
@@ -602,7 +604,7 @@ pub(super) fn discard_candidate_by_id<O: NodeOps + ?Sized>(ops: &O, tag: &str) {
     let (cand, latest) = (cand.into_id(), latest.into_id());
     let running = ops.running_image_ids();
     match candidate_to_remove(cand.as_deref(), latest.as_deref(), running.as_deref()) {
-        Some(id) => ops.rmi_by_id(&id),
+        Some(id) => ops.rmi_labeled(&id, "failed candidate image"),
         None if cand.is_some() => {
             warn!("Diiisco: failed candidate image kept (in use, current, or containers unknown)");
         }
@@ -712,7 +714,7 @@ pub(super) fn drop_previous<O: NodeOps + ?Sized>(ops: &O, prev: Option<&str>, ta
         return;
     };
     if previous_to_remove(ops, prev, tag) {
-        ops.rmi_by_id(prev);
+        ops.rmi_labeled(prev, "previous node image");
     }
 }
 
@@ -928,7 +930,7 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
     }
     clear_backoff(dir);
     if let Some(prev) = prev_id.filter(|p| previous_to_remove(ops, p, &tag)) {
-        ops.rmi_by_id(&prev);
+        ops.rmi_labeled(&prev, "previous node image");
     }
     Ok(Outcome::Upgraded)
 }

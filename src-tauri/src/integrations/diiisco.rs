@@ -725,6 +725,21 @@ impl DockerNode {
         redact_out(s, &self.bearer, &self.algo_mnemonic, &self.deploy)
     }
 
+    /// The single `docker rmi <id>` call site. `what` names the image in the log.
+    fn rmi_logged(&self, id: &str, what: &str) {
+        match self.docker(&["rmi", id]) {
+            Ok(o) if o.status.success() => {
+                info!("{}", diiisco_rebuild::rmi_log_text(what, true))
+            }
+            Ok(o) => warn!(
+                stderr = %self.redact(&String::from_utf8_lossy(&o.stderr)),
+                "{}",
+                diiisco_rebuild::rmi_log_text(what, false)
+            ),
+            Err(e) => warn!(error = %e, "{}", diiisco_rebuild::rmi_log_text(what, false)),
+        }
+    }
+
     fn docker(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
         crate::integrations::docker_manager::docker_command()
             .args(args)
@@ -890,14 +905,11 @@ impl diiisco_rebuild::NodeOps for DockerNode {
     }
 
     fn rmi_by_id(&self, id: &str) {
-        match self.docker(&["rmi", id]) {
-            Ok(o) if o.status.success() => info!("Diiisco: removed the previous node image"),
-            Ok(o) => warn!(
-                stderr = %self.redact(&String::from_utf8_lossy(&o.stderr)),
-                "Diiisco: previous node image not removed (continuing)"
-            ),
-            Err(e) => warn!(error = %e, "Diiisco: previous node image not removed (continuing)"),
-        }
+        self.rmi_logged(id, "image")
+    }
+
+    fn rmi_labeled(&self, id: &str, what: &str) {
+        self.rmi_logged(id, what)
     }
 
     fn discard_candidate(&self, tag: &str) {
