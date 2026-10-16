@@ -1050,8 +1050,9 @@ impl diiisco_rebuild::NodeOps for DockerNode {
         self.rmi_logged(id, "image")
     }
 
-    fn rmi_labeled(&self, id: &str, what: &str) {
-        self.rmi_logged(id, what)
+    fn rmi_labeled(&self, id: &str, what: &str) -> bool {
+        self.rmi_logged(id, what);
+        true
     }
 
     fn discard_candidate(&self, tag: &str) {

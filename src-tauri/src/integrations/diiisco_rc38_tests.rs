@@ -54,6 +54,8 @@ struct R {
     running_unknown: bool,
     /// Ids whose history shows FEM's Dockerfile.
     fem_ids: Vec<String>,
+    /// Ids whose `docker rmi` fails.
+    rmi_fail_ids: Vec<String>,
     /// References whose lookup FAILS (docker error), as opposed to absent.
     error_refs: Vec<String>,
 }
@@ -79,8 +81,27 @@ impl R {
             images: Some(Vec::new()),
             running_unknown: false,
             fem_ids: Vec::new(),
+            rmi_fail_ids: Vec::new(),
             error_refs: Vec::new(),
         }
+    }
+
+    /// One `docker rmi <id>`: false when a container still uses the image or
+    /// the id is in `rmi_fail_ids`.
+    fn try_rmi(&self, id: &str) -> bool {
+        if self.container.lock().unwrap().as_deref() == Some(id) {
+            self.rec(format!("rmi_conflict:{id}"));
+            return false;
+        }
+        if self.rmi_fail_ids.iter().any(|f| f == id) {
+            self.rec(format!("rmi_failed:{id}"));
+            return false;
+        }
+        self.rec(format!("rmi:{id}"));
+        if id == NEW {
+            self.cand_exists.store(false, Ordering::SeqCst);
+        }
+        true
     }
 
     fn rec(&self, c: String) {
@@ -221,19 +242,12 @@ impl NodeOps for R {
         self.promoted.store(id != OLD, Ordering::SeqCst);
         Ok(())
     }
-    fn rmi_labeled(&self, id: &str, what: &str) {
+    fn rmi_labeled(&self, id: &str, what: &str) -> bool {
         self.rec(format!("rmi_label:{what}"));
-        self.rmi_by_id(id);
+        self.try_rmi(id)
     }
     fn rmi_by_id(&self, id: &str) {
-        if self.container.lock().unwrap().as_deref() == Some(id) {
-            self.rec(format!("rmi_conflict:{id}"));
-            return;
-        }
-        self.rec(format!("rmi:{id}"));
-        if id == NEW {
-            self.cand_exists.store(false, Ordering::SeqCst);
-        }
+        self.try_rmi(id);
     }
     fn discard_candidate(&self, t: &str) {
         super::super::diiisco_rebuild::discard_candidate_by_id(self, t);
@@ -938,4 +952,61 @@ fn g2_the_sweep_adds_no_second_rmi_site() {
         "the rebuild module never builds a docker rmi argv"
     );
     assert!(!reb.contains("\"prune\""), "no prune argv anywhere");
+}
+
+// ------------------------------------------------- R1: bookkeeping needs a real rmi
+
+#[test]
+fn r1_a_failed_candidate_rmi_keeps_the_ledger_entry_and_does_not_move_the_alias() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    r.stamp_tag = Some(tag());
+    *r.container.lock().unwrap() = Some(OLD.into());
+    r.rmi_fail_ids = vec![NEW.to_string()];
+    ledger_add(d.path(), NEW).unwrap();
+    discard_candidate_by_id(&r, &tag());
+    let c = r.calls();
+    assert!(
+        c.contains(&format!("rmi_failed:{NEW}")),
+        "control: the rmi was tried and failed: {c:?}"
+    );
+    assert_eq!(
+        ledger_read(d.path()),
+        vec![NEW.to_string()],
+        "the image still exists: keep its entry"
+    );
+    assert!(
+        !r.has_prefix("retag_alias"),
+        "fem-X must stay on the image that still has it: {c:?}"
+    );
+}
+
+#[test]
+fn r1_a_successful_candidate_rmi_still_forgets_and_retags() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    r.stamp_tag = Some(tag());
+    *r.container.lock().unwrap() = Some(OLD.into());
+    ledger_add(d.path(), NEW).unwrap();
+    discard_candidate_by_id(&r, &tag());
+    assert!(ledger_read(d.path()).is_empty());
+    assert!(r.calls().contains(&format!("retag_alias:{}:{OLD}", tag())));
+}
+
+#[tokio::test]
+async fn r1_a_failed_sweep_rmi_keeps_the_ledger_entry() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    stale_world(&mut r, d.path());
+    r.rmi_fail_ids = vec![STALE.to_string()];
+    assert_eq!(seq(&r).await.ok(), Some(Outcome::Upgraded));
+    let c = r.calls();
+    assert!(
+        c.contains(&format!("rmi_failed:{STALE}")),
+        "control: tried and failed: {c:?}"
+    );
+    assert!(ledger_read(d.path()).contains(&STALE.to_string()), "{c:?}");
+    assert!(swept(&r, LEG), "control: the other stale image went: {c:?}");
 }

@@ -528,8 +528,9 @@ pub(super) trait NodeOps: Send + Sync {
     }
     /// `rmi_by_id` with a name for what is being removed, used in the log
     /// line. Default: ignores the name.
-    fn rmi_labeled(&self, id: &str, _what: &str) {
-        self.rmi_by_id(id)
+    fn rmi_labeled(&self, id: &str, _what: &str) -> bool {
+        self.rmi_by_id(id);
+        true
     }
     /// Remove the candidate image `diiisco-node:<tag>` after a failed or
     /// interrupted attempt. Default: nothing; Docker-backed impls override.
