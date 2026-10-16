@@ -562,10 +562,8 @@ async fn reject_after_a_stop_only_discards() {
     k.stop.store(true, Ordering::SeqCst);
     reject_candidate(&k, &tag(), true);
     let c = k.calls();
-    assert!(
-        !c.iter().any(|x| x.starts_with("up_") || x == "down"),
-        "{c:?}"
-    );
+    assert!(!c.iter().any(|x| x.starts_with("up_")), "{c:?}");
+    assert!(pos(&c, "down") < pos(&c, "rmi:sha256:new"), "{c:?}");
     assert_eq!(k.rmis(), s(&["rmi:sha256:new"]));
 }
 
