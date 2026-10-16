@@ -4,7 +4,7 @@
 //! container still uses conflicts, as Docker does. Synthetic values only.
 use super::super::diiisco_rebuild::{
     discard_candidate_by_id, drop_previous, fp12, gate_candidate, image_tag, read_backoff,
-    read_stamp, record_attempt, reject_candidate, rollback_attempt, rollback_latest,
+    read_stamp, record_attempt, reject_candidate, rmi_log_text, rollback_attempt, rollback_latest,
     run_node_sequence, Gate, ImageLookup, NodeOps, Outcome, BACKOFF_FILE, LATEST_REF, STAMP_FILE,
 };
 use anyhow::Result;
@@ -186,6 +186,10 @@ impl NodeOps for R {
         self.rec(format!("retag_latest:{id}"));
         self.promoted.store(id != OLD, Ordering::SeqCst);
         Ok(())
+    }
+    fn rmi_labeled(&self, id: &str, what: &str) {
+        self.rec(format!("rmi_label:{what}"));
+        self.rmi_by_id(id);
     }
     fn rmi_by_id(&self, id: &str) {
         if self.container.lock().unwrap().as_deref() == Some(id) {
@@ -607,4 +611,70 @@ async fn g6_a_promoted_upgrade_clears_the_backoff() {
     let r = R::new(d.path(), true);
     assert_eq!(seq(&r).await.ok(), Some(Outcome::Upgraded));
     assert!(read_backoff(d.path()).is_none());
+}
+
+// ------------------------------------------------------------------- G7
+
+#[test]
+fn g7_the_removal_log_line_names_what_was_removed() {
+    for what in [
+        "previous node image",
+        "failed candidate image",
+        "stale candidate image",
+    ] {
+        assert!(rmi_log_text(what, true).contains(what), "{what}");
+        assert!(rmi_log_text(what, false).contains(what), "{what}");
+        assert!(rmi_log_text(what, false).contains("not removed"));
+    }
+    assert!(!rmi_log_text("failed candidate image", true).contains("previous"));
+}
+
+#[test]
+fn g7_a_failed_candidate_is_logged_as_a_failed_candidate() {
+    let d = tempfile::tempdir().unwrap();
+    let r = R::new(d.path(), false);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    discard_candidate_by_id(&r, &tag());
+    assert!(
+        r.calls()
+            .contains(&"rmi_label:failed candidate image".to_string()),
+        "{:?}",
+        r.calls()
+    );
+}
+
+#[test]
+fn g7_the_previous_image_is_logged_as_the_previous_image() {
+    let d = tempfile::tempdir().unwrap();
+    let r = R::new(d.path(), true);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    *r.container.lock().unwrap() = None;
+    drop_previous(&r, Some(OLD), &tag());
+    assert!(
+        r.calls()
+            .contains(&"rmi_label:previous node image".to_string()),
+        "{:?}",
+        r.calls()
+    );
+}
+
+#[tokio::test]
+async fn g7_the_upgrade_logs_its_previous_image_removal_by_name() {
+    let d = tempfile::tempdir().unwrap();
+    let r = R::new(d.path(), true);
+    assert_eq!(seq(&r).await.ok(), Some(Outcome::Upgraded));
+    assert!(
+        r.calls()
+            .contains(&"rmi_label:previous node image".to_string()),
+        "{:?}",
+        r.calls()
+    );
+}
+
+#[test]
+fn g7_docker_node_has_no_fixed_previous_image_wording() {
+    let src = include_str!("diiisco.rs");
+    let body = src.split("#[cfg(test)]").next().unwrap();
+    assert!(!body.contains("removed the previous node image"));
+    assert!(!body.contains("previous node image not removed"));
 }

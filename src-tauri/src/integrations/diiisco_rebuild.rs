@@ -495,6 +495,12 @@ pub(super) trait NodeOps: Send + Sync {
         Ok(())
     }
     fn rmi_by_id(&self, id: &str);
+    /// `rmi_by_id` with a name for what is being removed, used in the log
+    /// line. Default: ignores the name.
+    #[allow(dead_code)]
+    fn rmi_labeled(&self, id: &str, _what: &str) {
+        self.rmi_by_id(id)
+    }
     /// Remove the candidate image `diiisco-node:<tag>` after a failed or
     /// interrupted attempt. Default: nothing; Docker-backed impls override.
     fn discard_candidate(&self, _tag: &str) {}
@@ -543,6 +549,13 @@ pub(super) fn after_fresh_build<O: NodeOps + ?Sized>(
     )?;
     clear_backoff(dir);
     Ok(())
+}
+
+/// The log line for one image removal: it names WHAT was removed (the previous
+/// node image, a failed candidate, a stale candidate), never a fixed phrase.
+#[allow(dead_code)]
+pub(super) fn rmi_log_text(_what: &str, _removed: bool) -> String {
+    "Diiisco: removed the previous node image".to_string()
 }
 
 /// Undo `tag_latest` after a promotion failed later (the stamp could not be
