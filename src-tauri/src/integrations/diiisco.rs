@@ -17,6 +17,46 @@ mod diiisco_rebuild;
 
 const HEALTH_URL: &str = "http://localhost:8181/health";
 
+/// What the node-health HTTP request came back with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum HttpProbe {
+    Status(reqwest::StatusCode),
+    Refused,
+    Timeout,
+}
+
+/// The `docker` argv that lists the running `diiisco-node` container.
+#[allow(dead_code)]
+fn node_container_ps_args() -> Vec<&'static str> {
+    Vec::new()
+}
+
+/// Before the HTTP probe: is the node container there at all? `None` = the
+/// check itself failed.
+#[allow(dead_code)]
+fn health_gate(_node_running: Option<bool>) -> Result<(), HealthStatus> {
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn http_health(probe: HttpProbe) -> HealthStatus {
+    match probe {
+        HttpProbe::Status(s) if s.is_success() => HealthStatus::Healthy,
+        HttpProbe::Status(s) => HealthStatus::Unhealthy(format!("HTTP {s}")),
+        HttpProbe::Refused => HealthStatus::Stopped,
+        HttpProbe::Timeout => HealthStatus::Unhealthy("Timeout".to_string()),
+    }
+}
+
+#[allow(dead_code)]
+fn classify_health(node_running: Option<bool>, http: HttpProbe) -> HealthStatus {
+    match health_gate(node_running) {
+        Err(status) => status,
+        Ok(()) => http_health(http),
+    }
+}
+
 /// B6: what the user is told when hardwareapi has no Algorand wallet for this
 /// device yet. A missing wallet is a provisioning state, not a fault — the old
 /// "Device has no Algorand wallet — re-register or contact support" read as a
@@ -1249,3 +1289,7 @@ mod diiisco_cred_c9_tests;
 #[cfg(test)]
 #[path = "diiisco_resolve_c9_tests.rs"]
 mod diiisco_resolve_c9_tests;
+
+#[cfg(test)]
+#[path = "diiisco_health_tests.rs"]
+mod diiisco_health_tests;
