@@ -469,6 +469,12 @@ pub(super) trait NodeOps: Send + Sync {
     /// The AM3 auth probe, with bounded retries while the node boots.
     async fn probe(&self) -> bool;
     fn tag_latest(&self, tag: &str) -> Result<()>;
+    /// Point `diiisco-node:latest` back at image `id` (undoing `tag_latest`).
+    /// Default: nothing; Docker-backed impls override.
+    #[allow(dead_code)]
+    fn retag_latest(&self, _id: &str) -> Result<()> {
+        Ok(())
+    }
     fn rmi_by_id(&self, id: &str);
     /// Remove the candidate image `diiisco-node:<tag>` after a failed or
     /// interrupted attempt. Default: nothing; Docker-backed impls override.
@@ -519,6 +525,12 @@ pub(super) fn after_fresh_build<O: NodeOps + ?Sized>(
     clear_backoff(dir);
     Ok(())
 }
+
+/// Undo `tag_latest` after a promotion failed later (the stamp could not be
+/// written): `latest` goes back to the previous image so the node that is
+/// restored is the old, proven one. No previous image = nothing to restore.
+#[allow(dead_code)]
+pub(super) fn rollback_latest<O: NodeOps + ?Sized>(_ops: &O, _prev: Option<&str>) {}
 
 /// The id to remove for a failed candidate, or `None` to keep it. Only an image
 /// that exists, is not `latest`, and is not used by a running container goes;

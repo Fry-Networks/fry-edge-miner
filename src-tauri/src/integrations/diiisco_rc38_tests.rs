@@ -4,8 +4,8 @@
 //! container still uses conflicts, as Docker does. Synthetic values only.
 use super::super::diiisco_rebuild::{
     discard_candidate_by_id, drop_previous, fp12, gate_candidate, image_tag, read_backoff,
-    read_stamp, reject_candidate, run_node_sequence, Gate, ImageLookup, NodeOps, Outcome,
-    LATEST_REF,
+    read_stamp, reject_candidate, rollback_latest, run_node_sequence, Gate, ImageLookup, NodeOps,
+    Outcome, LATEST_REF, STAMP_FILE,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -170,6 +170,11 @@ impl NodeOps for R {
         }
         self.promoted.store(true, Ordering::SeqCst);
         self.present.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+    fn retag_latest(&self, id: &str) -> Result<()> {
+        self.rec(format!("retag_latest:{id}"));
+        self.promoted.store(id != OLD, Ordering::SeqCst);
         Ok(())
     }
     fn rmi_by_id(&self, id: &str) {
@@ -414,5 +419,75 @@ async fn m6_an_upgrade_whose_new_image_lookup_fails_keeps_the_previous_image() {
         !r.calls().contains(&format!("rmi:{OLD}")),
         "{:?}",
         r.calls()
+    );
+}
+
+// ------------------------------------------------------------------- m4
+
+/// A stamp that cannot be written: the stamp path is a directory.
+fn break_stamp(dir: &Path) {
+    std::fs::create_dir(dir.join(STAMP_FILE)).unwrap();
+}
+
+#[tokio::test]
+async fn m4_an_upgrade_whose_stamp_cannot_be_written_rolls_latest_back() {
+    let d = tempfile::tempdir().unwrap();
+    break_stamp(d.path());
+    let r = R::new(d.path(), true);
+    let out = seq(&r).await.ok();
+    let c = r.calls();
+    assert_eq!(out, Some(Outcome::UpgradeFailed), "{c:?}");
+    assert!(
+        at(&c, &format!("retag_latest:{OLD}")) < at(&c, "up_no_build:none"),
+        "latest must point at the old image before the old node is restored: {c:?}"
+    );
+    assert!(c.contains(&format!("rmi:{NEW}")), "{c:?}");
+    assert!(!c.contains(&format!("rmi:{OLD}")), "{c:?}");
+    assert_eq!(read_backoff(d.path()).map(|b| b.attempts), Some(1));
+}
+
+#[tokio::test]
+async fn m4_a_fresh_promotion_whose_stamp_fails_is_cleaned_up_and_reported() {
+    // no previous image: the proven candidate stays latest, the node is down
+    let d = tempfile::tempdir().unwrap();
+    break_stamp(d.path());
+    let r = R::new(d.path(), false);
+    assert!(seq(&r).await.is_err());
+    let c = r.calls();
+    assert!(!r.has_prefix("rmi_conflict"), "{c:?}");
+    assert!(
+        last(&c, "down") > at(&c, &format!("tag_latest:{}", tag())),
+        "{c:?}"
+    );
+    assert!(!c.iter().any(|x| x.starts_with("retag_latest")), "{c:?}");
+    assert_eq!(read_backoff(d.path()).map(|b| b.attempts), Some(1));
+}
+
+#[test]
+fn m4_rollback_latest_points_latest_back_at_the_previous_image() {
+    let d = tempfile::tempdir().unwrap();
+    let r = R::new(d.path(), true);
+    rollback_latest(&r, Some(OLD));
+    assert_eq!(r.calls(), vec![format!("retag_latest:{OLD}")]);
+    let r = R::new(d.path(), false);
+    rollback_latest(&r, None);
+    assert!(
+        r.calls().is_empty(),
+        "no previous image, nothing to restore"
+    );
+}
+
+#[test]
+fn m4_install_rolls_latest_back_before_rejecting_a_candidate_whose_stamp_failed() {
+    let src = include_str!("diiisco.rs");
+    let body = src.split("#[cfg(test)]").next().unwrap();
+    let install = body.split("async fn install(&self)").nth(1).unwrap();
+    let install = install.split("async fn start(").next().unwrap();
+    let a = install.find("after_fresh_build(").unwrap();
+    let r = install.find("rollback_latest(").unwrap_or(usize::MAX);
+    let j = install.find("reject_candidate(").unwrap();
+    assert!(
+        a < r && r < j,
+        "after_fresh_build {a}, rollback_latest {r}, reject {j}"
     );
 }
