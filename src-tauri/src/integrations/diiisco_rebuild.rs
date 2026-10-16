@@ -496,33 +496,27 @@ pub(super) trait NodeOps: Send + Sync {
     }
     fn rmi_by_id(&self, id: &str);
     /// Image ids of ALL containers, running or stopped; `None` = unknown.
-    #[allow(dead_code)]
     fn all_container_image_ids(&self) -> Option<Vec<String>> {
         Some(Vec::new())
     }
     /// Images of repo `diiisco-node` with their tags; `None` = unknown.
-    #[allow(dead_code)]
     fn list_node_images(&self) -> Option<Vec<ImageRef>> {
         Some(Vec::new())
     }
     /// Count of dangling (untagged) images, for the log only.
-    #[allow(dead_code)]
     fn dangling_image_count(&self) -> Option<usize> {
         Some(0)
     }
     /// True when the image's history shows it was built from FEM's Dockerfile.
-    #[allow(dead_code)]
     fn image_built_by_fem(&self, _id: &str) -> bool {
         false
     }
     /// Record the id of the just-built candidate `tag` in the candidate
     /// ledger and return it. Default: nothing recorded, no id.
-    #[allow(dead_code)]
     fn record_candidate(&self, _tag: &str) -> Option<String> {
         None
     }
     /// A candidate image was removed: drop it from the ledger.
-    #[allow(dead_code)]
     fn forget_candidate(&self, _id: &str) {}
     /// The tag recorded in the current image stamp, if any.
     fn stamp_tag(&self) -> Option<String> {
@@ -594,36 +588,90 @@ pub(super) struct ImageRef {
     pub tag: Option<String>,
 }
 
-#[allow(dead_code)]
 pub(super) const LEDGER_FILE: &str = "candidate-ids.ledger";
 
-#[allow(dead_code)]
-pub(super) fn ledger_read(_dir: &Path) -> Vec<String> {
-    Vec::new()
+pub(super) fn ledger_read(dir: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(dir.join(LEDGER_FILE)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if is_image_id(line) && !out.iter().any(|x| x == line) {
+            out.push(line.to_string());
+        }
+    }
+    out
 }
 
-#[allow(dead_code)]
-pub(super) fn ledger_add(_dir: &Path, _id: &str) -> std::io::Result<()> {
-    Ok(())
+/// `sha256:<alphanumerics>`: the only shape a ledger line or a listed id may
+/// have (it later reaches an argv, so nothing else is accepted).
+fn is_image_id(s: &str) -> bool {
+    s.strip_prefix("sha256:")
+        .is_some_and(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
-#[allow(dead_code)]
-pub(super) fn ledger_remove(_dir: &Path, _id: &str) {}
+fn write_ledger(dir: &Path, ids: &[String]) -> std::io::Result<()> {
+    let mut text = ids.join("\n");
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    write_atomic(dir, LEDGER_FILE, &text)
+}
+
+pub(super) fn ledger_add(dir: &Path, id: &str) -> std::io::Result<()> {
+    if !is_image_id(id) {
+        return Ok(());
+    }
+    let mut ids = ledger_read(dir);
+    if ids.iter().any(|x| x == id) {
+        return Ok(());
+    }
+    ids.push(id.to_string());
+    if ids.len() > LEDGER_MAX {
+        ids.drain(..ids.len() - LEDGER_MAX);
+    }
+    write_ledger(dir, &ids)
+}
+
+pub(super) fn ledger_remove(dir: &Path, id: &str) {
+    let ids = ledger_read(dir);
+    if !ids.iter().any(|x| x == id) {
+        return;
+    }
+    let kept: Vec<String> = ids.into_iter().filter(|x| x != id).collect();
+    if let Err(e) = write_ledger(dir, &kept) {
+        warn!(error = %e, "Diiisco: could not update the candidate ledger");
+    }
+}
 
 /// Parse `docker images ... --format "{{.ID}} {{.Tag}}"` output.
-#[allow(dead_code)]
-pub(super) fn parse_image_listing(_text: &str) -> Vec<ImageRef> {
-    Vec::new()
+pub(super) fn parse_image_listing(text: &str) -> Vec<ImageRef> {
+    text.lines()
+        .filter_map(|l| {
+            let mut parts = l.split_whitespace();
+            let (id, tag) = (parts.next()?, parts.next()?);
+            (parts.next().is_none() && is_image_id(id)).then(|| ImageRef {
+                id: id.to_string(),
+                tag: (tag != "<none>").then(|| tag.to_string()),
+            })
+        })
+        .collect()
 }
 
 /// True when a `docker history` dump shows FEM's Dockerfile built the image.
-#[allow(dead_code)]
-pub(super) fn history_is_fem(_text: &str) -> bool {
-    false
+pub(super) fn history_is_fem(text: &str) -> bool {
+    FEM_HISTORY_MARKS.iter().all(|m| text.contains(m))
 }
 
+/// Lines of the final stage of FEM's node Dockerfile, identical in every FEM
+/// Dockerfile since v0.4.37 (`docker history` never shows the builder stage):
+/// the `/build/` copy source, the data dir and the entry point together.
+const FEM_HISTORY_MARKS: [&str; 3] = ["/build/node_modules", "mkdir -p /app/data", "dist/dev.js"];
+
+/// At most this many candidate ids are remembered (oldest dropped).
+const LEDGER_MAX: usize = 64;
+
 /// What the sweep decides from.
-#[allow(dead_code)]
 pub(super) struct SweepSets<'a> {
     pub ledger: &'a [String],
     pub images: &'a [ImageRef],
@@ -633,18 +681,86 @@ pub(super) struct SweepSets<'a> {
 }
 
 /// PURE. The image ids a successful promotion may remove.
-#[allow(dead_code)]
-pub(super) fn sweep_targets(_s: &SweepSets, _fem_built: &dyn Fn(&str) -> bool) -> Vec<String> {
-    Vec::new()
+///
+/// Never the promoted image, the image of any container (running or stopped),
+/// or an image carrying the `latest` tag. Then either a ledger id (a candidate
+/// this FEM built) or a legacy candidate: every tag of the id is
+/// `fem-<12 hex>` (repo `diiisco-node`, as listed) and its history shows FEM's
+/// Dockerfile. An id with any other tag is somebody's image and stays.
+pub(super) fn sweep_targets(s: &SweepSets, fem_built: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let tags_of = |id: &str| -> Vec<Option<&str>> {
+        s.images
+            .iter()
+            .filter(|i| i.id == id)
+            .map(|i| i.tag.as_deref())
+            .collect()
+    };
+    let protected = |id: &str| {
+        id == s.new_id
+            || s.containers.iter().any(|c| c == id)
+            || s.running.iter().any(|c| c == id)
+            || tags_of(id).contains(&Some("latest"))
+    };
+    let all_fem_tags = |id: &str| tags_of(id).iter().all(|t| t.is_some_and(is_tag));
+    let mut out: Vec<String> = Vec::new();
+    let mut take = |id: &str| {
+        if !out.iter().any(|x| x == id) {
+            out.push(id.to_string());
+        }
+    };
+    for id in s.ledger {
+        if is_image_id(id) && !protected(id) && tags_of(id).iter().all(|t| t.is_none_or(is_tag)) {
+            take(id);
+        }
+    }
+    for img in s.images {
+        let id = img.id.as_str();
+        if is_image_id(id) && !protected(id) && all_fem_tags(id) && fem_built(id) {
+            take(id);
+        }
+    }
+    out
 }
 
 /// After a successful promotion: remove stale FEM-created candidate images.
-#[allow(dead_code)]
+///
+/// Fail-closed: without the promoted image's id, or with any unknown listing
+/// (images, containers, running), nothing is removed. Dangling unlabeled
+/// images cannot be attributed to FEM and are only counted. Removal is by id,
+/// through the one `rmi_labeled` path; there is no prune.
 pub(super) fn sweep_stale_candidates<O: NodeOps + ?Sized>(
-    _ops: &O,
-    _dir: &Path,
-    _new_id: Option<&str>,
+    ops: &O,
+    dir: &Path,
+    new_id: Option<&str>,
 ) {
+    let Some(new_id) = new_id else {
+        return;
+    };
+    // The promoted image is no longer a candidate.
+    ledger_remove(dir, new_id);
+    let (Some(running), Some(containers), Some(images)) = (
+        ops.running_image_ids(),
+        ops.all_container_image_ids(),
+        ops.list_node_images(),
+    ) else {
+        warn!("Diiisco: stale-candidate sweep skipped (Docker state unknown)");
+        return;
+    };
+    if let Some(n) = ops.dangling_image_count().filter(|n| *n > 0) {
+        info!("Diiisco: {n} dangling image(s) left in place (not attributable to FEM)");
+    }
+    let ledger = ledger_read(dir);
+    let sets = SweepSets {
+        ledger: &ledger,
+        images: &images,
+        containers: &containers,
+        running: &running,
+        new_id,
+    };
+    for id in sweep_targets(&sets, &|id| ops.image_built_by_fem(id)) {
+        ops.rmi_labeled(&id, "stale candidate image");
+        ledger_remove(dir, &id);
+    }
 }
 
 /// The log line for one image removal: it names WHAT was removed (the previous
@@ -703,6 +819,7 @@ pub(super) fn discard_candidate_by_id<O: NodeOps + ?Sized>(ops: &O, tag: &str) {
     match candidate_to_remove(cand.as_deref(), latest.as_deref(), running.as_deref()) {
         Some(id) => {
             ops.rmi_labeled(&id, "failed candidate image");
+            ops.forget_candidate(&id);
             // A rebuild of the stamped tag re-points `diiisco-node:<tag>` at
             // the candidate; removing the candidate by id takes that alias
             // with it, so give `latest` its alias back.
@@ -936,6 +1053,7 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
             ops.discard_candidate(&tag);
             return Err(e);
         }
+        let cand_id = ops.record_candidate(&tag);
         if ops.stop_requested() {
             ops.discard_candidate(&tag);
             return Ok(Outcome::Stopped);
@@ -966,6 +1084,7 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
             return Ok(Outcome::Stopped);
         }
         ops.up_plain()?;
+        sweep_stale_candidates(ops, dir, cand_id.as_deref());
         return Ok(Outcome::BuiltFresh);
     }
 
@@ -992,6 +1111,7 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
         note_failed_attempt(dir, &tag, now);
         return fallback_old(ops, Some(tag.as_str()));
     }
+    let cand_id = ops.record_candidate(&tag);
     if ops.stop_requested() {
         info!("Diiisco: stopped during rebuild — not switching");
         ops.discard_candidate(&tag);
@@ -1041,5 +1161,6 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
     if let Some(prev) = prev_id.filter(|p| previous_to_remove(ops, p, &tag)) {
         ops.rmi_labeled(&prev, "previous node image");
     }
+    sweep_stale_candidates(ops, dir, cand_id.as_deref());
     Ok(Outcome::Upgraded)
 }

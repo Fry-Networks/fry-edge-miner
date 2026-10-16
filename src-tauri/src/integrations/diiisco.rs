@@ -423,6 +423,8 @@ impl Integration for DiiiscoIntegration {
         // Recorded only once the build has finished (cleared on success), so an
         // install dropped by the outer timeout mid-build leaves no backoff,
         // while a failed build or a failed F2 gate blocks re-entry.
+        // The candidate's id goes on the ledger the sweep works from.
+        let cand_id = diiisco_rebuild::NodeOps::record_candidate(&node, &tag);
         let prior_backoff = diiisco_rebuild::read_backoff(&deploy_dir);
         if let Err(e) =
             diiisco_rebuild::record_attempt(&deploy_dir, &tag, diiisco_rebuild::unix_now())
@@ -455,6 +457,7 @@ impl Integration for DiiiscoIntegration {
             return Err(e);
         }
         diiisco_rebuild::drop_previous(&node, prev_id.as_deref(), &tag);
+        diiisco_rebuild::sweep_stale_candidates(&node, &deploy_dir, cand_id.as_deref());
         info!("Diiisco install complete — image built with per-device wallet");
         Ok(())
     }
@@ -893,6 +896,72 @@ impl diiisco_rebuild::NodeOps for DockerNode {
             anyhow::bail!("docker tag failed: {}", tail_lines(&stderr, 5));
         }
         Ok(())
+    }
+
+    /// `docker ps -aq`, then `docker inspect --format {{.Image}} <ids>`: the
+    /// image ID of EVERY container, stopped ones included. Any failure = `None`.
+    fn all_container_image_ids(&self) -> Option<Vec<String>> {
+        let ps = self.docker(&["ps", "-aq"]).ok()?;
+        if !ps.status.success() {
+            return None;
+        }
+        let ids = non_empty_lines(&ps.stdout);
+        if ids.is_empty() {
+            return Some(ids);
+        }
+        let mut args = vec!["inspect", "--format", "{{.Image}}"];
+        args.extend(ids.iter().map(String::as_str));
+        let out = self.docker(&args).ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(non_empty_lines(&out.stdout))
+    }
+
+    fn list_node_images(&self) -> Option<Vec<diiisco_rebuild::ImageRef>> {
+        let out = self
+            .docker(&[
+                "images",
+                "diiisco-node",
+                "--no-trunc",
+                "--format",
+                "{{.ID}} {{.Tag}}",
+            ])
+            .ok()?;
+        out.status
+            .success()
+            .then(|| diiisco_rebuild::parse_image_listing(&String::from_utf8_lossy(&out.stdout)))
+    }
+
+    fn dangling_image_count(&self) -> Option<usize> {
+        let out = self
+            .docker(&["images", "--filter", "dangling=true", "-q", "--no-trunc"])
+            .ok()?;
+        out.status
+            .success()
+            .then(|| non_empty_lines(&out.stdout).len())
+    }
+
+    fn image_built_by_fem(&self, id: &str) -> bool {
+        self.docker(&["history", "--no-trunc", "--format", "{{.CreatedBy}}", id])
+            .is_ok_and(|o| {
+                o.status.success()
+                    && diiisco_rebuild::history_is_fem(&String::from_utf8_lossy(&o.stdout))
+            })
+    }
+
+    fn record_candidate(&self, tag: &str) -> Option<String> {
+        let id = self
+            .image_lookup(&format!("diiisco-node:{tag}"))
+            .into_id()?;
+        if let Err(e) = diiisco_rebuild::ledger_add(&self.deploy, &id) {
+            warn!(error = %e, "Diiisco: could not record the candidate image id");
+        }
+        Some(id)
+    }
+
+    fn forget_candidate(&self, id: &str) {
+        diiisco_rebuild::ledger_remove(&self.deploy, id);
     }
 
     fn stamp_tag(&self) -> Option<String> {

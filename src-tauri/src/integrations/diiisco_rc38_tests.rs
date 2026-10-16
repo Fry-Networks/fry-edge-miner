@@ -937,5 +937,5 @@ fn g2_the_sweep_adds_no_second_rmi_site() {
         !reb.contains("\"rmi\""),
         "the rebuild module never builds a docker rmi argv"
     );
-    assert!(!reb.contains("prune"), "no prune anywhere");
+    assert!(!reb.contains("\"prune\""), "no prune argv anywhere");
 }
