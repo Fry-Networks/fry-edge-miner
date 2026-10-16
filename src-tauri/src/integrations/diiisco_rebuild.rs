@@ -605,11 +605,11 @@ pub(super) fn ledger_read(dir: &Path) -> Vec<String> {
     out
 }
 
-/// `sha256:<alphanumerics>`: the only shape a ledger line or a listed id may
-/// have (it later reaches an argv, so nothing else is accepted).
+/// `sha256:` plus exactly 64 lowercase hex digits: the only shape a ledger
+/// line or a listed id may have (it later reaches an argv, so nothing else is
+/// accepted).
 fn is_image_id(s: &str) -> bool {
-    s.strip_prefix("sha256:")
-        .is_some_and(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_alphanumeric()))
+    s.strip_prefix("sha256:").is_some_and(|h| is_hex(h, 64))
 }
 
 fn write_ledger(dir: &Path, ids: &[String]) -> std::io::Result<()> {
