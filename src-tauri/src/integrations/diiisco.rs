@@ -19,7 +19,6 @@ const HEALTH_URL: &str = "http://localhost:8181/health";
 
 /// What the node-health HTTP request came back with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 enum HttpProbe {
     Status(reqwest::StatusCode),
     Refused,
@@ -27,33 +26,49 @@ enum HttpProbe {
 }
 
 /// The `docker` argv that lists the running `diiisco-node` container.
-#[allow(dead_code)]
 fn node_container_ps_args() -> Vec<&'static str> {
-    Vec::new()
+    vec![
+        "ps",
+        "--filter",
+        "name=^/?diiisco-node$",
+        "--filter",
+        "status=running",
+        "-q",
+    ]
+}
+
+/// Is the `diiisco-node` container running? `None` = docker could not say.
+fn node_container_running() -> Option<bool> {
+    let out = crate::integrations::docker_manager::docker_command()
+        .args(node_container_ps_args())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+        .ok()?;
+    out.status
+        .success()
+        .then(|| !non_empty_lines(&out.stdout).is_empty())
 }
 
 /// Before the HTTP probe: is the node container there at all? `None` = the
 /// check itself failed.
-#[allow(dead_code)]
-fn health_gate(_node_running: Option<bool>) -> Result<(), HealthStatus> {
-    Ok(())
+fn health_gate(node_running: Option<bool>) -> Result<(), HealthStatus> {
+    match node_running {
+        Some(true) => Ok(()),
+        // Something else answering on :8181 is not the node.
+        Some(false) => Err(HealthStatus::Stopped),
+        None => Err(HealthStatus::Unhealthy(
+            "cannot verify node container".to_string(),
+        )),
+    }
 }
 
-#[allow(dead_code)]
 fn http_health(probe: HttpProbe) -> HealthStatus {
     match probe {
         HttpProbe::Status(s) if s.is_success() => HealthStatus::Healthy,
         HttpProbe::Status(s) => HealthStatus::Unhealthy(format!("HTTP {s}")),
         HttpProbe::Refused => HealthStatus::Stopped,
         HttpProbe::Timeout => HealthStatus::Unhealthy("Timeout".to_string()),
-    }
-}
-
-#[allow(dead_code)]
-fn classify_health(node_running: Option<bool>, http: HttpProbe) -> HealthStatus {
-    match health_gate(node_running) {
-        Err(status) => status,
-        Ok(()) => http_health(http),
     }
 }
 
@@ -612,22 +627,27 @@ impl Integration for DiiiscoIntegration {
                 super::docker_manager::docker_status(),
             ));
         }
+        // A 2xx from :8181 only counts while the node container is running.
+        let running = node_container_running();
+        if let Err(status) = health_gate(running) {
+            return status;
+        }
         let token = diiisco_bearer_token();
         if token.is_empty() {
             warn!("No DIIISCO_BEARER_TOKEN set — health check may fail");
         }
         let client = reqwest::Client::new();
-        match tokio::time::timeout(
+        let probe = match tokio::time::timeout(
             tokio::time::Duration::from_secs(5),
             client.get(HEALTH_URL).bearer_auth(token).send(),
         )
         .await
         {
-            Ok(Ok(resp)) if resp.status().is_success() => HealthStatus::Healthy,
-            Ok(Ok(resp)) => HealthStatus::Unhealthy(format!("HTTP {}", resp.status())),
-            Ok(Err(_)) => HealthStatus::Stopped, // connection refused = not running
-            Err(_) => HealthStatus::Unhealthy("Timeout".to_string()),
-        }
+            Ok(Ok(resp)) => HttpProbe::Status(resp.status()),
+            Ok(Err(_)) => HttpProbe::Refused, // connection refused = not running
+            Err(_) => HttpProbe::Timeout,
+        };
+        http_health(probe)
     }
 
     async fn check_update(&self) -> Result<Option<String>> {

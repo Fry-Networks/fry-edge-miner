@@ -2,10 +2,17 @@
 //! :8181, with no node container running. Health now also needs the
 //! `diiisco-node` container to be running. The docker and HTTP seams are
 //! faked (no Docker, no network).
-use super::{
-    classify_health, health_gate, http_health, node_container_ps_args, HealthStatus, HttpProbe,
-};
+use super::{health_gate, http_health, node_container_ps_args, HealthStatus, HttpProbe};
 use reqwest::StatusCode;
+
+/// The verdict health_check reaches: the gate first, the HTTP half only
+/// when the gate lets the node through.
+fn classify_health(node_running: Option<bool>, http: HttpProbe) -> HealthStatus {
+    match health_gate(node_running) {
+        Err(status) => status,
+        Ok(()) => http_health(http),
+    }
+}
 
 fn ok(code: u16) -> HttpProbe {
     HttpProbe::Status(StatusCode::from_u16(code).unwrap())
