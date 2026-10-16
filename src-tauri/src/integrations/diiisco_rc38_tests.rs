@@ -56,6 +56,10 @@ struct R {
     fem_ids: Vec<String>,
     /// Ids whose `docker rmi` fails.
     rmi_fail_ids: Vec<String>,
+    /// Images held by STOPPED containers other than the node container.
+    stopped_containers: Vec<String>,
+    /// `docker ps -a` / inspect failed.
+    containers_unknown: bool,
     /// References whose lookup FAILS (docker error), as opposed to absent.
     error_refs: Vec<String>,
 }
@@ -82,6 +86,8 @@ impl R {
             running_unknown: false,
             fem_ids: Vec::new(),
             rmi_fail_ids: Vec::new(),
+            stopped_containers: Vec::new(),
+            containers_unknown: false,
             error_refs: Vec::new(),
         }
     }
@@ -89,7 +95,9 @@ impl R {
     /// One `docker rmi <id>`: false when a container still uses the image or
     /// the id is in `rmi_fail_ids`.
     fn try_rmi(&self, id: &str) -> bool {
-        if self.container.lock().unwrap().as_deref() == Some(id) {
+        let used = self.container.lock().unwrap().as_deref() == Some(id)
+            || self.stopped_containers.iter().any(|c| c == id);
+        if used {
             self.rec(format!("rmi_conflict:{id}"));
             return false;
         }
@@ -215,6 +223,15 @@ impl NodeOps for R {
         self.promoted.store(true, Ordering::SeqCst);
         self.present.store(true, Ordering::SeqCst);
         Ok(())
+    }
+    /// Every container, running or stopped: the node container plus the stopped ones.
+    fn all_container_image_ids(&self) -> Option<Vec<String>> {
+        if self.containers_unknown {
+            return None;
+        }
+        let mut ids: Vec<String> = self.container.lock().unwrap().clone().into_iter().collect();
+        ids.extend(self.stopped_containers.iter().cloned());
+        Some(ids)
     }
     fn list_node_images(&self) -> Option<Vec<ImageRef>> {
         self.images.clone()
@@ -1022,4 +1039,56 @@ async fn r1_a_failed_sweep_rmi_keeps_the_ledger_entry() {
     );
     assert!(ledger_read(d.path()).contains(&STALE.to_string()), "{c:?}");
     assert!(swept(&r, LEG), "control: the other stale image went: {c:?}");
+}
+
+// ------------------------------------------- R4: stopped containers protect images
+
+fn touched(r: &R, id: &str) -> bool {
+    r.calls()
+        .iter()
+        .any(|c| c.ends_with(&format!(":{id}")) && c.starts_with("rmi"))
+}
+
+#[tokio::test]
+async fn g2_a_stale_ledger_image_held_by_a_stopped_container_is_not_touched() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    stale_world(&mut r, d.path());
+    r.stopped_containers = vec![STALE.to_string()];
+    assert_eq!(seq(&r).await.ok(), Some(Outcome::Upgraded));
+    assert!(
+        !touched(&r, STALE),
+        "no rmi attempt at all: {:?}",
+        r.calls()
+    );
+    assert!(
+        swept(&r, LEG),
+        "control: the unprotected stale image went: {:?}",
+        r.calls()
+    );
+}
+
+#[tokio::test]
+async fn g2_a_legacy_image_held_by_a_stopped_container_is_not_touched() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    stale_world(&mut r, d.path());
+    r.stopped_containers = vec![LEG.to_string()];
+    assert_eq!(seq(&r).await.ok(), Some(Outcome::Upgraded));
+    assert!(!touched(&r, LEG), "no rmi attempt at all: {:?}", r.calls());
+    assert!(
+        swept(&r, STALE),
+        "control: the unprotected stale image went: {:?}",
+        r.calls()
+    );
+}
+
+#[tokio::test]
+async fn g2_unknown_stopped_container_state_removes_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    stale_world(&mut r, d.path());
+    r.containers_unknown = true;
+    assert_eq!(seq(&r).await.ok(), Some(Outcome::Upgraded));
+    assert!(!touched(&r, STALE) && !touched(&r, LEG), "{:?}", r.calls());
 }
