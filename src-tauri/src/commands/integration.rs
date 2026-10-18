@@ -982,11 +982,12 @@ mod fail1_docker_rearm_tests {
     }
 }
 
-/// c4 BUG LOOP 4 (BL4-C): a suppressed elevation no longer hides the shortfall.
+/// A5: a rejected Diiisco enable keeps the user's intent.
 #[cfg(test)]
 #[path = "integration_enable_intent_tests.rs"]
 mod integration_enable_intent_tests;
 
+/// c4 BUG LOOP 4 (BL4-C): a suppressed elevation no longer hides the shortfall.
 #[cfg(test)]
 #[path = "integration_card_notice_order_tests.rs"]
 mod integration_card_notice_order_tests;
