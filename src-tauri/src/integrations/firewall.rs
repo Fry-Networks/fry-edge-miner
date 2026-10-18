@@ -289,6 +289,17 @@ pub(crate) fn rule_listing(rule_name: &str) -> Option<String> {
 /// `program` that covers every active network profile? Fails closed: a missing
 /// or cut-short listing is `Unreadable`, never `Admitted`.
 pub(crate) fn rule_verdict(listing: Option<&str>, program: &str) -> RuleVerdict {
+    verdict_for(listing, program, "Inbound")
+}
+
+/// PURE: the same check for the OUTBOUND allow rule hardening also installs.
+/// A rule of the wrong direction or action reads as `NotInboundAllow`, the one
+/// "right name, wrong kind" verdict.
+pub(crate) fn outbound_rule_verdict(listing: Option<&str>, program: &str) -> RuleVerdict {
+    verdict_for(listing, program, "Outbound")
+}
+
+fn verdict_for(listing: Option<&str>, program: &str, wanted_dir: &str) -> RuleVerdict {
     let Some(listing) = listing else {
         return RuleVerdict::Unreadable;
     };
@@ -323,7 +334,7 @@ pub(crate) fn rule_verdict(listing: Option<&str>, program: &str) -> RuleVerdict 
         let [direction, enabled, action, profile, rule_program] = f[..] else {
             continue;
         };
-        let verdict = if !direction.eq_ignore_ascii_case("Inbound")
+        let verdict = if !direction.eq_ignore_ascii_case(wanted_dir)
             || !action.eq_ignore_ascii_case("Allow")
         {
             RuleVerdict::NotInboundAllow
@@ -426,3 +437,8 @@ mod tests {
 #[cfg(test)]
 #[path = "fryvpn_c5_rule_predicate_tests.rs"]
 mod fryvpn_c5_rule_predicate_tests;
+
+/// A2: the outbound rule is verified like the inbound one.
+#[cfg(test)]
+#[path = "firewall_outbound_tests.rs"]
+mod firewall_outbound_tests;

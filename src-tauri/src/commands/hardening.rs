@@ -66,8 +66,10 @@ pub async fn retry_hardening(state: tauri::State<'_, crate::AppState>) -> Result
             ElevationTrigger::UserClick,
         ) {
             Ok(()) => {
+                let recipe = crate::security_setup::hardening_recipe_sha(&frynode_path);
                 if let Err(e) = config.update(|c| {
                     c.hardening_applied_version = Some(current.to_string());
+                    c.hardening_recipe_sha = Some(recipe.clone());
                 }) {
                     tracing::warn!(error = %e, "Could not persist hardening_applied_version");
                 }
