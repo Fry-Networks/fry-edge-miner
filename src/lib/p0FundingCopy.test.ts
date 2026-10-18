@@ -66,6 +66,22 @@ describe('P0 Sentinel funding copy', () => {
   })
 })
 
+describe('Rust wording and the IntCard parse stay tied (M1)', () => {
+  it('renders sentinel.rs unfunded_message and parses it to MIN_FUNDING_UDVPN / 1e6', () => {
+    const literal = /format!\(\s*"(Sentinel node account not funded[\s\S]*?)",\s*Self::MIN_FUNDING_UDVPN/.exec(sentinelRs)?.[1]
+    expect(literal).toBeTruthy()
+    const udvpn = Number(/MIN_FUNDING_UDVPN: u64 = (\d[\d_]*)/.exec(sentinelRs)?.[1].replace(/_/g, ''))
+    const args = [String(udvpn / 1_000_000), 'sent1qqqqexample']
+    const rendered = literal!.replace(/\\\n\s*/g, '').replace(/\{\}/g, () => args.shift()!)
+    const health = { Unhealthy: rendered }
+    expect(sentinelFundingMinDvpn(health)).toBe(String(udvpn / 1_000_000))
+    expect(sentinelFundingAddress(health)).toBe('sent1qqqqexample')
+    // and the preview fixture is that exact text
+    const fixture = /Unhealthy: "(.*)" \}/.exec(fixtureReason('node account not funded'))![1]
+    expect(fixture).toBe(rendered)
+  })
+})
+
 describe('sentinelFundingMinDvpn', () => {
   it('parses the minimum out of the backend reason', () => {
     expect(sentinelFundingMinDvpn({ Unhealthy: 'Sentinel node account not funded — needs at least 25 DVPN to register' })).toBe('25')
@@ -84,6 +100,7 @@ describe('P0 fryDVPN funding fixture', () => {
     expect(line).toContain('own Fry dVPN node wallet')
     expect(line).toContain('not a payment to anyone')
     expect(line).toContain('Olostep alone earns the full base reward')
-    expect(line).toContain('turn Fry dVPN off with its switch')
+    expect(line).toContain('Optional: you can earn without it by running Olostep instead.')
+    expect(line).toContain('turn Fry dVPN off with its switch and turn Olostep on.')
   })
 })

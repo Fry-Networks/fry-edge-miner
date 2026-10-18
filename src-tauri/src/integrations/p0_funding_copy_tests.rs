@@ -86,6 +86,14 @@ fn assert_plain_copy(name: &str, m: &str) {
         "{name}: boost from the constant: {m}"
     );
     assert!(m.contains("switch"), "{name}: points at the switch: {m}");
+    assert!(
+        m.contains("Optional: you can earn without it by running Olostep instead."),
+        "{name}: earning path: {m}"
+    );
+    assert!(
+        m.contains("turn Fry dVPN off with its switch and turn Olostep on."),
+        "{name}: skip path: {m}"
+    );
 }
 
 #[test]
@@ -114,11 +122,15 @@ fn the_rule_park_suffix_is_plain_and_optional() {
     assert!(m.contains("not a payment to anyone"), "{m}");
     assert!(m.to_lowercase().contains("optional"), "{m}");
     assert!(
-        m.contains("Olostep alone earns the full base reward"),
+        m.contains("you can earn without it by running Olostep instead"),
+        "{m}"
+    );
+    assert!(
+        m.contains("turn Fry dVPN off with its switch and turn Olostep on."),
         "{m}"
     );
     assert!(m.contains("also cannot pay"), "{m}");
-    assert!(m.split_whitespace().count() <= 45, "too long: {m}");
+    assert!(m.split_whitespace().count() <= 65, "too long: {m}");
 }
 
 /// (b) the funding card quotes exactly what the pre-check computes.
@@ -177,7 +189,10 @@ fn heartbeat_amounts_equal_the_precheck_for_three_balances() {
         );
         let n = heartbeat_shortfall_message(amount, MIN_BAL, ADDR).unwrap();
         let s = rule_park_heartbeat_suffix(amount, MIN_BAL, ADDR).unwrap();
-        for (m, lead) in [(n, "Optional: "), (s, "To keep Fry dVPN running — ")] {
+        for (m, lead) in [
+            (n, "To keep Fry dVPN running, "),
+            (s, "To keep Fry dVPN running — "),
+        ] {
             let want_send = format!("{lead}{figure}");
             assert!(
                 m.contains(&want_send),
