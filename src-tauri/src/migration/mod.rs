@@ -8,6 +8,7 @@ use crate::config::miner_key;
 #[cfg(windows)]
 const FRYHUB_DATA_DIR: &str = "C:/ProgramData/FryNetworks";
 
+#[cfg_attr(not(windows), allow(dead_code))]
 const MINER_PREFIXES: &[(&str, &str)] = &[
     ("AEM", "AEM Miner"),
     ("BM", "Bandwidth Miner"),
@@ -61,6 +62,7 @@ pub struct MigrationResult {
 }
 
 /// Detect FryHub installation by scanning a given data directory
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn detect_fryhub_at(data_dir_path: &str) -> Option<FryHubInstallation> {
     let data_dir = PathBuf::from(data_dir_path);
     if !data_dir.exists() {
@@ -113,6 +115,7 @@ pub fn detect_fryhub() -> Option<FryHubInstallation> {
 }
 
 /// Search a miner directory for key files
+#[cfg_attr(not(windows), allow(dead_code))]
 fn find_miner_key_in_dir(dir: &Path, code: &str) -> Option<DetectedMinerKey> {
     // Check for config/miner_key.txt or similar key storage
     let key_file = dir.join("config").join("miner_key.txt");

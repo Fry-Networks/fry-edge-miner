@@ -320,6 +320,7 @@ pub struct SpaceAcresIntegration {
 /// Program Files farmer". `None` on either side means "can't tell" and never
 /// triggers quarantine — an unmeasurable version must not evict a working
 /// staged farmer (same fail-open principle as `evaluate_requirements`).
+#[cfg_attr(not(windows), allow(dead_code))]
 fn staged_is_stale(staged_version: Option<&str>, discovered_version: Option<&str>) -> bool {
     match (staged_version, discovered_version) {
         (Some(s), Some(d)) => s != d,
@@ -370,6 +371,7 @@ const USER_AGENT: &str = concat!("FryEdgeMiner/", env!("CARGO_PKG_VERSION"));
 /// (capitalised, matching its product name) while per-machine installs use
 /// `<base>\Space Acres`; the lowercase spellings cover older portable
 /// layouts. Pure so the layout list is testable.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn roots_for_base(base: &std::path::Path) -> Vec<PathBuf> {
     vec![
         base.join("space-acres"),
@@ -379,6 +381,7 @@ fn roots_for_base(base: &std::path::Path) -> Vec<PathBuf> {
     ]
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn binary_candidates(roots: &[PathBuf]) -> Vec<PathBuf> {
     roots
         .iter()
@@ -395,6 +398,7 @@ fn binary_candidates(roots: &[PathBuf]) -> Vec<PathBuf> {
 /// farmer process is proof of install even when path discovery misses —
 /// re-running the Burn installer over an existing install is what showed the
 /// Modify/Repair maintenance dialog on every launch.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn install_needed(running: bool, binary_found: bool) -> bool {
     !running && !binary_found
 }
@@ -404,6 +408,7 @@ fn install_needed(running: bool, binary_found: bool) -> bool {
 /// The update path stops the farmer first, so `running` is false while
 /// `binary_found` is still true — which is exactly the shape that made
 /// `apply_update` a no-op that reported success.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn install_short_circuits(force: bool, running: bool, binary_found: bool) -> bool {
     !force && !install_needed(running, binary_found)
 }
@@ -426,6 +431,7 @@ fn install_short_circuits(force: bool, running: bool, binary_found: bool) -> boo
 /// `install_for_user`/`apply_update` — both reachable only from a real user
 /// gesture — just set it; `install()`, the boot pass/health-loop path,
 /// never does).
+#[cfg_attr(not(windows), allow(dead_code))]
 fn install_trigger_for(user_gesture: bool) -> crate::elevation_gate::ElevationTrigger {
     if user_gesture {
         crate::elevation_gate::ElevationTrigger::UserClick
@@ -436,6 +442,7 @@ fn install_trigger_for(user_gesture: bool) -> crate::elevation_gate::ElevationTr
 
 /// PURE: does the Automatic-only precheck (ask the gate directly, before any
 /// network I/O, since Automatic is always refused) apply for this trigger?
+#[cfg_attr(not(windows), allow(dead_code))]
 fn precheck_applies(trigger: crate::elevation_gate::ElevationTrigger) -> bool {
     trigger == crate::elevation_gate::ElevationTrigger::Automatic
 }
@@ -445,11 +452,13 @@ fn precheck_applies(trigger: crate::elevation_gate::ElevationTrigger) -> bool {
 mod install_trigger_tests;
 
 /// The PE section name WiX Burn stamps into every bootstrapper it builds.
+#[cfg_attr(not(windows), allow(dead_code))]
 const BURN_SECTION_MARKER: &[u8] = b".wixburn";
 
 /// Whether a PE header carries the `.wixburn` section, i.e. the file is a WiX
 /// Burn bootstrapper (upstream's Windows *installer*) rather than the farmer.
 /// Pure so it is testable without touching the filesystem.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn head_is_burn_bundle(head: &[u8]) -> bool {
     head.windows(BURN_SECTION_MARKER.len())
         .any(|w| w == BURN_SECTION_MARKER)
@@ -476,6 +485,7 @@ fn file_is_burn_bundle(path: &std::path::Path) -> bool {
 /// full, power loss mid-write, antivirus quarantine-and-restore). Pure, same
 /// idiom as `head_is_burn_bundle`, so it is testable without touching the
 /// filesystem.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn head_is_valid_pe(head: &[u8]) -> bool {
     head.len() >= 2 && &head[0..2] == b"MZ"
 }
@@ -540,6 +550,7 @@ fn pe_head_fits_file(head: &[u8], file_len: u64) -> bool {
 /// unconditionally, so `start()` spawned the INSTALLER on every launch and the
 /// user got the "Modify Setup" maintenance dialog instead of a farmer. The
 /// staged copy is only usable when it is the farmer itself.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn pick_binary(
     staged: Option<PathBuf>,
     staged_is_installer: bool,
@@ -1524,6 +1535,7 @@ fn ssd_state() -> Option<bool> {
 /// like. The two are only distinguishable by an AFFIRMATIVE rotational signal,
 /// so `Some(false)` is returned solely when a disk actually reports a spindle
 /// speed above zero. Everything else is `None` and fails OPEN.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn classify_ssd(
     ssd_media: Option<u32>,
     no_penalty: Option<bool>,

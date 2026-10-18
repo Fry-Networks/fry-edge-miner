@@ -30,6 +30,7 @@ pub const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 /// A plain const so the intent is testable on any platform; whether Windows
 /// then genuinely converts a code-integrity refusal into an exit code is a VM
 /// question, not a unit-test one.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const HARD_ERROR_SUPPRESSION_MODE: u32 = 0x0001 | 0x8000;
 
 #[cfg(windows)]

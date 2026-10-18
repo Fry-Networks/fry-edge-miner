@@ -83,6 +83,7 @@ pub(crate) fn pick_docker_cli(on_path: bool, candidates: &[PathBuf]) -> Option<P
 }
 
 /// `...\Docker\Docker\Docker Desktop.exe` -> `...\Docker\Docker\resources\bin\docker.exe`
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn cli_beside_desktop_exe(desktop: &std::path::Path) -> Option<PathBuf> {
     desktop
         .parent()
