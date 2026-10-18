@@ -26,6 +26,8 @@ enum HttpProbe {
 }
 
 /// The `docker` argv that lists the running `diiisco-node` container.
+/// `status=running` excludes Docker's `restarting` state, so a crash-looping
+/// node has no id line and health reads Stopped (F6).
 fn node_container_ps_args() -> Vec<&'static str> {
     vec![
         "ps",
@@ -1341,3 +1343,7 @@ mod diiisco_resolve_c9_tests;
 #[cfg(test)]
 #[path = "diiisco_health_tests.rs"]
 mod diiisco_health_tests;
+
+#[cfg(test)]
+#[path = "diiisco_f6_tests.rs"]
+mod diiisco_f6_tests;
