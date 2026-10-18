@@ -12,6 +12,8 @@
 
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
+
 use tracing::{info, warn};
 
 use crate::elevation_gate::{self, ElevationSkipped, ElevationTrigger};
@@ -22,6 +24,86 @@ use crate::supervisor::platform::BoundedOutput;
 /// version last recorded as successfully hardened. Pure — no I/O, no UAC.
 pub fn should_run_hardening(recorded_version: Option<&str>, current_version: &str) -> bool {
     recorded_version != Some(current_version)
+}
+
+/// What the boot pass and the pre-update pass do about hardening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HardeningDecision {
+    /// Nothing changed and the rules verify: no prompt, nothing to write.
+    Skip,
+    /// Same recipe and the rules verify on a new version: no prompt; the
+    /// caller records the new version and the recipe.
+    RefreshStamp,
+    /// Recipe changed or a rule is missing or altered: ask, as before.
+    Run,
+}
+
+/// Hash of the hardening recipe: the exact script material (the FEM-FryNode
+/// rule name and the delete / add-inbound / add-outbound commands for this
+/// frynode path). A different hash means the posture FEM would apply changed.
+pub(crate) fn hardening_recipe_sha(frynode_path: &Path) -> String {
+    let script = build_hardening_script(Path::new(""), &[], frynode_path);
+    hex::encode(Sha256::digest(
+        format!("fem-hardening-recipe-v1\n{script}").as_bytes(),
+    ))
+}
+
+/// Pure. Re-prompt only when the recipe changed or a rule is missing or
+/// altered (anything but `Admitted`, `Unreadable` included: fail closed). With
+/// both rules verified and the same recipe, a new app version just refreshes
+/// the stamp. A stamp from before recipes were recorded counts as the same
+/// recipe only when a version was recorded and both rules verify.
+pub(crate) fn hardening_decision(
+    recorded_version: Option<&str>,
+    current_version: &str,
+    recorded_recipe: Option<&str>,
+    current_recipe: &str,
+    inbound: firewall::RuleVerdict,
+    outbound: firewall::RuleVerdict,
+) -> HardeningDecision {
+    use firewall::RuleVerdict::Admitted;
+    if inbound != Admitted || outbound != Admitted {
+        return HardeningDecision::Run;
+    }
+    let same_recipe = match recorded_recipe {
+        Some(r) => r == current_recipe,
+        None => recorded_version.is_some(),
+    };
+    if !same_recipe {
+        return HardeningDecision::Run;
+    }
+    if recorded_recipe == Some(current_recipe)
+        && !should_run_hardening(recorded_version, current_version)
+    {
+        HardeningDecision::Skip
+    } else {
+        HardeningDecision::RefreshStamp
+    }
+}
+
+/// The decision for this launch: verifies BOTH FEM-FryNode rules from one
+/// unelevated listing. Returns the current recipe hash for the caller to record.
+pub(crate) fn check_hardening(
+    frynode_path: &Path,
+    recorded_version: Option<&str>,
+    recorded_recipe: Option<&str>,
+    current_version: &str,
+) -> (HardeningDecision, String) {
+    let recipe = hardening_recipe_sha(frynode_path);
+    let listing = firewall::rule_listing("FEM-FryNode");
+    let program = frynode_path.to_string_lossy();
+    let inbound = firewall::rule_verdict(listing.as_deref(), &program);
+    let outbound = firewall::outbound_rule_verdict(listing.as_deref(), &program);
+    let decision = hardening_decision(
+        recorded_version,
+        current_version,
+        recorded_recipe,
+        &recipe,
+        inbound,
+        outbound,
+    );
+    info!(?decision, ?inbound, ?outbound, "Hardening verification");
+    (decision, recipe)
 }
 
 /// PowerShell single-quote escaping (double the `'`), same helper as
@@ -439,3 +521,8 @@ mod security_setup_user_click_hardening_tests;
 #[cfg(test)]
 #[path = "security_setup_no_exclusions_c9_tests.rs"]
 mod security_setup_no_exclusions_c9_tests;
+
+/// A2: the recipe-aware decision.
+#[cfg(test)]
+#[path = "security_setup_recipe_tests.rs"]
+mod security_setup_recipe_tests;

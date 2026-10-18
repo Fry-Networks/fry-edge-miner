@@ -104,6 +104,7 @@ fn owner_of(_port: u16) -> Option<(u32, String)> {
 ///   TCP    0.0.0.0:8088    0.0.0.0:0    LISTENING    4312
 /// Only LISTENING rows count — an outbound connection from an ephemeral port
 /// that happens to equal 8088 is not holding it.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn listening_pid(netstat_output: &str, port: u16) -> Option<u32> {
     let suffix = format!(":{port}");
     for line in netstat_output.lines() {
@@ -130,6 +131,7 @@ pub(crate) fn listening_pid(netstat_output: &str, port: u16) -> Option<u32> {
 ///   python.exe                    4312 Console                 1     12,345 K
 /// The image name may itself contain spaces, so the name is everything before
 /// the first column that parses as the PID.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn first_image(tasklist_output: &str) -> Option<String> {
     for line in tasklist_output.lines() {
         let line = line.trim();

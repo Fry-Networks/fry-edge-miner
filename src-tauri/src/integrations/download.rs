@@ -339,7 +339,13 @@ mod bug1_storage_root_tests {
     #[test]
     fn a_configured_root_never_lets_force_clean_escape_to_the_drive_root() {
         let root = resolve_partners_base_dir(Some(r"D:\"), default_partners_base_dir());
+        #[cfg(windows)]
         assert_eq!(root, PathBuf::from(r"D:\FryEdgeMiner\partners"));
+        #[cfg(not(windows))]
+        assert_eq!(
+            root,
+            PathBuf::from(r"D:\").join("FryEdgeMiner").join("partners")
+        );
         let aem = root.join("aem");
         assert_ne!(
             aem,

@@ -70,6 +70,11 @@ pub struct FemConfig {
     /// re-nag on every single startup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hardening_applied_version: Option<String>,
+    /// A2: hash of the hardening recipe that last completed (or was verified
+    /// intact). A changed recipe re-prompts; an unchanged one does not, even on
+    /// a new app version. `None` for a config saved before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardening_recipe_sha: Option<String>,
     /// BUG 1/4: root directory for partner binaries, installers and partner
     /// data (Space Acres plots, Iagon's node config). `None` — the only value
     /// any existing install has — means the historic
@@ -177,6 +182,7 @@ impl Default for FemConfig {
             myst_lan_override: false,
             last_reported_version: None,
             hardening_applied_version: None,
+            hardening_recipe_sha: None,
             storage_dir: None,
             pending_install_id: None,
             debug_logging_enabled: false,

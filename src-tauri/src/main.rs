@@ -458,15 +458,32 @@ fn main() {
                 tauri::async_runtime::spawn(async move {
                     tokio::task::block_in_place(|| {
                         let current = env!("CARGO_PKG_VERSION");
-                        if !security_setup::should_run_hardening(
-                            hardening_cfg.hardening_applied_version.as_deref(),
-                            current,
-                        ) {
-                            return;
-                        }
                         let Ok(exe_path) = std::env::current_exe() else { return };
                         let Some(install_dir) = exe_path.parent() else { return };
                         let frynode_path = install_dir.join("resources").join("frynode.exe");
+                        // A2: verified on every launch. Prompt only when the
+                        // recipe changed or a rule is missing or altered; a new
+                        // version with the same recipe and intact rules just
+                        // refreshes the stamp.
+                        let (decision, recipe) = security_setup::check_hardening(
+                            &frynode_path,
+                            hardening_cfg.hardening_applied_version.as_deref(),
+                            hardening_cfg.hardening_recipe_sha.as_deref(),
+                            current,
+                        );
+                        match decision {
+                            security_setup::HardeningDecision::Skip => return,
+                            security_setup::HardeningDecision::RefreshStamp => {
+                                if let Err(e) = hardening_config.update(|c| {
+                                    c.hardening_applied_version = Some(current.to_string());
+                                    c.hardening_recipe_sha = Some(recipe.clone());
+                                }) {
+                                    tracing::warn!(error = %e, "Could not refresh the hardening stamp");
+                                }
+                                return;
+                            }
+                            security_setup::HardeningDecision::Run => {}
+                        }
                         let exe_names = ["fry-edge-miner.exe", "frynode.exe"];
                         // B3: boot is not a user action, so this is
                         // `Automatic` — the gate suppresses it and FEM raises
@@ -484,6 +501,7 @@ fn main() {
                             Ok(()) => {
                                 if let Err(e) = hardening_config.update(|c| {
                                     c.hardening_applied_version = Some(current.to_string());
+                                    c.hardening_recipe_sha = Some(recipe.clone());
                                 }) {
                                     tracing::warn!(error = %e, "Could not persist hardening_applied_version");
                                 }

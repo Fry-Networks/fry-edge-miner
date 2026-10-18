@@ -26,6 +26,8 @@ enum HttpProbe {
 }
 
 /// The `docker` argv that lists the running `diiisco-node` container.
+/// `status=running` excludes Docker's `restarting` state, so a crash-looping
+/// node has no id line and health reads Stopped (F6).
 fn node_container_ps_args() -> Vec<&'static str> {
     vec![
         "ps",
@@ -206,6 +208,21 @@ fn diiisco_bearer_token() -> String {
         })
         .unwrap_or_default()
 }
+
+/// A fresh Diiisco node (or its install) was rejected: it did not prove the
+/// device key, or a start is backing off after such a rejection. A typed error
+/// so the toggle can tell it from a timeout or a stop; the text is the message
+/// the user already sees.
+#[derive(Debug)]
+pub struct NodeRejected(pub String);
+
+impl std::fmt::Display for NodeRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NodeRejected {}
 
 pub struct DiiiscoIntegration {
     pub api_client: Arc<ApiClient>,
@@ -441,8 +458,24 @@ impl Integration for DiiiscoIntegration {
             bearer.clone(),
             diiisco_rebuild::stop_generation(),
         );
+        // A6: no usable stamp, but the current image is the one built for this
+        // key + pin: prove it with the F2 probe and stamp it instead of building.
+        if have_image {
+            match diiisco_rebuild::reuse_verified_latest(&node, &deploy_dir, &tag, &key_fp, &pin)
+                .await
+            {
+                diiisco_rebuild::Reuse::Reused => {
+                    info!("Diiisco install reused the verified image (no rebuild)");
+                    return Ok(());
+                }
+                diiisco_rebuild::Reuse::Stopped => {
+                    anyhow::bail!("Diiisco install was stopped; nothing was promoted")
+                }
+                diiisco_rebuild::Reuse::Build => {}
+            }
+        }
         let prev_id = if have_image {
-            diiisco_rebuild::NodeOps::image_lookup(&node, diiisco_rebuild::LATEST_REF).into_id()
+            diiisco_rebuild::capture_latest_id(&node)
         } else {
             None
         };
@@ -495,9 +528,19 @@ impl Integration for DiiiscoIntegration {
         // `latest`; a rejected one is removed and the previous node restored.
         match diiisco_rebuild::gate_candidate(&node, &tag, have_image).await {
             diiisco_rebuild::Gate::Pass => {}
-            diiisco_rebuild::Gate::Rejected => anyhow::bail!(
-                "the new Diiisco node did not prove the device key; the previous node image was kept"
-            ),
+            diiisco_rebuild::Gate::Rejected => {
+                diiisco_rebuild::note_install_reject(
+                    &deploy_dir,
+                    &tag,
+                    diiisco_rebuild::unix_now(),
+                    have_image,
+                    diiisco_rebuild::NodeOps::probe_ran(&node),
+                );
+                return Err(anyhow::Error::new(NodeRejected(
+                    "the new Diiisco node did not prove the device key; the previous node image was kept"
+                        .to_string(),
+                )));
+            }
             diiisco_rebuild::Gate::Stopped => {
                 // A user stop is not a failed attempt and promoted nothing:
                 // no backoff, and callers must not treat this as installed.
@@ -759,6 +802,8 @@ struct DockerNode {
     algo_mnemonic: String,
     bearer: String,
     stop_gen: u64,
+    /// Set once the key probe has run (see `NodeOps::probe_ran`).
+    probed: std::sync::atomic::AtomicBool,
 }
 
 impl DockerNode {
@@ -775,6 +820,7 @@ impl DockerNode {
             algo_mnemonic,
             bearer,
             stop_gen,
+            probed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -795,17 +841,24 @@ impl DockerNode {
     /// The single `docker rmi <id>` call site. `what` names the image in the log.
     fn rmi_logged(&self, id: &str, what: &str) -> bool {
         match self.docker(&["rmi", id]) {
-            Ok(o) if o.status.success() => {
-                info!("{}", diiisco_rebuild::rmi_log_text(what, true));
-                true
-            }
             Ok(o) => {
-                warn!(
-                    stderr = %self.redact(&String::from_utf8_lossy(&o.stderr)),
-                    "{}",
-                    diiisco_rebuild::rmi_log_text(what, false)
-                );
-                false
+                let stderr = self.redact(&String::from_utf8_lossy(&o.stderr));
+                match diiisco_rebuild::rmi_outcome(o.status.success(), &stderr) {
+                    diiisco_rebuild::RmiOutcome::Removed => {
+                        info!("{}", diiisco_rebuild::rmi_log_text(what, true));
+                        true
+                    }
+                    // Already gone is the state we wanted: quiet, and true so
+                    // the caller drops the id from the ledger.
+                    diiisco_rebuild::RmiOutcome::AlreadyGone => {
+                        info!("Diiisco: {what} was already gone");
+                        true
+                    }
+                    diiisco_rebuild::RmiOutcome::Failed => {
+                        warn!(stderr = %stderr, "{}", diiisco_rebuild::rmi_log_text(what, false));
+                        false
+                    }
+                }
             }
             Err(e) => {
                 warn!(error = %e, "{}", diiisco_rebuild::rmi_log_text(what, false));
@@ -935,6 +988,7 @@ impl diiisco_rebuild::NodeOps for DockerNode {
     /// peers available" from an offline mesh counts). Each request is bounded
     /// to 5 s; retried while the node boots.
     async fn probe(&self) -> bool {
+        self.probed.store(true, std::sync::atomic::Ordering::SeqCst);
         let Ok(client) = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .no_proxy()
@@ -957,6 +1011,10 @@ impl diiisco_rebuild::NodeOps for DockerNode {
             }
         }
         false
+    }
+
+    fn probe_ran(&self) -> bool {
+        self.probed.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn tag_latest(&self, tag: &str) -> Result<()> {
@@ -1037,6 +1095,11 @@ impl diiisco_rebuild::NodeOps for DockerNode {
 
     fn stamp_tag(&self) -> Option<String> {
         diiisco_rebuild::read_stamp(&self.deploy).map(|s| s.tag)
+    }
+
+    fn stamp_unreadable(&self) -> bool {
+        self.deploy.join(diiisco_rebuild::STAMP_FILE).exists()
+            && diiisco_rebuild::read_stamp(&self.deploy).is_none()
     }
 
     fn retag_alias(&self, tag: &str, id: &str) -> Result<()> {
@@ -1324,3 +1387,7 @@ mod diiisco_resolve_c9_tests;
 #[cfg(test)]
 #[path = "diiisco_health_tests.rs"]
 mod diiisco_health_tests;
+
+#[cfg(test)]
+#[path = "diiisco_f6_tests.rs"]
+mod diiisco_f6_tests;
