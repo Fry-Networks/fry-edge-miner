@@ -809,17 +809,24 @@ impl DockerNode {
     /// The single `docker rmi <id>` call site. `what` names the image in the log.
     fn rmi_logged(&self, id: &str, what: &str) -> bool {
         match self.docker(&["rmi", id]) {
-            Ok(o) if o.status.success() => {
-                info!("{}", diiisco_rebuild::rmi_log_text(what, true));
-                true
-            }
             Ok(o) => {
-                warn!(
-                    stderr = %self.redact(&String::from_utf8_lossy(&o.stderr)),
-                    "{}",
-                    diiisco_rebuild::rmi_log_text(what, false)
-                );
-                false
+                let stderr = self.redact(&String::from_utf8_lossy(&o.stderr));
+                match diiisco_rebuild::rmi_outcome(o.status.success(), &stderr) {
+                    diiisco_rebuild::RmiOutcome::Removed => {
+                        info!("{}", diiisco_rebuild::rmi_log_text(what, true));
+                        true
+                    }
+                    // Already gone is the state we wanted: quiet, and true so
+                    // the caller drops the id from the ledger.
+                    diiisco_rebuild::RmiOutcome::AlreadyGone => {
+                        info!("Diiisco: {what} was already gone");
+                        true
+                    }
+                    diiisco_rebuild::RmiOutcome::Failed => {
+                        warn!(stderr = %stderr, "{}", diiisco_rebuild::rmi_log_text(what, false));
+                        false
+                    }
+                }
             }
             Err(e) => {
                 warn!(error = %e, "{}", diiisco_rebuild::rmi_log_text(what, false));

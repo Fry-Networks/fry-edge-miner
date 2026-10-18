@@ -2,8 +2,8 @@
 //! private). Synthetic values only; the Docker side is a recording fake.
 #![allow(dead_code)]
 use super::super::diiisco_rebuild::{
-    fp12, image_tag, kept_reason, ledger_add, ledger_remove, note_install_reject,
-    run_node_sequence, ImageLookup, ImageRef, NodeOps, Outcome, LATEST_REF,
+    fp12, image_tag, kept_reason, ledger_add, ledger_remove, note_install_reject, rmi_outcome,
+    run_node_sequence, ImageLookup, ImageRef, NodeOps, Outcome, RmiOutcome, LATEST_REF,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -365,4 +365,26 @@ fn l7_a_candidate_that_is_the_current_image_is_named_as_such() {
     assert!(!other.contains("current image"), "{other}");
     assert!(other.contains("in use"), "{other}");
     assert!(kept_reason(Some(NEW), None).contains("in use"));
+}
+
+// ------------------------------------------------------------- No such image
+
+#[test]
+fn an_rmi_of_an_image_docker_no_longer_has_is_already_gone_not_a_failure() {
+    let gone = "Error response from daemon: No such image: sha256:0123abcd\n";
+    assert_eq!(rmi_outcome(false, gone), RmiOutcome::AlreadyGone);
+    assert_eq!(rmi_outcome(true, ""), RmiOutcome::Removed);
+}
+
+#[test]
+fn every_other_rmi_failure_stays_a_failure() {
+    for e in [
+        "Error response from daemon: conflict: unable to delete sha256:0123 (cannot be forced) - image is being used by running container abc",
+        "Error response from daemon: Get \"http://docker\": connection refused",
+        "",
+    ] {
+        assert_eq!(rmi_outcome(false, e), RmiOutcome::Failed, "{e}");
+    }
+    // A success is never reclassified by stray stderr text.
+    assert_eq!(rmi_outcome(true, "No such image"), RmiOutcome::Removed);
 }

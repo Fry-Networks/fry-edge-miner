@@ -845,6 +845,28 @@ pub(super) fn rmi_log_text(what: &str, removed: bool) -> String {
     }
 }
 
+/// What one `docker rmi <id>` came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RmiOutcome {
+    Removed,
+    /// Docker says the image does not exist: the goal state already holds.
+    AlreadyGone,
+    Failed,
+}
+
+/// PURE: read one `docker rmi` result. Only Docker's own "No such image" on a
+/// failed call counts as already gone; every other failure stays a failure
+/// (the ledger entry is kept for those).
+pub(super) fn rmi_outcome(success: bool, stderr: &str) -> RmiOutcome {
+    if success {
+        RmiOutcome::Removed
+    } else if stderr.contains("No such image") {
+        RmiOutcome::AlreadyGone
+    } else {
+        RmiOutcome::Failed
+    }
+}
+
 /// Undo `tag_latest` after a promotion failed later (the stamp could not be
 /// written): `latest` goes back to the previous image so the node that is
 /// restored is the old, proven one. No previous image = nothing to restore.
