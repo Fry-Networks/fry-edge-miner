@@ -91,12 +91,14 @@ describe('Rust wording and the IntCard parse stay tied (M1)', () => {
 })
 
 describe('parsers are EOL-agnostic (Windows CI checks out CRLF)', () => {
-  const crlf = (t: string) => t.replace(/\n/g, '\r\n')
+  // Normalise first: on a Windows checkout the source is already CRLF.
+  const lf = (t: string) => t.replace(/\r\n/g, '\n')
+  const crlf = (t: string) => lf(t).replace(/\n/g, '\r\n')
   it('renders the same unfunded text from a CRLF copy of sentinel.rs', () => {
-    expect(renderUnfunded(crlf(sentinelRs))).toBe(renderUnfunded(sentinelRs))
+    expect(renderUnfunded(crlf(sentinelRs))).toBe(renderUnfunded(lf(sentinelRs)))
   })
   it('finds the same fixture reason in a CRLF copy of useIntegrations.ts', () => {
-    expect(fixtureReasonIn(crlf(fixtures), 'node account not funded')).toBe(fixtureReason('node account not funded'))
+    expect(fixtureReasonIn(crlf(fixtures), 'node account not funded')).toBe(fixtureReasonIn(lf(fixtures), 'node account not funded'))
   })
 })
 
