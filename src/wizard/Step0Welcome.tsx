@@ -58,7 +58,7 @@ export default function Step0Welcome({ onNext }: Step0Props) {
   const whatsNew = [
     'Clearer Fry dVPN and Sentinel dVPN funding notes: what the node wallet is for, and that both are optional',
     'Security hardening no longer asks again after every update when your firewall rules are already in place',
-    'Diiisco: failed starts now back off instead of retrying constantly, and your choice to enable it is remembered',
+    'Diiisco: a node that fails its device-key check now waits before retrying instead of retrying constantly',
     'Diiisco: an already-verified node image is reused instead of rebuilt',
     'Smaller Diiisco reliability and log-message fixes'
   ]
