@@ -204,7 +204,7 @@ export const SETUP_GUIDANCE: Record<string, SetupGuidance> = {
     urlLabel: 'storj.io'
   },
   sentinel: {
-    what: 'Sentinel Hub will not register this node until its own account holds DVPN.',
+    what: "Sentinel dVPN registers this device's node only once its own Sentinel account holds DVPN (the Sentinel network's token; optional, not a payment to Fry).",
     url: 'https://docs.sentinel.co/',
     urlLabel: 'docs.sentinel.co'
   }

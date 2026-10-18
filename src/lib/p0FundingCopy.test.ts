@@ -43,7 +43,7 @@ describe('P0 Sentinel funding copy', () => {
     expect(sentinelBlock).toContain('not a Fry token')
     expect(sentinelBlock).toContain('Optional')
     expect(sentinelBlock).toContain('does not affect your other rewards')
-    expect(sentinelBlock).toContain('sentinelFundingMinDvpn')
+    expect(intCard).toContain('sentinelFundingMinDvpn(health)')
     expect(sentinelBlock).not.toMatch(/\b10 DVPN/)
   })
 
@@ -60,7 +60,7 @@ describe('P0 Sentinel funding copy', () => {
     expect(line).toContain("Sentinel network's token")
     expect(line).toContain('does not affect your other rewards')
     const udvpn = Number(/MIN_FUNDING_UDVPN: u64 = (\d[\d_]*)/.exec(sentinelRs)?.[1].replace(/_/g, ''))
-    const reason = /Unhealthy: '(.*)' \}/.exec(line)![1]
+    const reason = /Unhealthy: "(.*)" \}/.exec(line)![1]
     expect(sentinelFundingMinDvpn({ Unhealthy: reason })).toBe(String(udvpn / 1_000_000))
     expect(sentinelFundingAddress({ Unhealthy: reason })).toBe('sent1qqqqexample')
   })
@@ -80,7 +80,7 @@ describe('P0 fryDVPN funding fixture', () => {
   it('mirrors the live card copy', () => {
     const line = fixtureReason('Awaiting fryDVPN funding')
     expect(line).not.toMatch(FORBIDDEN)
-    expect(line).toContain('Awaiting fryDVPN funding — Optional:')
+    expect(line).toContain('Awaiting fryDVPN funding — Optional')
     expect(line).toContain('own Fry dVPN node wallet')
     expect(line).toContain('not a payment to anyone')
     expect(line).toContain('Olostep alone earns the full base reward')

@@ -70,7 +70,7 @@ export function intgHintOverrides(state: string): Partial<IntegrationStatus> {
       // — carries a sent1 address so sentinelFundingAddress() extracts it.
       return {
         enabled: true,
-        health: { Unhealthy: 'Sentinel node account not funded — send DVPN to sent1qqqqexample to activate this node' },
+        health: { Unhealthy: "Sentinel node account not funded — Optional: this device's own Sentinel node account needs at least 10 DVPN (the Sentinel network's token, not a Fry token) to register Sentinel dVPN and pay network fees. To use it, send DVPN to sent1qqqqexample. This is not a payment to Fry or anyone. To skip it, turn Sentinel dVPN off with its switch; that does not affect your other rewards." },
         lifecycle: 'Unhealthy',
         version: '1.0.0'
       }
@@ -93,7 +93,7 @@ export function intgHintOverrides(state: string): Partial<IntegrationStatus> {
       // reason, hiding the funding/setup guidance body text entirely.
       return {
         enabled: true,
-        health: { Unhealthy: 'Awaiting fryDVPN funding — fryDVPN needs about 0.312 ALGO in this device\'s wallet to register on-chain, and it currently has 0.100 ALGO — about 0.212 ALGO short. Send ALGO to ADDR and fryDVPN will register automatically on the next check.' },
+        health: { Unhealthy: "Awaiting fryDVPN funding — Optional, not needed to earn. This device's own Fry dVPN node wallet (holds 0.100 ALGO) needs 0.312 ALGO total (network minimum plus fees) to register the node. To use Fry dVPN, send 0.212 ALGO to ADDR. This is not Fry's wallet or your reward wallet, and not a payment to anyone. To skip it, turn Fry dVPN off with its switch. Olostep alone earns the full base reward; running both adds 15%." },
         lifecycle: 'Unhealthy',
         version: '1.0.0',
         error: 'frynode could not be started: a previous attempt timed out'

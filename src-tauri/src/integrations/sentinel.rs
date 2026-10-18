@@ -196,7 +196,12 @@ impl SentinelIntegration {
     /// The card text for a node whose account has never received DVPN.
     fn unfunded_message(addr: &str) -> String {
         format!(
-            "Sentinel node account not funded — send DVPN to {} to activate this node",
+            "Sentinel node account not funded — Optional: this device's own Sentinel node account \
+             needs at least {} DVPN (the Sentinel network's token, not a Fry token) to register \
+             Sentinel dVPN and pay network fees. To use it, send DVPN to {}. This is not a \
+             payment to Fry or anyone. To skip it, turn Sentinel dVPN off with its switch; that \
+             does not affect your other rewards.",
+            Self::MIN_FUNDING_UDVPN / 1_000_000,
             addr
         )
     }
