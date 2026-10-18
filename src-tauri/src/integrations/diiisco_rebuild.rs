@@ -23,6 +23,10 @@ pub(super) const BACKOFF_FILE: &str = "node-rebuild.backoff";
 /// which the fresh path deliberately ignores.
 pub(super) const FRESH_COOLDOWN_FILE: &str = "node-fresh-reject.cooldown";
 pub(super) const LATEST_REF: &str = "diiisco-node:latest";
+/// m4 restored `diiisco-node:<tag>` as an alias of `latest` under an unreadable
+/// stamp, so that alias says nothing about which pin `latest` was built for.
+/// The tag is inside. A6 never reuses an image on the strength of such an alias.
+pub(super) const ALIAS_MARKER_FILE: &str = "node-alias-restored.marker";
 const BACKOFF_BASE_SECS: u64 = 3600;
 const BACKOFF_CAP_SECS: u64 = 86_400;
 pub(super) const PROBE_BUDGET_SECS: u64 = 90;
@@ -373,6 +377,27 @@ pub(super) fn fresh_reject_defers(dir: &Path, tag: &str, now: u64) -> bool {
     )
 }
 
+/// Record that the alias for `tag` was put back by m4 (stamp unreadable).
+pub(super) fn write_alias_marker(dir: &Path, tag: &str) {
+    if let Err(e) = write_atomic(dir, ALIAS_MARKER_FILE, &format!("{tag}\n")) {
+        warn!(error = %e, "Diiisco: cannot record the restored image alias");
+    }
+}
+
+/// True when the marker names `tag`. A missing or unreadable marker is "not
+/// restored".
+pub(super) fn alias_restored_for(dir: &Path, tag: &str) -> bool {
+    std::fs::read_to_string(dir.join(ALIAS_MARKER_FILE)).is_ok_and(|t| t.trim() == tag)
+}
+
+pub(super) fn clear_alias_marker(dir: &Path) {
+    if let Err(e) = std::fs::remove_file(dir.join(ALIAS_MARKER_FILE)) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            warn!(error = %e, "Diiisco: could not clear the restored-alias marker");
+        }
+    }
+}
+
 /// F3: install() and start() agree. A fresh install (no image yet) whose
 /// candidate did not prove the key arms the same cooldown start() reads, so a
 /// start() right after is not another full build. Docker trouble and installs
@@ -587,6 +612,9 @@ pub(super) trait NodeOps: Send + Sync {
     fn stamp_tag(&self) -> Option<String> {
         None
     }
+    /// m4 put the `diiisco-node:<tag>` alias back under an unreadable stamp:
+    /// remember that (see `ALIAS_MARKER_FILE`). Default: nothing.
+    fn note_alias_restored(&self, _tag: &str) {}
     /// The stamp file exists but cannot be read, so `stamp_tag` says nothing
     /// about which tag `latest` carries. Default: no.
     fn stamp_unreadable(&self) -> bool {
@@ -651,6 +679,7 @@ pub(super) fn after_fresh_build<O: NodeOps + ?Sized>(
     )?;
     clear_backoff(dir);
     clear_fresh_cooldown(dir);
+    clear_alias_marker(dir);
     Ok(())
 }
 
@@ -953,12 +982,16 @@ pub(super) fn discard_candidate_by_id<O: NodeOps + ?Sized>(ops: &O, tag: &str) {
             // the candidate; removing the candidate by id takes that alias
             // with it, so give `latest` its alias back.
             // An unreadable stamp (m4) says nothing about the tag, so it is
-            // treated as a match: the alias is only a pointer at `latest`, and
-            // a stamp is never written from an alias without a probe pass.
-            if ops.stamp_tag().as_deref() == Some(tag) || ops.stamp_unreadable() {
+            // treated as a match. Such an alias may point a NEW tag at an
+            // old-pin `latest`, so it is marked: A6 never reuses an image on
+            // the strength of a marked alias.
+            let stamped = ops.stamp_tag().as_deref() == Some(tag);
+            if stamped || ops.stamp_unreadable() {
                 if let Some(latest) = latest.as_deref() {
-                    if let Err(e) = ops.retag_alias(tag, latest) {
-                        warn!(error = %e, "Diiisco: could not restore the image alias");
+                    match ops.retag_alias(tag, latest) {
+                        Ok(()) if !stamped => ops.note_alias_restored(tag),
+                        Ok(()) => {}
+                        Err(e) => warn!(error = %e, "Diiisco: could not restore the image alias"),
                     }
                 }
             }
@@ -1093,7 +1126,7 @@ pub(super) async fn reuse_verified_latest<O: NodeOps + ?Sized>(
     key_fp: &str,
     pin_sha: &str,
 ) -> Reuse {
-    if read_stamp(dir).is_some() {
+    if read_stamp(dir).is_some() || alias_restored_for(dir, tag) {
         return Reuse::Build;
     }
     let Some(latest) = capture_latest_id(ops) else {
@@ -1354,6 +1387,7 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
     }
     clear_backoff(dir);
     clear_fresh_cooldown(dir);
+    clear_alias_marker(dir);
     if let Some(prev) = prev_id.filter(|p| previous_to_remove(ops, p, &tag)) {
         ops.rmi_labeled(&prev, "previous node image");
     }

@@ -288,6 +288,9 @@ impl NodeOps for R {
     fn stamp_unreadable(&self) -> bool {
         self.stamp_unreadable
     }
+    fn note_alias_restored(&self, t: &str) {
+        super::super::diiisco_rebuild::write_alias_marker(&self.dir, t);
+    }
     fn retag_alias(&self, t: &str, id: &str) -> Result<()> {
         self.rec(format!("retag_alias:{t}:{id}"));
         Ok(())
@@ -629,4 +632,71 @@ fn a6_install_tries_the_reuse_between_the_backoff_check_and_the_build() {
         at("install_backoff_check(") < at("reuse_verified_latest(")
             && at("reuse_verified_latest(") < at("\"compose\", \"build\"")
     );
+}
+
+// ------------------------------------------------------------- A6 x m4 (V1)
+// A rejected candidate for a NEW pin re-points `diiisco-node:<newtag>` at the
+// old image (m4, unreadable stamp). That alias must never be mistaken by A6
+// for "latest was built for this tag".
+
+#[tokio::test]
+async fn a6_an_alias_m4_restored_under_an_unreadable_stamp_is_never_reused() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    r.stamp_unreadable = true;
+    discard_candidate_by_id(&r, &tag());
+    assert!(
+        r.has_prefix("retag_alias"),
+        "m4 restored the alias: {:?}",
+        r.calls()
+    );
+    // Docker now resolves the alias to latest's image.
+    r.alias_is_latest = true;
+    assert_eq!(reuse(&r).await, Reuse::Build, "{:?}", r.calls());
+    assert!(
+        read_stamp(d.path()).is_none(),
+        "no stamp for an old-pin image"
+    );
+    assert!(!r.has_prefix("probe"), "{:?}", r.calls());
+}
+
+#[tokio::test]
+async fn a6_a_marker_for_another_tag_or_a_cleared_one_still_allows_the_reuse() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.alias_is_latest = true;
+    super::super::diiisco_rebuild::write_alias_marker(d.path(), "fem-000000000000");
+    assert_eq!(reuse(&r).await, Reuse::Reused, "{:?}", r.calls());
+
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.alias_is_latest = true;
+    super::super::diiisco_rebuild::write_alias_marker(d.path(), &tag());
+    super::super::diiisco_rebuild::clear_alias_marker(d.path());
+    assert_eq!(reuse(&r).await, Reuse::Reused, "{:?}", r.calls());
+}
+
+#[tokio::test]
+async fn a6_a_successful_stamp_write_clears_the_marker() {
+    let d = tempfile::tempdir().unwrap();
+    super::super::diiisco_rebuild::write_alias_marker(d.path(), &tag());
+    let r = R::new(d.path(), false);
+    let out = run_node_sequence(&r, &r.dir, &key_fp(), &pin(), || NOW, true).await;
+    assert_eq!(out.ok(), Some(Outcome::BuiltFresh));
+    assert!(!super::super::diiisco_rebuild::alias_restored_for(
+        d.path(),
+        &tag()
+    ));
+
+    // The upgrade path clears it too.
+    let d = tempfile::tempdir().unwrap();
+    super::super::diiisco_rebuild::write_alias_marker(d.path(), &tag());
+    let r = R::new(d.path(), true);
+    let out = run_node_sequence(&r, &r.dir, &key_fp(), &pin(), || NOW, true).await;
+    assert_eq!(out.ok(), Some(Outcome::Upgraded), "{:?}", r.calls());
+    assert!(!super::super::diiisco_rebuild::alias_restored_for(
+        d.path(),
+        &tag()
+    ));
 }
