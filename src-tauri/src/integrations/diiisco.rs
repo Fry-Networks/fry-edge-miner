@@ -1097,8 +1097,12 @@ impl diiisco_rebuild::NodeOps for DockerNode {
         diiisco_rebuild::read_stamp(&self.deploy).map(|s| s.tag)
     }
 
-    fn note_alias_restored(&self, tag: &str) {
-        diiisco_rebuild::write_alias_marker(&self.deploy, tag);
+    fn note_alias_restored(&self, tag: &str) -> bool {
+        diiisco_rebuild::write_alias_marker(&self.deploy, tag)
+    }
+
+    fn forget_alias_restored(&self) {
+        diiisco_rebuild::clear_alias_marker(&self.deploy);
     }
 
     fn stamp_unreadable(&self) -> bool {

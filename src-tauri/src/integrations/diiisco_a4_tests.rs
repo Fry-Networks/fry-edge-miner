@@ -65,6 +65,8 @@ struct R {
     /// Every reference other than `latest` resolves to the same image as `latest`
     /// (`diiisco-node:<tag>` is an alias of it).
     alias_is_latest: bool,
+    /// `docker tag` for an alias fails.
+    retag_alias_fails: bool,
     /// References whose FIRST lookup fails (a transient docker error).
     error_once: Mutex<Vec<String>>,
     /// The stamp file exists but cannot be read.
@@ -98,6 +100,7 @@ impl R {
             dangling_ids: Vec::new(),
             error_refs: Vec::new(),
             alias_is_latest: false,
+            retag_alias_fails: false,
             error_once: Mutex::new(Vec::new()),
             stamp_unreadable: false,
         }
@@ -288,11 +291,17 @@ impl NodeOps for R {
     fn stamp_unreadable(&self) -> bool {
         self.stamp_unreadable
     }
-    fn note_alias_restored(&self, t: &str) {
-        super::super::diiisco_rebuild::write_alias_marker(&self.dir, t);
+    fn note_alias_restored(&self, t: &str) -> bool {
+        super::super::diiisco_rebuild::write_alias_marker(&self.dir, t)
+    }
+    fn forget_alias_restored(&self) {
+        super::super::diiisco_rebuild::clear_alias_marker(&self.dir);
     }
     fn retag_alias(&self, t: &str, id: &str) -> Result<()> {
         self.rec(format!("retag_alias:{t}:{id}"));
+        if self.retag_alias_fails {
+            anyhow::bail!("fake tag failed");
+        }
         Ok(())
     }
     fn retag_latest(&self, id: &str) -> Result<()> {
@@ -699,4 +708,35 @@ async fn a6_a_successful_stamp_write_clears_the_marker() {
         d.path(),
         &tag()
     ));
+}
+
+// ---------------------------------------------- m4 marker ordering (V1 delta)
+
+#[test]
+fn m4_the_marker_is_written_before_the_retag_and_a_failed_write_skips_the_retag() {
+    // The marker directory cannot be written (it is a regular file): the alias
+    // must not be put back, or a crash here would leave it with no marker.
+    let d = tempfile::tempdir().unwrap();
+    let not_a_dir = d.path().join("plain-file");
+    std::fs::write(&not_a_dir, b"x").unwrap();
+    let mut r = R::new(&not_a_dir, true);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    r.stamp_unreadable = true;
+    discard_candidate_by_id(&r, &tag());
+    assert!(!r.has_prefix("retag_alias"), "{:?}", r.calls());
+}
+
+#[test]
+fn m4_a_failed_retag_takes_the_marker_back() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    r.stamp_unreadable = true;
+    r.retag_alias_fails = true;
+    discard_candidate_by_id(&r, &tag());
+    assert!(r.has_prefix("retag_alias"), "{:?}", r.calls());
+    assert!(
+        !super::super::diiisco_rebuild::alias_restored_for(d.path(), &tag()),
+        "no alias, so no marker"
+    );
 }
