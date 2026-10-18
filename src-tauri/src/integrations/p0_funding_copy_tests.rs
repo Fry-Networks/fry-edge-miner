@@ -50,16 +50,41 @@ fn standalone_texts() -> Vec<(&'static str, String)> {
 }
 
 fn assert_plain_copy(name: &str, m: &str) {
-    assert!(forbidden_words(m).is_empty(), "{name}: {:?}: {m}", forbidden_words(m));
+    assert!(
+        forbidden_words(m).is_empty(),
+        "{name}: {:?}: {m}",
+        forbidden_words(m)
+    );
     assert!(m.contains("Fry dVPN"), "{name}: names the integration: {m}");
-    assert!(m.contains("node wallet"), "{name}: says what the wallet is: {m}");
-    assert!(m.contains("own Fry dVPN node wallet"), "{name}: this device's own: {m}");
-    assert!(m.contains("not a payment to anyone"), "{name}: not a payment: {m}");
-    assert!(m.contains("not Fry's wallet"), "{name}: not Fry's wallet: {m}");
+    assert!(
+        m.contains("node wallet"),
+        "{name}: says what the wallet is: {m}"
+    );
+    assert!(
+        m.contains("own Fry dVPN node wallet"),
+        "{name}: this device's own: {m}"
+    );
+    assert!(
+        m.contains("not a payment to anyone"),
+        "{name}: not a payment: {m}"
+    );
+    assert!(
+        m.contains("not Fry's wallet"),
+        "{name}: not Fry's wallet: {m}"
+    );
     assert!(m.split_whitespace().count() <= 80, "{name}: too long: {m}");
-    assert!(m.to_lowercase().contains("optional"), "{name}: optional: {m}");
-    assert!(m.contains("Olostep alone earns the full base reward"), "{name}: {m}");
-    assert!(m.contains(&boost_text()), "{name}: boost from the constant: {m}");
+    assert!(
+        m.to_lowercase().contains("optional"),
+        "{name}: optional: {m}"
+    );
+    assert!(
+        m.contains("Olostep alone earns the full base reward"),
+        "{name}: {m}"
+    );
+    assert!(
+        m.contains(&boost_text()),
+        "{name}: boost from the constant: {m}"
+    );
     assert!(m.contains("switch"), "{name}: points at the switch: {m}");
 }
 
@@ -73,8 +98,8 @@ fn every_standalone_fry_dvpn_funding_text_is_plain_and_optional() {
 
 #[test]
 fn the_funding_card_keeps_its_marker_and_stays_short() {
-    let m = registration_funding_message(0, MIN_BAL, REGISTRATION_MIN_MICROALGOS, ADDR)
-        .unwrap_err();
+    let m =
+        registration_funding_message(0, MIN_BAL, REGISTRATION_MIN_MICROALGOS, ADDR).unwrap_err();
     assert!(m.starts_with(FUNDING_MARKER), "{m}");
     assert!(crate::integrations::awaits_user_action(&m));
     assert!(m.split_whitespace().count() <= 80, "too long: {m}");
@@ -88,7 +113,10 @@ fn the_rule_park_suffix_is_plain_and_optional() {
     assert!(m.contains("own Fry dVPN node wallet"), "{m}");
     assert!(m.contains("not a payment to anyone"), "{m}");
     assert!(m.to_lowercase().contains("optional"), "{m}");
-    assert!(m.contains("Olostep alone earns the full base reward"), "{m}");
+    assert!(
+        m.contains("Olostep alone earns the full base reward"),
+        "{m}"
+    );
     assert!(m.contains("also cannot pay"), "{m}");
     assert!(m.split_whitespace().count() <= 45, "too long: {m}");
 }
@@ -101,11 +129,17 @@ fn funding_card_amounts_equal_the_precheck_for_three_balances() {
         let m = registration_funding_message(amount, MIN_BAL, REGISTRATION_MIN_MICROALGOS, ADDR)
             .unwrap_err();
         let short = total - amount;
-        let send = format!("To use Fry dVPN, send {} ALGO to {ADDR}", algo3(short.div_ceil(1_000) * 1_000));
+        let send = format!(
+            "To use Fry dVPN, send {} ALGO to {ADDR}",
+            algo3(short.div_ceil(1_000) * 1_000)
+        );
         let needs = format!("needs {} ALGO total", algo3(total.div_ceil(1_000) * 1_000));
         let holds = format!("holds {} ALGO)", algo3(amount / 1_000 * 1_000));
         for want in [send, needs, holds] {
-            assert!(m.contains(&want), "amount {amount}: missing {want:?} in {m}");
+            assert!(
+                m.contains(&want),
+                "amount {amount}: missing {want:?} in {m}"
+            );
         }
     }
 }
@@ -115,13 +149,19 @@ fn affordability_amounts_equal_the_precheck_for_three_balances() {
     let required = 212_000u64;
     for spendable in [0u64, 100_000, required - 1] {
         let m = registration_affordability(spendable, required, ADDR).unwrap_err();
-        assert!(m.contains(&format!("To use Fry dVPN, send ALGO to {ADDR}")), "{m}");
+        assert!(
+            m.contains(&format!("To use Fry dVPN, send ALGO to {ADDR}")),
+            "{m}"
+        );
         for want in [
             algo3(required),
             algo3(spendable),
             algo3(required - spendable),
         ] {
-            assert!(m.contains(&format!("{want} ALGO")), "spendable {spendable}: {want} in {m}");
+            assert!(
+                m.contains(&format!("{want} ALGO")),
+                "spendable {spendable}: {want} in {m}"
+            );
         }
     }
 }
@@ -131,12 +171,18 @@ fn heartbeat_amounts_equal_the_precheck_for_three_balances() {
     for amount in [0u64, 100_000, 100_000 + HEARTBEAT_FEE_MICROALGOS - 1] {
         let short = MIN_BAL + HEARTBEAT_FEE_MICROALGOS - amount;
         let figure = format!("send {:.6} ALGO to {ADDR}", short as f64 / 1_000_000.0);
-        let want_fee = format!("{} ALGO fee of its next heartbeat", algo3(HEARTBEAT_FEE_MICROALGOS));
+        let want_fee = format!(
+            "{} ALGO fee of its next heartbeat",
+            algo3(HEARTBEAT_FEE_MICROALGOS)
+        );
         let n = heartbeat_shortfall_message(amount, MIN_BAL, ADDR).unwrap();
         let s = rule_park_heartbeat_suffix(amount, MIN_BAL, ADDR).unwrap();
         for (m, lead) in [(n, "Optional: "), (s, "To keep Fry dVPN running — ")] {
             let want_send = format!("{lead}{figure}");
-            assert!(m.contains(&want_send), "amount {amount}: {want_send} in {m}");
+            assert!(
+                m.contains(&want_send),
+                "amount {amount}: {want_send} in {m}"
+            );
             assert!(m.contains(&want_fee), "amount {amount}: {want_fee} in {m}");
         }
     }

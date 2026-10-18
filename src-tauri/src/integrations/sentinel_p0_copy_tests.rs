@@ -20,7 +20,12 @@ fn unfunded_message_is_plain_optional_and_not_a_payment_to_fry() {
     for w in ["activat", "opt in", "opt-in", "optin"] {
         assert!(!lower.contains(w), "{w}: {m}");
     }
-    assert!(!lower.split(|c: char| !c.is_alphanumeric()).any(|t| t == "asa"), "{m}");
+    assert!(
+        !lower
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|t| t == "asa"),
+        "{m}"
+    );
     assert!(m.contains("Sentinel dVPN"), "{m}");
     assert!(m.contains("Sentinel network's token"), "{m}");
     assert!(m.contains("not a Fry token"), "{m}");
