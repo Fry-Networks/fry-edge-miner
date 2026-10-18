@@ -1602,16 +1602,33 @@ mod discovery_tests {
     fn the_wix_bin_subdirectory_is_probed() {
         let roots = vec![PathBuf::from(r"C:\Program Files\Space Acres")];
         let candidates = binary_candidates(&roots);
+        #[cfg(windows)]
         assert!(
             candidates.contains(&PathBuf::from(
                 r"C:\Program Files\Space Acres\bin\space-acres.exe"
             )),
             "candidates must include the WiX bin layout: {candidates:?}"
         );
+        #[cfg(windows)]
         assert!(
             candidates.contains(&PathBuf::from(
                 r"C:\Program Files\Space Acres\space-acres.exe"
             )),
+            "the flat layout must keep working: {candidates:?}"
+        );
+        #[cfg(not(windows))]
+        assert!(
+            candidates.contains(
+                &PathBuf::from(r"C:\Program Files\Space Acres")
+                    .join("bin")
+                    .join("space-acres.exe")
+            ),
+            "candidates must include the WiX bin layout: {candidates:?}"
+        );
+        #[cfg(not(windows))]
+        assert!(
+            candidates
+                .contains(&PathBuf::from(r"C:\Program Files\Space Acres").join("space-acres.exe")),
             "the flat layout must keep working: {candidates:?}"
         );
     }
