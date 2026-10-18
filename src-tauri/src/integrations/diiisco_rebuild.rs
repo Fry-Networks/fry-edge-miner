@@ -1068,6 +1068,54 @@ pub(super) fn reject_candidate<O: NodeOps + ?Sized>(ops: &O, tag: &str, have_ima
     ops.discard_candidate(tag);
 }
 
+/// What `reuse_verified_latest` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Reuse {
+    /// Not applicable, or the proof did not pass: build as before.
+    Build,
+    /// The existing `latest` proved the key and was stamped: nothing to build.
+    Reused,
+    /// `stop()` ran meanwhile: nothing was promoted.
+    Stopped,
+}
+
+/// A6: install() would rebuild only because no usable stamp exists, although
+/// `diiisco-node:latest` is present and `diiisco-node:<tag>` already points at
+/// that very image (so it was built for this key + pin and promoted). Instead
+/// of a build, bring that image up and run the same F2 probe candidates get.
+/// Only a pass stamps it (the same writer as a fresh build); a rejected or
+/// unknown proof changes nothing and the caller builds as before. The caller
+/// holds the rebuild lock.
+pub(super) async fn reuse_verified_latest<O: NodeOps + ?Sized>(
+    ops: &O,
+    dir: &Path,
+    tag: &str,
+    key_fp: &str,
+    pin_sha: &str,
+) -> Reuse {
+    if read_stamp(dir).is_some() {
+        return Reuse::Build;
+    }
+    let Some(latest) = capture_latest_id(ops) else {
+        return Reuse::Build;
+    };
+    match ops.image_lookup(&format!("diiisco-node:{tag}")) {
+        ImageLookup::Present(id) if id == latest => {}
+        _ => return Reuse::Build,
+    }
+    match gate_candidate(ops, tag, true).await {
+        Gate::Pass => match after_fresh_build(ops, dir, tag, key_fp, pin_sha) {
+            Ok(()) => Reuse::Reused,
+            Err(e) => {
+                warn!(error = %e, "Diiisco: could not stamp the proven image — building instead");
+                Reuse::Build
+            }
+        },
+        Gate::Rejected => Reuse::Build,
+        Gate::Stopped => Reuse::Stopped,
+    }
+}
+
 /// After a promotion: remove the PREVIOUS `latest` image by id, unless it is
 /// the new image itself.
 pub(super) fn drop_previous<O: NodeOps + ?Sized>(ops: &O, prev: Option<&str>, tag: &str) {

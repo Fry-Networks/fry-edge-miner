@@ -458,6 +458,22 @@ impl Integration for DiiiscoIntegration {
             bearer.clone(),
             diiisco_rebuild::stop_generation(),
         );
+        // A6: no usable stamp, but the current image is the one built for this
+        // key + pin: prove it with the F2 probe and stamp it instead of building.
+        if have_image {
+            match diiisco_rebuild::reuse_verified_latest(&node, &deploy_dir, &tag, &key_fp, &pin)
+                .await
+            {
+                diiisco_rebuild::Reuse::Reused => {
+                    info!("Diiisco install reused the verified image (no rebuild)");
+                    return Ok(());
+                }
+                diiisco_rebuild::Reuse::Stopped => {
+                    anyhow::bail!("Diiisco install was stopped; nothing was promoted")
+                }
+                diiisco_rebuild::Reuse::Build => {}
+            }
+        }
         let prev_id = if have_image {
             diiisco_rebuild::capture_latest_id(&node)
         } else {

@@ -3,8 +3,8 @@
 #![allow(dead_code)]
 use super::super::diiisco_rebuild::{
     discard_candidate_by_id, fp12, image_tag, kept_reason, ledger_add, ledger_remove,
-    note_install_reject, rmi_outcome, run_node_sequence, ImageLookup, ImageRef, NodeOps, Outcome,
-    RmiOutcome, LATEST_REF,
+    note_install_reject, read_stamp, reuse_verified_latest, rmi_outcome, run_node_sequence,
+    ImageLookup, ImageRef, NodeOps, Outcome, Reuse, RmiOutcome, Stamp, LATEST_REF,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -62,6 +62,9 @@ struct R {
     dangling_ids: Vec<String>,
     /// References whose lookup FAILS (docker error), as opposed to absent.
     error_refs: Vec<String>,
+    /// Every reference other than `latest` resolves to the same image as `latest`
+    /// (`diiisco-node:<tag>` is an alias of it).
+    alias_is_latest: bool,
     /// References whose FIRST lookup fails (a transient docker error).
     error_once: Mutex<Vec<String>>,
     /// The stamp file exists but cannot be read.
@@ -94,6 +97,7 @@ impl R {
             containers_unknown: false,
             dangling_ids: Vec::new(),
             error_refs: Vec::new(),
+            alias_is_latest: false,
             error_once: Mutex::new(Vec::new()),
             stamp_unreadable: false,
         }
@@ -160,6 +164,9 @@ impl NodeOps for R {
                 }
                 .into(),
             );
+        }
+        if self.alias_is_latest {
+            return self.present.load(Ordering::SeqCst).then(|| OLD.into());
         }
         self.cand_exists.load(Ordering::SeqCst).then(|| NEW.into())
     }
@@ -506,4 +513,120 @@ async fn a5_docker_trouble_and_a_missing_pin_are_not_rejections() {
         .await
         .unwrap_err();
     assert!(err.downcast_ref::<NodeRejected>().is_none(), "{err:#}");
+}
+
+// ------------------------------------------------------------------------ A6
+// install() rebuilt whenever the stamp was missing or unreadable, although
+// `diiisco-node:latest` was present and `diiisco-node:<tag>` already pointed at
+// the very same image. The image is reused only after the same F2 probe passes.
+
+async fn reuse(r: &R) -> Reuse {
+    reuse_verified_latest(r, &r.dir, &tag(), &key_fp(), &pin()).await
+}
+
+fn stamp_for_tag() -> Stamp {
+    Stamp {
+        tag: tag(),
+        key_fp: key_fp(),
+        pin_sha: pin(),
+    }
+}
+
+#[tokio::test]
+async fn a6_a_proven_latest_with_a_matching_alias_is_stamped_without_a_build() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.alias_is_latest = true;
+    assert_eq!(reuse(&r).await, Reuse::Reused, "{:?}", r.calls());
+    let c = r.calls();
+    assert!(!c.iter().any(|x| x.starts_with("build:")), "{c:?}");
+    assert_eq!(c.iter().filter(|x| *x == "probe").count(), 1, "{c:?}");
+    assert_eq!(read_stamp(d.path()), Some(stamp_for_tag()));
+    // The stamp is written only after the probe passed.
+    assert!(
+        at(&c, "probe") < at(&c, &format!("tag_latest:{}", tag())),
+        "{c:?}"
+    );
+    assert!(!c.iter().any(|x| x.starts_with("rmi")), "{c:?}");
+}
+
+#[tokio::test]
+async fn a6_a_failed_or_unknown_proof_never_writes_a_stamp_and_falls_back_to_the_build() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.alias_is_latest = true;
+    r.probe_ok = false;
+    assert_eq!(reuse(&r).await, Reuse::Build);
+    assert!(read_stamp(d.path()).is_none());
+    let c = r.calls();
+    assert!(
+        !c.iter().any(|x| x.starts_with("rmi")),
+        "latest is never removed: {c:?}"
+    );
+    assert!(!c.iter().any(|x| x.starts_with("tag_latest")), "{c:?}");
+
+    // The container cannot be brought up: same.
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.alias_is_latest = true;
+    r.up_ok = false;
+    assert_eq!(reuse(&r).await, Reuse::Build);
+    assert!(read_stamp(d.path()).is_none());
+}
+
+#[tokio::test]
+async fn a6_without_proof_that_the_alias_is_latest_nothing_is_reused() {
+    // The alias is a different image (or absent): build as before, no probe.
+    let d = tempfile::tempdir().unwrap();
+    let r = R::new(d.path(), true);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    assert_eq!(reuse(&r).await, Reuse::Build);
+    assert!(
+        !r.has_prefix("probe") && !r.has_prefix("up_no_build"),
+        "{:?}",
+        r.calls()
+    );
+    // Alias lookup fails: unknown is not a match.
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.alias_is_latest = true;
+    r.error_refs = vec![format!("diiisco-node:{}", tag())];
+    assert_eq!(reuse(&r).await, Reuse::Build);
+    assert!(!r.has_prefix("probe"), "{:?}", r.calls());
+    assert!(read_stamp(d.path()).is_none());
+    // No image at all.
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), false);
+    r.alias_is_latest = true;
+    assert_eq!(reuse(&r).await, Reuse::Build);
+    assert!(!r.has_prefix("probe"), "{:?}", r.calls());
+}
+
+#[tokio::test]
+async fn a6_a_stop_during_the_proof_promotes_and_stamps_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.alias_is_latest = true;
+    r.stop_on_probe = true;
+    assert_eq!(reuse(&r).await, Reuse::Stopped);
+    assert!(read_stamp(d.path()).is_none());
+}
+
+/// install() calls it under the lock, after the backoff check and before any
+/// build, only when no usable stamp exists.
+#[test]
+fn a6_install_tries_the_reuse_between_the_backoff_check_and_the_build() {
+    let src = include_str!("diiisco.rs");
+    let body = src.split("#[cfg(test)]").next().unwrap();
+    let install = body.split("async fn install(&self)").nth(1).unwrap();
+    let install = install.split("async fn start(").next().unwrap();
+    let at = |n: &str| {
+        install
+            .find(n)
+            .unwrap_or_else(|| panic!("install() lacks {n}"))
+    };
+    assert!(
+        at("install_backoff_check(") < at("reuse_verified_latest(")
+            && at("reuse_verified_latest(") < at("\"compose\", \"build\"")
+    );
 }
