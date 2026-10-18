@@ -13,7 +13,7 @@ import type { HealthStatus } from './types'
 // both partners every 30s for the same reason (B17 D1, T3-owned).
 
 const IAGON = 'Iagon node token not provisioned — register a node at app.iagon.com and save the key as {"node_token": "<key>"} in /tmp/config.json'
-const SENTINEL = 'Sentinel node account not funded — send DVPN to sent1qqqqexample to activate this node'
+const SENTINEL = "Sentinel node account not funded — Optional: this device's own Sentinel node account needs at least 10 DVPN (the Sentinel network's token, not a Fry token) to register Sentinel dVPN and pay network fees. To use it, send DVPN to sent1qqqqexample. This is not a payment to Fry or anyone. To skip it, turn Sentinel dVPN off with its switch; that does not affect your other rewards."
 const STORJ = 'Awaiting Storj setup — create a node auth token at storj.io and complete node identity to bring this node online. Install and eligibility are already active.'
 const PAWNS = 'needs your consent'
 
