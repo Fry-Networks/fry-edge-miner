@@ -378,9 +378,14 @@ pub(super) fn fresh_reject_defers(dir: &Path, tag: &str, now: u64) -> bool {
 }
 
 /// Record that the alias for `tag` was put back by m4 (stamp unreadable).
-pub(super) fn write_alias_marker(dir: &Path, tag: &str) {
-    if let Err(e) = write_atomic(dir, ALIAS_MARKER_FILE, &format!("{tag}\n")) {
-        warn!(error = %e, "Diiisco: cannot record the restored image alias");
+/// False when it could not be written.
+pub(super) fn write_alias_marker(dir: &Path, tag: &str) -> bool {
+    match write_atomic(dir, ALIAS_MARKER_FILE, &format!("{tag}\n")) {
+        Ok(()) => true,
+        Err(e) => {
+            warn!(error = %e, "Diiisco: cannot record the restored image alias");
+            false
+        }
     }
 }
 
@@ -614,7 +619,12 @@ pub(super) trait NodeOps: Send + Sync {
     }
     /// m4 put the `diiisco-node:<tag>` alias back under an unreadable stamp:
     /// remember that (see `ALIAS_MARKER_FILE`). Default: nothing.
-    fn note_alias_restored(&self, _tag: &str) {}
+    /// Returns false when it could not be recorded. Default: recorded.
+    fn note_alias_restored(&self, _tag: &str) -> bool {
+        true
+    }
+    /// Take that record back (the alias was not restored after all).
+    fn forget_alias_restored(&self) {}
     /// The stamp file exists but cannot be read, so `stamp_tag` says nothing
     /// about which tag `latest` carries. Default: no.
     fn stamp_unreadable(&self) -> bool {
@@ -988,10 +998,15 @@ pub(super) fn discard_candidate_by_id<O: NodeOps + ?Sized>(ops: &O, tag: &str) {
             let stamped = ops.stamp_tag().as_deref() == Some(tag);
             if stamped || ops.stamp_unreadable() {
                 if let Some(latest) = latest.as_deref() {
-                    match ops.retag_alias(tag, latest) {
-                        Ok(()) if !stamped => ops.note_alias_restored(tag),
-                        Ok(()) => {}
-                        Err(e) => warn!(error = %e, "Diiisco: could not restore the image alias"),
+                    // Marker first, so a crash between the two steps cannot
+                    // leave an unmarked alias; no marker, no alias.
+                    if !stamped && !ops.note_alias_restored(tag) {
+                        warn!("Diiisco: image alias not restored (marker not written)");
+                    } else if let Err(e) = ops.retag_alias(tag, latest) {
+                        warn!(error = %e, "Diiisco: could not restore the image alias");
+                        if !stamped {
+                            ops.forget_alias_restored();
+                        }
                     }
                 }
             }
