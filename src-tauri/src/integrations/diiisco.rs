@@ -495,9 +495,18 @@ impl Integration for DiiiscoIntegration {
         // `latest`; a rejected one is removed and the previous node restored.
         match diiisco_rebuild::gate_candidate(&node, &tag, have_image).await {
             diiisco_rebuild::Gate::Pass => {}
-            diiisco_rebuild::Gate::Rejected => anyhow::bail!(
-                "the new Diiisco node did not prove the device key; the previous node image was kept"
-            ),
+            diiisco_rebuild::Gate::Rejected => {
+                diiisco_rebuild::note_install_reject(
+                    &deploy_dir,
+                    &tag,
+                    diiisco_rebuild::unix_now(),
+                    have_image,
+                    diiisco_rebuild::NodeOps::probe_ran(&node),
+                );
+                anyhow::bail!(
+                    "the new Diiisco node did not prove the device key; the previous node image was kept"
+                )
+            }
             diiisco_rebuild::Gate::Stopped => {
                 // A user stop is not a failed attempt and promoted nothing:
                 // no backoff, and callers must not treat this as installed.
@@ -759,6 +768,8 @@ struct DockerNode {
     algo_mnemonic: String,
     bearer: String,
     stop_gen: u64,
+    /// Set once the key probe has run (see `NodeOps::probe_ran`).
+    probed: std::sync::atomic::AtomicBool,
 }
 
 impl DockerNode {
@@ -775,6 +786,7 @@ impl DockerNode {
             algo_mnemonic,
             bearer,
             stop_gen,
+            probed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -935,6 +947,7 @@ impl diiisco_rebuild::NodeOps for DockerNode {
     /// peers available" from an offline mesh counts). Each request is bounded
     /// to 5 s; retried while the node boots.
     async fn probe(&self) -> bool {
+        self.probed.store(true, std::sync::atomic::Ordering::SeqCst);
         let Ok(client) = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .no_proxy()
@@ -957,6 +970,10 @@ impl diiisco_rebuild::NodeOps for DockerNode {
             }
         }
         false
+    }
+
+    fn probe_ran(&self) -> bool {
+        self.probed.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn tag_latest(&self, tag: &str) -> Result<()> {

@@ -122,3 +122,7 @@ mod sweep_tests;
 #[cfg(test)]
 #[path = "diiisco_fresh_backoff_tests.rs"]
 mod fresh_backoff_tests;
+
+#[cfg(test)]
+#[path = "diiisco_a4_tests.rs"]
+mod a4_tests;

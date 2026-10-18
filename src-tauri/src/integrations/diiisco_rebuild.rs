@@ -373,6 +373,22 @@ pub(super) fn fresh_reject_defers(dir: &Path, tag: &str, now: u64) -> bool {
     )
 }
 
+/// F3: install() and start() agree. A fresh install (no image yet) whose
+/// candidate did not prove the key arms the same cooldown start() reads, so a
+/// start() right after is not another full build. Docker trouble and installs
+/// that have an image to protect (their own backoff applies) arm nothing.
+pub(super) fn note_install_reject(
+    dir: &Path,
+    tag: &str,
+    now: u64,
+    have_image: bool,
+    key_not_proven: bool,
+) {
+    if !have_image && key_not_proven {
+        record_fresh_reject(dir, tag, now);
+    }
+}
+
 pub(super) fn clear_fresh_cooldown(dir: &Path) {
     if let Err(e) = std::fs::remove_file(dir.join(FRESH_COOLDOWN_FILE)) {
         if e.kind() != std::io::ErrorKind::NotFound {
@@ -531,6 +547,12 @@ pub(super) trait NodeOps: Send + Sync {
     fn up_no_build(&self, tag: Option<&str>) -> Result<()>;
     /// The AM3 auth probe, with bounded retries while the node boots.
     async fn probe(&self) -> bool;
+    /// Did the last candidate get as far as the key probe? A rejection after
+    /// the probe is a verdict on the device key; one before it is Docker
+    /// trouble. Default `false`: no cooldown is armed on a guess.
+    fn probe_ran(&self) -> bool {
+        false
+    }
     fn tag_latest(&self, tag: &str) -> Result<()>;
     /// Point `diiisco-node:latest` back at image `id` (undoing `tag_latest`).
     /// Default: nothing; Docker-backed impls override.
@@ -923,15 +945,6 @@ pub(super) enum Gate {
     Stopped,
 }
 
-/// Why a candidate was rejected. Only `KeyNotProven` arms the fresh-start
-/// cooldown: a candidate that would not start is Docker trouble, not a verdict
-/// on the device key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RejectKind {
-    StartFailed,
-    KeyNotProven,
-}
-
 /// Bring the built candidate `tag` up and run the F2 probe on it. The caller
 /// holds the rebuild lock; nothing here locks, so it is safe under it.
 pub(super) async fn gate_candidate<O: NodeOps + ?Sized>(
@@ -939,48 +952,39 @@ pub(super) async fn gate_candidate<O: NodeOps + ?Sized>(
     tag: &str,
     have_image: bool,
 ) -> Gate {
-    gate_candidate_kind(ops, tag, have_image).await.0
-}
-
-/// `gate_candidate`, also saying why a rejection happened.
-pub(super) async fn gate_candidate_kind<O: NodeOps + ?Sized>(
-    ops: &O,
-    tag: &str,
-    have_image: bool,
-) -> (Gate, Option<RejectKind>) {
     if ops.stop_requested() {
         ops.discard_candidate(tag);
-        return (Gate::Stopped, None);
+        return Gate::Stopped;
     }
     if have_image {
         ops.down();
         if ops.stop_requested() {
             ops.discard_candidate(tag);
-            return (Gate::Stopped, None);
+            return Gate::Stopped;
         }
     }
     if let Err(e) = ops.up_no_build(Some(tag)) {
         if ops.stop_requested() {
             stopped_cleanup(ops, tag);
-            return (Gate::Stopped, None);
+            return Gate::Stopped;
         }
         warn!(error = %e, "Diiisco: the new node failed to start");
         reject_candidate(ops, tag, have_image);
-        return (Gate::Rejected, Some(RejectKind::StartFailed));
+        return Gate::Rejected;
     }
     // The real probe returns false when it sees a stop, so a false probe with
     // a stop pending is a stop, not a rejection (no backoff, no error).
     let proved = ops.probe().await;
     if ops.stop_requested() {
         stopped_cleanup(ops, tag);
-        return (Gate::Stopped, None);
+        return Gate::Stopped;
     }
     if !proved {
         warn!("Diiisco: the new node did not prove the device key");
         reject_candidate(ops, tag, have_image);
-        return (Gate::Rejected, Some(RejectKind::KeyNotProven));
+        return Gate::Rejected;
     }
-    (Gate::Pass, None)
+    Gate::Pass
 }
 
 /// A stop is pending and the candidate's container may still exist (`stop()`
@@ -1137,8 +1141,7 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
             ops.discard_candidate(&tag);
             return Ok(Outcome::Stopped);
         }
-        let (gate, why) = gate_candidate_kind(ops, &tag, false).await;
-        match gate {
+        match gate_candidate(ops, &tag, false).await {
             Gate::Pass => {
                 if let Err(e) = after_fresh_build(ops, dir, &tag, key_fp, pin_sha) {
                     // The proven candidate is still running: remove it too.
@@ -1153,7 +1156,7 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
                 if let Err(e) = record_attempt(dir, &tag, now) {
                     warn!(error = %e, "Diiisco: cannot record rebuild attempt after a rejected fresh node");
                 }
-                if why == Some(RejectKind::KeyNotProven) {
+                if ops.probe_ran() {
                     record_fresh_reject(dir, &tag, now);
                 }
                 anyhow::bail!(

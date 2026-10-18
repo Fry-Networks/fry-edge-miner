@@ -58,6 +58,10 @@ impl G {
         self.calls.lock().unwrap().push(c);
     }
 
+    fn has(&self, what: &str) -> bool {
+        self.calls().iter().any(|c| c == what)
+    }
+
     /// Every recorded call except the image-id lookups.
     fn calls(&self) -> Vec<String> {
         self.calls
@@ -109,6 +113,9 @@ impl NodeOps for G {
             anyhow::bail!("fake up failed");
         }
         Ok(())
+    }
+    fn probe_ran(&self) -> bool {
+        self.has("probe")
     }
     async fn probe(&self) -> bool {
         self.rec("probe".into());
