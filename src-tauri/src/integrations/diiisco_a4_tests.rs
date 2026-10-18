@@ -2,8 +2,8 @@
 //! private). Synthetic values only; the Docker side is a recording fake.
 #![allow(dead_code)]
 use super::super::diiisco_rebuild::{
-    fp12, image_tag, ledger_add, ledger_remove, note_install_reject, run_node_sequence,
-    ImageLookup, ImageRef, NodeOps, Outcome, LATEST_REF,
+    fp12, image_tag, kept_reason, ledger_add, ledger_remove, note_install_reject,
+    run_node_sequence, ImageLookup, ImageRef, NodeOps, Outcome, LATEST_REF,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -352,4 +352,17 @@ async fn f3_only_a_key_rejection_of_a_fresh_install_arms_the_cooldown() {
     let r = R::new(d.path(), false);
     let out = run_node_sequence(&r, &r.dir, &key_fp(), &pin(), || NOW + 10, true).await;
     assert_eq!(out.ok(), Some(Outcome::BuiltFresh), "{:?}", r.calls());
+}
+
+// ------------------------------------------------------------------------ L7
+
+#[test]
+fn l7_a_candidate_that_is_the_current_image_is_named_as_such() {
+    let current = kept_reason(Some(NEW), Some(NEW));
+    assert!(current.contains("current image"), "{current}");
+    // Any other reason does not claim it.
+    let other = kept_reason(Some(NEW), Some(OLD));
+    assert!(!other.contains("current image"), "{other}");
+    assert!(other.contains("in use"), "{other}");
+    assert!(kept_reason(Some(NEW), None).contains("in use"));
 }

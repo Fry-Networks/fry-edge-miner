@@ -875,6 +875,17 @@ pub(super) fn candidate_to_remove(
     Some(cand.to_string())
 }
 
+/// Why a failed candidate image was kept (L7): when it IS the current image
+/// the log says so, instead of calling the node's own image a failed candidate
+/// kept for a vague reason.
+pub(super) fn kept_reason(cand: Option<&str>, latest: Option<&str>) -> &'static str {
+    if cand.is_some() && cand == latest {
+        "it is the current image"
+    } else {
+        "in use, or containers unknown"
+    }
+}
+
 /// Remove the failed candidate `diiisco-node:<tag>` BY ID, never by tag pattern
 /// and never `latest`. Call it only after the candidate's container was stopped
 /// or replaced.
@@ -908,7 +919,10 @@ pub(super) fn discard_candidate_by_id<O: NodeOps + ?Sized>(ops: &O, tag: &str) {
             }
         }
         None if cand.is_some() => {
-            warn!("Diiisco: failed candidate image kept (in use, current, or containers unknown)");
+            warn!(
+                "Diiisco: failed candidate image kept ({})",
+                kept_reason(cand.as_deref(), latest.as_deref())
+            );
         }
         None => {}
     }
