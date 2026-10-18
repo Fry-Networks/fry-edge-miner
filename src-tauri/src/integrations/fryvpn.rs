@@ -736,8 +736,8 @@ mod dashbugs_b1_node_wallet_copy {
     #[test]
     fn says_it_is_the_devices_own_node_wallet_not_the_reward_wallet() {
         let m = msg();
-        assert!(m.contains("own fryDVPN node wallet"), "{m}");
-        assert!(m.contains("not your reward wallet"), "{m}");
+        assert!(m.contains("own Fry dVPN node wallet"), "{m}");
+        assert!(m.contains("not Fry's wallet or your reward wallet"), "{m}");
     }
 
     #[test]
