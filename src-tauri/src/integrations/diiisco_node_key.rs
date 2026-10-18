@@ -118,3 +118,7 @@ mod rc38_tests;
 #[cfg(test)]
 #[path = "diiisco_sweep_tests.rs"]
 mod sweep_tests;
+
+#[cfg(test)]
+#[path = "diiisco_fresh_backoff_tests.rs"]
+mod fresh_backoff_tests;
