@@ -23,8 +23,7 @@ const SETUP: &str = "Awaiting administrator action — Click Retry on the Securi
 fn setup_and_heartbeat(short: &str) -> String {
     format!(
         "{SETUP} · This device's own Fry dVPN node wallet also cannot pay the 0.001 ALGO fee \
-         of its next heartbeat. Optional, and not a payment to anyone; Olostep alone earns the \
-         full base reward. To keep Fry dVPN running — send {short} ALGO to {ADDR}."
+         of its next heartbeat. Optional, and not a payment to anyone: you can earn without it by running Olostep instead. To skip it, turn Fry dVPN off with its switch and turn Olostep on. To keep Fry dVPN running — send {short} ALGO to {ADDR}."
     )
 }
 
@@ -59,9 +58,7 @@ fn every_rust_matcher_treats_the_combined_line_as_the_setup_line() {
     let combined = format!(
         "Awaiting administrator action — Click Retry on the Security hardening banner to \
          allow fryDVPN through Windows Firewall. · This device's own Fry dVPN node wallet \
-         also cannot pay the 0.001 ALGO fee of its next heartbeat. Optional, and not a \
-         payment to anyone; Olostep alone earns the full base reward. To keep Fry dVPN \
-         running — send 0.000001 ALGO to {ADDR}."
+         also cannot pay the 0.001 ALGO fee of its next heartbeat. Optional, and not a payment to anyone: you can earn without it by running Olostep instead. To skip it, turn Fry dVPN off with its switch and turn Olostep on. To keep Fry dVPN running — send 0.000001 ALGO to {ADDR}."
     );
     for line in [SETUP, combined.as_str()] {
         assert!(crate::integrations::awaits_user_action(line), "{line}");
@@ -243,10 +240,7 @@ fn registered_with_rule() {
             format!(
                 "Fry dVPN is running, but this device's own Fry dVPN node wallet cannot pay the \
                  0.001 ALGO fee of its next heartbeat (a small network fee each time, so a \
-                 registered node can ask again). Optional: send 0.000986 ALGO to {ADDR}. This \
-                 is not Fry's wallet and not a payment to anyone. To skip it, turn Fry dVPN off \
-                 with its switch. Olostep alone earns the full base reward; running both adds \
-                 15%."
+                 registered node can ask again). Optional: you can earn without it by running Olostep instead. To keep Fry dVPN running, send 0.000986 ALGO to {ADDR}. This is not Fry's wallet and not a payment to anyone. To skip it, turn Fry dVPN off with its switch and turn Olostep on. Olostep alone earns the full base reward; running both adds 15%."
             )
             .as_str()
         ),
