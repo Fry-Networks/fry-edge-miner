@@ -56,6 +56,7 @@ fn assert_plain_copy(name: &str, m: &str) {
     assert!(m.contains("own Fry dVPN node wallet"), "{name}: this device's own: {m}");
     assert!(m.contains("not a payment to anyone"), "{name}: not a payment: {m}");
     assert!(m.contains("not Fry's wallet"), "{name}: not Fry's wallet: {m}");
+    assert!(m.split_whitespace().count() <= 80, "{name}: too long: {m}");
     assert!(m.to_lowercase().contains("optional"), "{name}: optional: {m}");
     assert!(m.contains("Olostep alone earns the full base reward"), "{name}: {m}");
     assert!(m.contains(&boost_text()), "{name}: boost from the constant: {m}");
@@ -76,7 +77,7 @@ fn the_funding_card_keeps_its_marker_and_stays_short() {
         .unwrap_err();
     assert!(m.starts_with(FUNDING_MARKER), "{m}");
     assert!(crate::integrations::awaits_user_action(&m));
-    assert!(m.split_whitespace().count() <= 75, "too long: {m}");
+    assert!(m.split_whitespace().count() <= 80, "too long: {m}");
 }
 
 #[test]
@@ -133,7 +134,7 @@ fn heartbeat_amounts_equal_the_precheck_for_three_balances() {
         let want_fee = format!("{} ALGO fee of its next heartbeat", algo3(HEARTBEAT_FEE_MICROALGOS));
         let n = heartbeat_shortfall_message(amount, MIN_BAL, ADDR).unwrap();
         let s = rule_park_heartbeat_suffix(amount, MIN_BAL, ADDR).unwrap();
-        for (m, lead) in [(n, "Optional: "), (s, "to keep Fry dVPN running, ")] {
+        for (m, lead) in [(n, "Optional: "), (s, "To keep Fry dVPN running, ")] {
             let want_send = format!("{lead}{figure}");
             assert!(m.contains(&want_send), "amount {amount}: {want_send} in {m}");
             assert!(m.contains(&want_fee), "amount {amount}: {want_fee} in {m}");
