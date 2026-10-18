@@ -82,11 +82,23 @@ RUN cp src/environment/example.environment.ts src/environment/environment.ts && 
     grep -q '^    port: 8181,$' src/environment/environment.ts && \
     grep -q '^    host: "0.0.0.0",$' src/environment/environment.ts
 
+# Upstream builds its 401 message by appending the caller's token, which hands
+# the rejected key back in the response body. Replace it with a fixed message,
+# then fail the build unless the patched text is in endpoint.ts and the echoing
+# text is nowhere under src.
+RUN sed -i 's#"message": "Incorrect API key provided: " + token,#"message": "Incorrect API key provided.",#' src/utils/endpoint.ts && \
+    grep -qF '"message": "Incorrect API key provided.",' src/utils/endpoint.ts && \
+    ! grep -rqF 'Incorrect API key provided: ' src
+
 # Compile TypeScript. Force-emit JS even when upstream ships genuine type bugs
 # (e.g. statusPages.ts string|string[]) so the per-user image build never dies.
 # Guarantee dist/ exists so the Stage-2 COPY never fails; the check below then
 # fails the build if the entry point (dist/dev.js) was not produced.
 RUN (npm run build || npx tsc --noEmitOnError false --skipLibCheck || true) && mkdir -p dist
+
+# The compiled output must carry the patch and no echo of the key.
+RUN ! grep -rqF 'Incorrect API key provided: ' dist && \
+    grep -rqF 'Incorrect API key provided.' dist
 
 # The self-starting entry is dist/dev.js (dist/index.js is a library export).
 # Fail the build rather than ship an image whose CMD cannot start.

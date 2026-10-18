@@ -102,3 +102,19 @@ mod tests;
 #[cfg(test)]
 #[path = "diiisco_rebuild_tests.rs"]
 mod rebuild_tests;
+
+#[cfg(test)]
+#[path = "diiisco_k38_tests.rs"]
+mod k38_tests;
+
+#[cfg(test)]
+#[path = "diiisco_start_gate_tests.rs"]
+mod start_gate_tests;
+
+#[cfg(test)]
+#[path = "diiisco_rc38_tests.rs"]
+mod rc38_tests;
+
+#[cfg(test)]
+#[path = "diiisco_sweep_tests.rs"]
+mod sweep_tests;
