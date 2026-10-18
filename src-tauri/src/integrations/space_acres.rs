@@ -1640,17 +1640,39 @@ mod discovery_tests {
         // per-user install read as "not installed" and the startup recovery
         // re-ran the installer — the Modify/Repair dialog users reported.
         let roots = roots_for_base(std::path::Path::new(r"C:\Users\x\AppData\Local"));
+        #[cfg(windows)]
         assert!(
             roots.contains(&PathBuf::from(
                 r"C:\Users\x\AppData\Local\Programs\Space Acres"
             )),
             "per-user capitalised root must be probed: {roots:?}"
         );
+        #[cfg(not(windows))]
+        assert!(
+            roots.contains(
+                &PathBuf::from(r"C:\Users\x\AppData\Local")
+                    .join("Programs")
+                    .join("Space Acres")
+            ),
+            "per-user capitalised root must be probed: {roots:?}"
+        );
         let candidates = binary_candidates(&roots);
+        #[cfg(windows)]
         assert!(
             candidates.contains(&PathBuf::from(
                 r"C:\Users\x\AppData\Local\Programs\Space Acres\bin\space-acres.exe"
             )),
+            "and its WiX bin layout must resolve: {candidates:?}"
+        );
+        #[cfg(not(windows))]
+        assert!(
+            candidates.contains(
+                &PathBuf::from(r"C:\Users\x\AppData\Local")
+                    .join("Programs")
+                    .join("Space Acres")
+                    .join("bin")
+                    .join("space-acres.exe")
+            ),
             "and its WiX bin layout must resolve: {candidates:?}"
         );
     }
