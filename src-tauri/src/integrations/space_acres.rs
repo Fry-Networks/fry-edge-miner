@@ -1680,6 +1680,7 @@ mod discovery_tests {
     #[test]
     fn every_previously_probed_root_still_resolves() {
         let roots = roots_for_base(std::path::Path::new(r"C:\Program Files"));
+        #[cfg(windows)]
         for expected in [
             r"C:\Program Files\space-acres",
             r"C:\Program Files\Programs\space-acres",
@@ -1688,6 +1689,19 @@ mod discovery_tests {
             assert!(
                 roots.contains(&PathBuf::from(expected)),
                 "{expected} must still be probed: {roots:?}"
+            );
+        }
+        #[cfg(not(windows))]
+        for expected in [
+            PathBuf::from(r"C:\Program Files").join("space-acres"),
+            PathBuf::from(r"C:\Program Files")
+                .join("Programs")
+                .join("space-acres"),
+            PathBuf::from(r"C:\Program Files").join("Space Acres"),
+        ] {
+            assert!(
+                roots.contains(&expected),
+                "{expected:?} must still be probed: {roots:?}"
             );
         }
     }
