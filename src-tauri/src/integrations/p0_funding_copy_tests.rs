@@ -72,7 +72,7 @@ fn assert_plain_copy(name: &str, m: &str) {
         m.contains("not Fry's wallet"),
         "{name}: not Fry's wallet: {m}"
     );
-    assert!(m.split_whitespace().count() <= 80, "{name}: too long: {m}");
+    assert!(m.split_whitespace().count() <= 95, "{name}: too long: {m}");
     assert!(
         m.to_lowercase().contains("optional"),
         "{name}: optional: {m}"
@@ -110,7 +110,7 @@ fn the_funding_card_keeps_its_marker_and_stays_short() {
         registration_funding_message(0, MIN_BAL, REGISTRATION_MIN_MICROALGOS, ADDR).unwrap_err();
     assert!(m.starts_with(FUNDING_MARKER), "{m}");
     assert!(crate::integrations::awaits_user_action(&m));
-    assert!(m.split_whitespace().count() <= 80, "too long: {m}");
+    assert!(m.split_whitespace().count() <= 90, "too long: {m}");
 }
 
 #[test]

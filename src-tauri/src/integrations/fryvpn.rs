@@ -465,11 +465,12 @@ pub(crate) fn registration_affordability(
     let short = (required - spendable) as f64 / 1_000_000.0;
     let have = spendable as f64 / 1_000_000.0;
     Err(format!(
-        "Optional, not needed to earn. This device's own Fry dVPN node wallet needs about {:.3} \
-         ALGO spendable (network minimum plus fees) to register the node and has {:.3} ALGO, \
-         {:.3} ALGO short. To use Fry dVPN, send ALGO to {}. This is not Fry's wallet and not a \
-         payment to anyone. To skip it, turn Fry dVPN off with its switch. Olostep alone earns \
-         the full base reward; running both adds {}.",
+        "Optional: you can earn without it by running Olostep instead. This device's own Fry dVPN \
+         node wallet needs about {:.3} ALGO spendable (network minimum plus fees) to register \
+         the node and has {:.3} ALGO, {:.3} ALGO short. To use Fry dVPN, send ALGO to {}. This \
+         is not Fry's wallet and not a payment to anyone. To skip it, turn Fry dVPN off with \
+         its switch and turn Olostep on. Olostep alone earns the full base reward; running both \
+         adds {}.",
         required as f64 / 1_000_000.0,
         have,
         short,
@@ -711,11 +712,12 @@ pub(crate) fn registration_funding_message(
     // Whole 0.001 ALGO, rounded so that sending the figure shown is always
     // enough: the shortfall and the total UP, the holdings DOWN.
     Err(format!(
-        "{FUNDING_MARKER} — Optional, not needed to earn. This device's own Fry dVPN node wallet \
-         (holds {:.3} ALGO) needs {:.3} ALGO total (network minimum plus fees) to register the \
-         node. To use Fry dVPN, send {:.3} ALGO to {}. This is not Fry's wallet or your reward \
-         wallet, and not a payment to anyone. To skip it, turn Fry dVPN off with its switch. \
-         Olostep alone earns the full base reward; running both adds {}.",
+        "{FUNDING_MARKER} — Optional: you can earn without it by running Olostep instead. This \
+         device's own Fry dVPN node wallet (holds {:.3} ALGO) needs {:.3} ALGO total (network \
+         minimum plus fees) to register the node. To use Fry dVPN, send {:.3} ALGO to {}. This \
+         is not Fry's wallet or your reward wallet, and not a payment to anyone. To skip it, \
+         turn Fry dVPN off with its switch and turn Olostep on. Olostep alone earns the full \
+         base reward; running both adds {}.",
         (amount / 1_000) as f64 / 1_000.0,
         total_needed.div_ceil(1_000) as f64 / 1_000.0,
         short.div_ceil(1_000) as f64 / 1_000.0,
@@ -794,9 +796,10 @@ pub(crate) fn heartbeat_shortfall_message(
     Some(format!(
         "Fry dVPN is running, but this device's own Fry dVPN node wallet cannot pay the {1:.3} ALGO \
          fee of its next heartbeat (a small network fee each time, so a registered node can ask \
-         again). Optional: send {0:.6} ALGO to {address}. This is not Fry's wallet and not a \
-         payment to anyone. To skip it, turn Fry dVPN off with its switch. Olostep alone earns \
-         the full base reward; running both adds {2}.",
+         again). Optional: you can earn without it by running Olostep instead. To keep Fry dVPN \
+         running, send {0:.6} ALGO to {address}. This is not Fry's wallet and not a payment to \
+         anyone. To skip it, turn Fry dVPN off with its switch and turn Olostep on. Olostep \
+         alone earns the full base reward; running both adds {2}.",
         short as f64 / 1_000_000.0,
         HEARTBEAT_FEE_MICROALGOS as f64 / 1_000_000.0,
         second_required_boost_text()
@@ -814,8 +817,9 @@ pub(crate) fn rule_park_heartbeat_suffix(
     let short = heartbeat_shortfall_microalgos(amount, min_balance)?;
     Some(format!(
         "This device's own Fry dVPN node wallet also cannot pay the {1:.3} ALGO fee of its next \
-         heartbeat. Optional, and not a payment to anyone; Olostep alone earns the full base \
-         reward. To keep Fry dVPN running — send {0:.6} ALGO to {address}.",
+         heartbeat. Optional, and not a payment to anyone: you can earn without it by running \
+         Olostep instead. To skip it, turn Fry dVPN off with its switch and turn Olostep on. \
+         To keep Fry dVPN running — send {0:.6} ALGO to {address}.",
         short as f64 / 1_000_000.0,
         HEARTBEAT_FEE_MICROALGOS as f64 / 1_000_000.0
     ))
