@@ -56,11 +56,11 @@ export default function Step0Welcome({ onNext }: Step0Props) {
   }, [])
 
   const whatsNew = [
-    'Clearer registration errors — DNS/carrier-block troubleshooting steps built in',
-    'Status indicator now distinguishes Degraded (local issue) from Disconnected',
-    'Registration retries transient server errors automatically',
-    'Accessibility: toggles and copy buttons now screen-reader friendly',
-    'Expanded automated test coverage (87 end-to-end checks)'
+    'Clearer Fry dVPN and Sentinel dVPN funding notes: what the node wallet is for, and that both are optional',
+    'Security hardening no longer asks again after every update when your firewall rules are already in place',
+    'Diiisco: failed starts now back off instead of retrying constantly, and your choice to enable it is remembered',
+    'Diiisco: an already-verified node image is reused instead of rebuilt',
+    'Smaller Diiisco reliability and log-message fixes'
   ]
 
   return (
