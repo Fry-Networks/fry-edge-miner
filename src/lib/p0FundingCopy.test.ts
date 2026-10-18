@@ -39,6 +39,7 @@ const fixtureReason = (marker: string) => fixtureReasonIn(fixtures, marker)
 // minimum and an address.
 const renderUnfunded = (src: string) => {
   const literal = /format!\(\s*"(Sentinel node account not funded[\s\S]*?)",\s*Self::MIN_FUNDING_UDVPN/.exec(src)?.[1]
+  expect(literal).toBeTruthy()
   const udvpn = Number(/MIN_FUNDING_UDVPN: u64 = (\d[\d_]*)/.exec(src)?.[1].replace(/_/g, ''))
   const args = [String(udvpn / 1_000_000), 'sent1qqqqexample']
   return literal!.replace(/\\\r?\n\s*/g, '').replace(/\{\}/g, () => args.shift()!)
