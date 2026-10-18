@@ -1097,6 +1097,10 @@ impl diiisco_rebuild::NodeOps for DockerNode {
         diiisco_rebuild::read_stamp(&self.deploy).map(|s| s.tag)
     }
 
+    fn note_alias_restored(&self, tag: &str) {
+        diiisco_rebuild::write_alias_marker(&self.deploy, tag);
+    }
+
     fn stamp_unreadable(&self) -> bool {
         self.deploy.join(diiisco_rebuild::STAMP_FILE).exists()
             && diiisco_rebuild::read_stamp(&self.deploy).is_none()
