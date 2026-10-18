@@ -815,7 +815,7 @@ pub(crate) fn rule_park_heartbeat_suffix(
     Some(format!(
         "This device's own Fry dVPN node wallet also cannot pay the {1:.3} ALGO fee of its next \
          heartbeat. Optional, and not a payment to anyone; Olostep alone earns the full base \
-         reward. To keep Fry dVPN running, send {0:.6} ALGO to {address}.",
+         reward. To keep Fry dVPN running — send {0:.6} ALGO to {address}.",
         short as f64 / 1_000_000.0,
         HEARTBEAT_FEE_MICROALGOS as f64 / 1_000_000.0
     ))

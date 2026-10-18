@@ -134,7 +134,7 @@ fn heartbeat_amounts_equal_the_precheck_for_three_balances() {
         let want_fee = format!("{} ALGO fee of its next heartbeat", algo3(HEARTBEAT_FEE_MICROALGOS));
         let n = heartbeat_shortfall_message(amount, MIN_BAL, ADDR).unwrap();
         let s = rule_park_heartbeat_suffix(amount, MIN_BAL, ADDR).unwrap();
-        for (m, lead) in [(n, "Optional: "), (s, "To keep Fry dVPN running, ")] {
+        for (m, lead) in [(n, "Optional: "), (s, "To keep Fry dVPN running — ")] {
             let want_send = format!("{lead}{figure}");
             assert!(m.contains(&want_send), "amount {amount}: {want_send} in {m}");
             assert!(m.contains(&want_fee), "amount {amount}: {want_fee} in {m}");
