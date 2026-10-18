@@ -2391,3 +2391,8 @@ mod fryvpn_c6_rule_park_heartbeat_tests;
 #[cfg(test)]
 #[path = "fryvpn_c6_heartbeat_suffix_tests.rs"]
 mod fryvpn_c6_heartbeat_suffix_tests;
+
+/// P0 (rc39): plain-language, optional funding copy.
+#[cfg(test)]
+#[path = "p0_funding_copy_tests.rs"]
+mod p0_funding_copy_tests;
