@@ -28,10 +28,20 @@ const sentinelMeta = (() => {
   return meta.slice(at, meta.indexOf('}', at))
 })()
 
-const fixtureReason = (marker: string) => {
-  const line = fixtures.split('\n').find((l) => l.includes(marker) && l.includes('Unhealthy:'))
+const fixtureReasonIn = (text: string, marker: string) => {
+  const line = text.split(/\r?\n/).find((l) => l.includes(marker) && l.includes('Unhealthy:'))
   if (!line) throw new Error(`no fixture with ${marker}`)
   return line
+}
+const fixtureReason = (marker: string) => fixtureReasonIn(fixtures, marker)
+
+// Render sentinel.rs's unfunded_message format literal with the constant-derived
+// minimum and an address.
+const renderUnfunded = (src: string) => {
+  const literal = /format!\(\s*"(Sentinel node account not funded[\s\S]*?)",\s*Self::MIN_FUNDING_UDVPN/.exec(src)?.[1]
+  const udvpn = Number(/MIN_FUNDING_UDVPN: u64 = (\d[\d_]*)/.exec(src)?.[1].replace(/_/g, ''))
+  const args = [String(udvpn / 1_000_000), 'sent1qqqqexample']
+  return literal!.replace(/\\\r?\n\s*/g, '').replace(/\{\}/g, () => args.shift()!)
 }
 
 describe('P0 Sentinel funding copy', () => {
@@ -68,17 +78,24 @@ describe('P0 Sentinel funding copy', () => {
 
 describe('Rust wording and the IntCard parse stay tied (M1)', () => {
   it('renders sentinel.rs unfunded_message and parses it to MIN_FUNDING_UDVPN / 1e6', () => {
-    const literal = /format!\(\s*"(Sentinel node account not funded[\s\S]*?)",\s*Self::MIN_FUNDING_UDVPN/.exec(sentinelRs)?.[1]
-    expect(literal).toBeTruthy()
     const udvpn = Number(/MIN_FUNDING_UDVPN: u64 = (\d[\d_]*)/.exec(sentinelRs)?.[1].replace(/_/g, ''))
-    const args = [String(udvpn / 1_000_000), 'sent1qqqqexample']
-    const rendered = literal!.replace(/\\\n\s*/g, '').replace(/\{\}/g, () => args.shift()!)
+    const rendered = renderUnfunded(sentinelRs)
     const health = { Unhealthy: rendered }
     expect(sentinelFundingMinDvpn(health)).toBe(String(udvpn / 1_000_000))
     expect(sentinelFundingAddress(health)).toBe('sent1qqqqexample')
     // and the preview fixture is that exact text
     const fixture = /Unhealthy: "(.*)" \}/.exec(fixtureReason('node account not funded'))![1]
     expect(fixture).toBe(rendered)
+  })
+})
+
+describe('parsers are EOL-agnostic (Windows CI checks out CRLF)', () => {
+  const crlf = (t: string) => t.replace(/\n/g, '\r\n')
+  it('renders the same unfunded text from a CRLF copy of sentinel.rs', () => {
+    expect(renderUnfunded(crlf(sentinelRs))).toBe(renderUnfunded(sentinelRs))
+  })
+  it('finds the same fixture reason in a CRLF copy of useIntegrations.ts', () => {
+    expect(fixtureReasonIn(crlf(fixtures), 'node account not funded')).toBe(fixtureReason('node account not funded'))
   })
 })
 
