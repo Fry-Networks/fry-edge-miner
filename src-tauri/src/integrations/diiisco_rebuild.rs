@@ -587,6 +587,11 @@ pub(super) trait NodeOps: Send + Sync {
     fn stamp_tag(&self) -> Option<String> {
         None
     }
+    /// The stamp file exists but cannot be read, so `stamp_tag` says nothing
+    /// about which tag `latest` carries. Default: no.
+    fn stamp_unreadable(&self) -> bool {
+        false
+    }
     /// Re-point `diiisco-node:<tag>` at image `id`. Default: nothing.
     fn retag_alias(&self, _tag: &str, _id: &str) -> Result<()> {
         Ok(())
@@ -932,7 +937,10 @@ pub(super) fn discard_candidate_by_id<O: NodeOps + ?Sized>(ops: &O, tag: &str) {
             // A rebuild of the stamped tag re-points `diiisco-node:<tag>` at
             // the candidate; removing the candidate by id takes that alias
             // with it, so give `latest` its alias back.
-            if ops.stamp_tag().as_deref() == Some(tag) {
+            // An unreadable stamp (m4) says nothing about the tag, so it is
+            // treated as a match: the alias is only a pointer at `latest`, and
+            // a stamp is never written from an alias without a probe pass.
+            if ops.stamp_tag().as_deref() == Some(tag) || ops.stamp_unreadable() {
                 if let Some(latest) = latest.as_deref() {
                     if let Err(e) = ops.retag_alias(tag, latest) {
                         warn!(error = %e, "Diiisco: could not restore the image alias");

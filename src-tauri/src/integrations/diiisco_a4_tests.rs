@@ -2,8 +2,9 @@
 //! private). Synthetic values only; the Docker side is a recording fake.
 #![allow(dead_code)]
 use super::super::diiisco_rebuild::{
-    fp12, image_tag, kept_reason, ledger_add, ledger_remove, note_install_reject, rmi_outcome,
-    run_node_sequence, ImageLookup, ImageRef, NodeOps, Outcome, RmiOutcome, LATEST_REF,
+    discard_candidate_by_id, fp12, image_tag, kept_reason, ledger_add, ledger_remove,
+    note_install_reject, rmi_outcome, run_node_sequence, ImageLookup, ImageRef, NodeOps, Outcome,
+    RmiOutcome, LATEST_REF,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -277,6 +278,9 @@ impl NodeOps for R {
     fn stamp_tag(&self) -> Option<String> {
         self.stamp_tag.clone()
     }
+    fn stamp_unreadable(&self) -> bool {
+        self.stamp_unreadable
+    }
     fn retag_alias(&self, t: &str, id: &str) -> Result<()> {
         self.rec(format!("retag_alias:{t}:{id}"));
         Ok(())
@@ -387,4 +391,48 @@ fn every_other_rmi_failure_stays_a_failure() {
     }
     // A success is never reclassified by stray stderr text.
     assert_eq!(rmi_outcome(true, "No such image"), RmiOutcome::Removed);
+}
+
+// ------------------------------------------------------------------------ m4
+
+#[test]
+fn m4_an_unreadable_stamp_still_gives_latest_its_alias_back() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    r.stamp_unreadable = true;
+    discard_candidate_by_id(&r, &tag());
+    let c = r.calls();
+    assert!(
+        c.contains(&format!("retag_alias:{}:{OLD}", tag())),
+        "alias restored for latest: {c:?}"
+    );
+}
+
+#[test]
+fn m4_no_stamp_at_all_or_another_tag_touches_no_alias() {
+    // Never stamped: nothing says latest ever carried this tag.
+    let d = tempfile::tempdir().unwrap();
+    let r = R::new(d.path(), true);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    discard_candidate_by_id(&r, &tag());
+    assert!(!r.has_prefix("retag_alias"), "{:?}", r.calls());
+
+    // A readable stamp for another tag.
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), true);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    r.stamp_tag = Some("fem-000000000000".into());
+    discard_candidate_by_id(&r, &tag());
+    assert!(!r.has_prefix("retag_alias"), "{:?}", r.calls());
+}
+
+#[test]
+fn m4_an_unreadable_stamp_with_no_latest_has_nothing_to_restore() {
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), false);
+    r.cand_exists.store(true, Ordering::SeqCst);
+    r.stamp_unreadable = true;
+    discard_candidate_by_id(&r, &tag());
+    assert!(!r.has_prefix("retag_alias"), "{:?}", r.calls());
 }

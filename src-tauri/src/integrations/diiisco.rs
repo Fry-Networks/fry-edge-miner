@@ -1065,6 +1065,11 @@ impl diiisco_rebuild::NodeOps for DockerNode {
         diiisco_rebuild::read_stamp(&self.deploy).map(|s| s.tag)
     }
 
+    fn stamp_unreadable(&self) -> bool {
+        self.deploy.join(diiisco_rebuild::STAMP_FILE).exists()
+            && diiisco_rebuild::read_stamp(&self.deploy).is_none()
+    }
+
     fn retag_alias(&self, tag: &str, id: &str) -> Result<()> {
         let out = self.docker(&["tag", id, &format!("diiisco-node:{tag}")])?;
         if !out.status.success() {
