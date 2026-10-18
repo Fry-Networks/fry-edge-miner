@@ -474,3 +474,36 @@ async fn r3_a_lookup_that_keeps_failing_still_keeps_everything() {
     assert!(!c.iter().any(|x| x.starts_with("retag_latest")), "{c:?}");
     assert!(!c.iter().any(|x| x.starts_with("rmi")), "{c:?}");
 }
+
+// ------------------------------------------------------------------------ A5
+
+#[tokio::test]
+async fn a5_a_fresh_reject_and_the_cooldown_that_follows_it_are_typed_rejections() {
+    use crate::integrations::diiisco::NodeRejected;
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), false);
+    r.probe_ok = false;
+    let err = run_node_sequence(&r, &r.dir, &key_fp(), &pin(), || NOW, true)
+        .await
+        .unwrap_err();
+    assert!(err.downcast_ref::<NodeRejected>().is_some(), "{err:#}");
+    assert!(err.to_string().contains("nothing was promoted"), "{err}");
+
+    let err = run_node_sequence(&r, &r.dir, &key_fp(), &pin(), || NOW + 10, true)
+        .await
+        .unwrap_err();
+    assert!(err.downcast_ref::<NodeRejected>().is_some(), "{err:#}");
+    assert!(err.to_string().contains("backing off"), "{err}");
+}
+
+#[tokio::test]
+async fn a5_docker_trouble_and_a_missing_pin_are_not_rejections() {
+    use crate::integrations::diiisco::NodeRejected;
+    let d = tempfile::tempdir().unwrap();
+    let mut r = R::new(d.path(), false);
+    r.build_ok = false;
+    let err = run_node_sequence(&r, &r.dir, &key_fp(), &pin(), || NOW, true)
+        .await
+        .unwrap_err();
+    assert!(err.downcast_ref::<NodeRejected>().is_none(), "{err:#}");
+}

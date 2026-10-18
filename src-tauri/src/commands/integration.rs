@@ -192,6 +192,34 @@ pub async fn install_integration(
     Ok(())
 }
 
+/// PURE (A5): is this a Diiisco node REJECTION (it did not prove the device
+/// key)? Only that outcome keeps the user's enable intent when the enable
+/// fails; a timeout, a stop or any other failure persists nothing.
+fn should_persist_rejected_enable(id: &str, err: &anyhow::Error) -> bool {
+    id == "diiisco"
+        && err
+            .downcast_ref::<crate::integrations::diiisco::NodeRejected>()
+            .is_some()
+}
+
+/// A5: record the enable intent of a rejected Diiisco enable in the config
+/// only. The registry stays as it was, so this session's toggle still reads
+/// off; the next launch restores the intent and tries again.
+fn persist_rejected_diiisco_enable(
+    state: &tauri::State<'_, crate::AppState>,
+    id: &str,
+    err: &anyhow::Error,
+) {
+    if !should_persist_rejected_enable(id, err) {
+        return;
+    }
+    if let Err(e) = state.config.update(|cfg| {
+        cfg.integrations_enabled.insert(id.to_string(), true);
+    }) {
+        tracing::warn!(error = %e, "Could not persist the rejected enable intent");
+    }
+}
+
 /// Record why an enable attempt failed, so the card has something to show.
 ///
 /// Six enable-path exits returned an Err that reached the toast and nothing
@@ -418,6 +446,7 @@ pub async fn toggle_integration(
             match tokio::time::timeout(INSTALL_STEP_TIMEOUT, integration.install_for_user()).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
+                    persist_rejected_diiisco_enable(&state, &id, &e);
                     let err_msg = e.to_string();
                     if let Ok(mut errs) = state.last_integration_error.write() {
                         errs.insert(id.clone(), Some(err_msg.clone()));
@@ -441,6 +470,7 @@ pub async fn toggle_integration(
         match tokio::time::timeout(TOGGLE_STEP_TIMEOUT, integration.start_for_user()).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
+                persist_rejected_diiisco_enable(&state, &id, &e);
                 let err_msg = e.to_string();
                 if let Ok(mut errs) = state.last_integration_error.write() {
                     errs.insert(id.clone(), Some(err_msg.clone()));
@@ -953,6 +983,10 @@ mod fail1_docker_rearm_tests {
 }
 
 /// c4 BUG LOOP 4 (BL4-C): a suppressed elevation no longer hides the shortfall.
+#[cfg(test)]
+#[path = "integration_enable_intent_tests.rs"]
+mod integration_enable_intent_tests;
+
 #[cfg(test)]
 #[path = "integration_card_notice_order_tests.rs"]
 mod integration_card_notice_order_tests;

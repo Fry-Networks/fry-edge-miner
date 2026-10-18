@@ -209,6 +209,21 @@ fn diiisco_bearer_token() -> String {
         .unwrap_or_default()
 }
 
+/// A fresh Diiisco node (or its install) was rejected: it did not prove the
+/// device key, or a start is backing off after such a rejection. A typed error
+/// so the toggle can tell it from a timeout or a stop; the text is the message
+/// the user already sees.
+#[derive(Debug)]
+pub struct NodeRejected(pub String);
+
+impl std::fmt::Display for NodeRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NodeRejected {}
+
 pub struct DiiiscoIntegration {
     pub api_client: Arc<ApiClient>,
     pub config: Arc<ConfigStore>,
@@ -505,9 +520,10 @@ impl Integration for DiiiscoIntegration {
                     have_image,
                     diiisco_rebuild::NodeOps::probe_ran(&node),
                 );
-                anyhow::bail!(
+                return Err(anyhow::Error::new(NodeRejected(
                     "the new Diiisco node did not prove the device key; the previous node image was kept"
-                )
+                        .to_string(),
+                )));
             }
             diiisco_rebuild::Gate::Stopped => {
                 // A user stop is not a failed attempt and promoted nothing:

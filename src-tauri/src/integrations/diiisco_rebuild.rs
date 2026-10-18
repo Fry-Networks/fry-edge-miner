@@ -1185,9 +1185,10 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
         // A3: a rejected fresh node is not rebuilt by every cycle. Read only
         // here: the upgrade path has its own backoff and a node to protect.
         if fresh_reject_defers(dir, &tag, now) {
-            anyhow::bail!(
+            return Err(anyhow::Error::new(super::NodeRejected(
                 "Diiisco node image build is backing off after a rejected fresh start; will retry later"
-            );
+                    .to_string(),
+            )));
         }
         info!("Diiisco: no node image — building before start");
         ops.refresh_dockerfile()?;
@@ -1218,9 +1219,10 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
                 if ops.probe_ran() {
                     record_fresh_reject(dir, &tag, now);
                 }
-                anyhow::bail!(
+                return Err(anyhow::Error::new(super::NodeRejected(
                     "the new Diiisco node did not prove the device key on start; nothing was promoted"
-                );
+                        .to_string(),
+                )));
             }
             Gate::Stopped => return Ok(Outcome::Stopped),
         }
