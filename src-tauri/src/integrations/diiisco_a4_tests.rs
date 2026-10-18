@@ -436,3 +436,41 @@ fn m4_an_unreadable_stamp_with_no_latest_has_nothing_to_restore() {
     discard_candidate_by_id(&r, &tag());
     assert!(!r.has_prefix("retag_alias"), "{:?}", r.calls());
 }
+
+// ------------------------------------------------------------------------ R3
+
+fn break_stamp(dir: &Path) {
+    std::fs::create_dir(dir.join(super::super::diiisco_rebuild::STAMP_FILE)).unwrap();
+}
+
+#[tokio::test]
+async fn r3_a_transient_lookup_error_before_the_build_does_not_block_the_rollback() {
+    let d = tempfile::tempdir().unwrap();
+    break_stamp(d.path());
+    let r = R::new(d.path(), true);
+    *r.error_once.lock().unwrap() = vec![LATEST_REF.to_string()];
+    let out = run_node_sequence(&r, &r.dir, &key_fp(), &pin(), || NOW, true)
+        .await
+        .ok();
+    let c = r.calls();
+    assert_eq!(out, Some(Outcome::UpgradeFailed), "{c:?}");
+    assert!(
+        c.contains(&format!("retag_latest:{OLD}")),
+        "latest pointed back at the previous image: {c:?}"
+    );
+}
+
+#[tokio::test]
+async fn r3_a_lookup_that_keeps_failing_still_keeps_everything() {
+    let d = tempfile::tempdir().unwrap();
+    break_stamp(d.path());
+    let mut r = R::new(d.path(), true);
+    r.error_refs = vec![LATEST_REF.to_string()];
+    let out = run_node_sequence(&r, &r.dir, &key_fp(), &pin(), || NOW, true)
+        .await
+        .ok();
+    let c = r.calls();
+    assert_eq!(out, Some(Outcome::UpgradeFailed), "{c:?}");
+    assert!(!c.iter().any(|x| x.starts_with("retag_latest")), "{c:?}");
+    assert!(!c.iter().any(|x| x.starts_with("rmi")), "{c:?}");
+}

@@ -872,6 +872,21 @@ pub(super) fn rmi_outcome(success: bool, stderr: &str) -> RmiOutcome {
     }
 }
 
+/// The id `latest` points at before an upgrade, for the rollback. A lookup
+/// ERROR is not "no image": it is retried (up to 3 lookups) so a transient
+/// docker error cannot leave the rollback with nothing to roll back to. A
+/// lookup that keeps failing still yields `None` (fail closed: keep everything).
+pub(super) fn capture_latest_id<O: NodeOps + ?Sized>(ops: &O) -> Option<String> {
+    for _ in 0..3 {
+        match ops.image_lookup(LATEST_REF) {
+            ImageLookup::Present(id) => return Some(id),
+            ImageLookup::Absent => return None,
+            ImageLookup::Error => {}
+        }
+    }
+    None
+}
+
 /// Undo `tag_latest` after a promotion failed later (the stamp could not be
 /// written): `latest` goes back to the previous image so the node that is
 /// restored is the old, proven one. No previous image = nothing to restore.
@@ -1219,7 +1234,7 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
     }
 
     // Upgrade: the old container keeps running while the new image builds.
-    let prev_id = ops.image_lookup(LATEST_REF).into_id();
+    let prev_id = capture_latest_id(ops);
     // The attempt is recorded once the build has finished (like install()):
     // a build interrupted by a stop leaves no backoff, a failed one does.
     let prior_backoff = read_backoff(dir);

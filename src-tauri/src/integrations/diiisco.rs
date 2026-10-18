@@ -444,7 +444,7 @@ impl Integration for DiiiscoIntegration {
             diiisco_rebuild::stop_generation(),
         );
         let prev_id = if have_image {
-            diiisco_rebuild::NodeOps::image_lookup(&node, diiisco_rebuild::LATEST_REF).into_id()
+            diiisco_rebuild::capture_latest_id(&node)
         } else {
             None
         };
