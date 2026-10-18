@@ -251,7 +251,7 @@ fn registered_without_rule() {
             "{amount}: {started:?}"
         );
         let expected = match amount {
-            100_014 => format!("{SETUP} · This device's own Fry dVPN node wallet also cannot pay the 0.001 ALGO fee of its next heartbeat. Optional, and not a payment to anyone; Olostep alone earns the full base reward. To keep Fry dVPN running — send 0.000986 ALGO to {ADDR}."),
+            100_014 => format!("{SETUP} · This device's own Fry dVPN node wallet also cannot pay the 0.001 ALGO fee of its next heartbeat. Optional, and not a payment to anyone: you can earn without it by running Olostep instead. To skip it, turn Fry dVPN off with its switch and turn Olostep on. To keep Fry dVPN running — send 0.000986 ALGO to {ADDR}."),
             _ => SETUP.to_string(),
         };
         for check in 1..=3 {
