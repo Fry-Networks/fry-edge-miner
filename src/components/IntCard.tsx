@@ -297,11 +297,11 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                 >
                   <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                     <AlertTriangle size={11} style={{ flexShrink: 0 }} />
-                    {`Optional: Sentinel dVPN's own node account on this device needs ${minDvpn ? `at least ${minDvpn} DVPN` : 'DVPN'} to register and pay Sentinel network fees. DVPN is the Sentinel network's token, not a Fry token, and sending it is not a payment to Fry. Send it to this node address:`}
+                    {`Optional: Sentinel dVPN's own node account on this device needs ${minDvpn ? `at least ${minDvpn} DVPN` : 'DVPN'} to register and pay Sentinel network fees. DVPN is the Sentinel network's token, not a Fry token. It is not a payment to Fry. Send it to this node address:`}
                   </span>
                   <CopyField val={fundingAddr} />
                   <span style={{ color: 'var(--t2)' }}>
-                    {`Buy DVPN on an exchange (e.g. Osmosis, KuCoin); there is no faucet. To skip it, turn Sentinel dVPN off with its switch. Turning it off does not affect your other rewards.`}
+                    {`Buy DVPN on an exchange. To skip it, turn Sentinel dVPN off with its switch.`}
                   </span>
                 </div>
               ) : (

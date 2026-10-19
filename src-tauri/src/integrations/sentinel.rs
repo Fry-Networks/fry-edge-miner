@@ -197,10 +197,9 @@ impl SentinelIntegration {
     fn unfunded_message(addr: &str) -> String {
         format!(
             "Sentinel node account not funded — Optional: this device's own Sentinel node account \
-             needs at least {} DVPN (the Sentinel network's token, not a Fry token) to register \
-             Sentinel dVPN and pay network fees. To use it, send DVPN to {}. This is not a \
-             payment to Fry or anyone. To skip it, turn Sentinel dVPN off with its switch; that \
-             does not affect your other rewards.",
+             needs at least {} DVPN to register and pay Sentinel network fees. DVPN is the \
+             Sentinel network's token, not a Fry token. Send it to {}. Not a payment to Fry or \
+             anyone. To skip it, turn Sentinel dVPN off with its switch.",
             Self::MIN_FUNDING_UDVPN / 1_000_000,
             addr
         )
@@ -582,3 +581,7 @@ mod tests {
 #[cfg(test)]
 #[path = "sentinel_p0_copy_tests.rs"]
 mod sentinel_p0_copy_tests;
+
+#[cfg(test)]
+#[path = "p0b_copy_len_tests.rs"]
+mod p0b_copy_len_tests;
