@@ -130,3 +130,7 @@ mod a4_tests;
 #[cfg(test)]
 #[path = "diiisco_g1_start_reuse_tests.rs"]
 mod g1_start_reuse_tests;
+
+#[cfg(test)]
+#[path = "diiisco_g6_retry_pause_tests.rs"]
+mod g6_retry_pause_tests;

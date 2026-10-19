@@ -625,6 +625,12 @@ pub(super) trait NodeOps: Send + Sync {
     }
     /// Take that record back (the alias was not restored after all).
     fn forget_alias_restored(&self) {}
+    /// G6: the short pause between two image lookups of `capture_latest_id`
+    /// after an Error (a transient docker error needs a moment to clear).
+    /// At most 2 x 250 ms; test doubles override it.
+    fn retry_pause(&self) {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
     /// G1: may `run_node_sequence` try `reuse_verified_latest` before an
     /// unstamped image is rebuilt? Default `false` (fakes with pinned call
     /// sequences); the real Docker node turns it on.
@@ -922,11 +928,15 @@ pub(super) fn rmi_outcome(success: bool, stderr: &str) -> RmiOutcome {
 /// docker error cannot leave the rollback with nothing to roll back to. A
 /// lookup that keeps failing still yields `None` (fail closed: keep everything).
 pub(super) fn capture_latest_id<O: NodeOps + ?Sized>(ops: &O) -> Option<String> {
-    for _ in 0..3 {
+    for attempt in 0..3 {
         match ops.image_lookup(LATEST_REF) {
             ImageLookup::Present(id) => return Some(id),
             ImageLookup::Absent => return None,
-            ImageLookup::Error => {}
+            ImageLookup::Error => {
+                if attempt < 2 {
+                    ops.retry_pause();
+                }
+            }
         }
     }
     None
