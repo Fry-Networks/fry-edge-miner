@@ -13,7 +13,7 @@ fn the_lab_example_reads_exactly_as_ruled() {
         Some(
             format!(
                 "This device's own Fry dVPN node wallet also cannot pay the 0.001 ALGO fee of its \
-                 next heartbeat. Optional, and not a payment to anyone: you can earn without it by running Olostep instead. To skip it, turn Fry dVPN off with its switch and turn Olostep on. To keep Fry dVPN running — send 0.000001 ALGO to {ADDR}."
+                 next heartbeat. To keep Fry dVPN running — send 0.000001 ALGO to {ADDR}. Optional: not Fry's wallet, and not a payment to anyone. To skip, switch Fry dVPN off. Olostep alone earns the full base reward; running both adds 15%."
             )
             .as_str()
         )
@@ -24,7 +24,7 @@ fn the_lab_example_reads_exactly_as_ruled() {
         format!(
             "Awaiting administrator action — Click Retry on the Security hardening banner to \
              allow fryDVPN through Windows Firewall. · This device's own Fry dVPN node wallet \
-             also cannot pay the 0.001 ALGO fee of its next heartbeat. Optional, and not a payment to anyone: you can earn without it by running Olostep instead. To skip it, turn Fry dVPN off with its switch and turn Olostep on. To keep Fry dVPN running — send 0.000001 ALGO to {ADDR}."
+             also cannot pay the 0.001 ALGO fee of its next heartbeat. To keep Fry dVPN running — send 0.000001 ALGO to {ADDR}. Optional: not Fry's wallet, and not a payment to anyone. To skip, switch Fry dVPN off. Olostep alone earns the full base reward; running both adds 15%."
         )
     );
     assert_eq!(line.chars().filter(|&c| c == '\u{2014}').count(), 2);
