@@ -202,6 +202,14 @@ fn should_persist_rejected_enable(id: &str, err: &anyhow::Error) -> bool {
             .is_some()
 }
 
+/// PURE (A5): does an enable of `id` that TIMED OUT keep the user's intent?
+/// Diiisco only: its rejection usually arrives after the toggle bound, so in
+/// the UI the enable surfaces as a timeout (the detached start keeps running
+/// and arms the A3 cooldown when it is rejected).
+fn should_persist_timed_out_enable(id: &str) -> bool {
+    id == "diiisco"
+}
+
 /// A5: record the enable intent of a rejected Diiisco enable in the config
 /// only. The registry stays as it was, so this session's toggle still reads
 /// off; the next launch restores the intent and tries again.
@@ -210,13 +218,23 @@ fn persist_rejected_diiisco_enable(
     id: &str,
     err: &anyhow::Error,
 ) {
-    if !should_persist_rejected_enable(id, err) {
-        return;
+    if should_persist_rejected_enable(id, err) {
+        persist_enable_intent(state, id);
     }
+}
+
+/// A5: the same, for a Diiisco enable step that hit the toggle timeout.
+fn persist_timed_out_diiisco_enable(state: &tauri::State<'_, crate::AppState>, id: &str) {
+    if should_persist_timed_out_enable(id) {
+        persist_enable_intent(state, id);
+    }
+}
+
+fn persist_enable_intent(state: &tauri::State<'_, crate::AppState>, id: &str) {
     if let Err(e) = state.config.update(|cfg| {
         cfg.integrations_enabled.insert(id.to_string(), true);
     }) {
-        tracing::warn!(error = %e, "Could not persist the rejected enable intent");
+        tracing::warn!(error = %e, "Could not persist the enable intent");
     }
 }
 
@@ -454,6 +472,7 @@ pub async fn toggle_integration(
                     return Err(err_msg);
                 }
                 Err(_) => {
+                    persist_timed_out_diiisco_enable(&state, &id);
                     let err_msg = timeout_message_with("install", &id, INSTALL_STEP_TIMEOUT);
                     if let Ok(mut errs) = state.last_integration_error.write() {
                         errs.insert(id.clone(), Some(err_msg.clone()));
@@ -478,6 +497,7 @@ pub async fn toggle_integration(
                 return Err(err_msg);
             }
             Err(_) => {
+                persist_timed_out_diiisco_enable(&state, &id);
                 let err_msg = timeout_message("start", &id);
                 if let Ok(mut errs) = state.last_integration_error.write() {
                     errs.insert(id.clone(), Some(err_msg.clone()));
