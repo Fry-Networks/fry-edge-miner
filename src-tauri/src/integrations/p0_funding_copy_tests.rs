@@ -72,7 +72,7 @@ fn assert_plain_copy(name: &str, m: &str) {
         m.contains("not Fry's wallet"),
         "{name}: not Fry's wallet: {m}"
     );
-    assert!(m.split_whitespace().count() <= 95, "{name}: too long: {m}");
+    assert!(m.split_whitespace().count() <= 60, "{name}: too long: {m}");
     assert!(
         m.to_lowercase().contains("optional"),
         "{name}: optional: {m}"
@@ -87,11 +87,11 @@ fn assert_plain_copy(name: &str, m: &str) {
     );
     assert!(m.contains("switch"), "{name}: points at the switch: {m}");
     assert!(
-        m.contains("Optional: you can earn without it by running Olostep instead."),
+        m.contains("Optional: not Fry's wallet"),
         "{name}: earning path: {m}"
     );
     assert!(
-        m.contains("turn Fry dVPN off with its switch and turn Olostep on."),
+        m.contains("To skip, switch Fry dVPN off."),
         "{name}: skip path: {m}"
     );
 }
@@ -110,7 +110,7 @@ fn the_funding_card_keeps_its_marker_and_stays_short() {
         registration_funding_message(0, MIN_BAL, REGISTRATION_MIN_MICROALGOS, ADDR).unwrap_err();
     assert!(m.starts_with(FUNDING_MARKER), "{m}");
     assert!(crate::integrations::awaits_user_action(&m));
-    assert!(m.split_whitespace().count() <= 90, "too long: {m}");
+    assert!(m.split_whitespace().count() <= 60, "too long: {m}");
 }
 
 #[test]
@@ -122,15 +122,12 @@ fn the_rule_park_suffix_is_plain_and_optional() {
     assert!(m.contains("not a payment to anyone"), "{m}");
     assert!(m.to_lowercase().contains("optional"), "{m}");
     assert!(
-        m.contains("you can earn without it by running Olostep instead"),
+        m.contains("Olostep alone earns the full base reward"),
         "{m}"
     );
-    assert!(
-        m.contains("turn Fry dVPN off with its switch and turn Olostep on."),
-        "{m}"
-    );
+    assert!(m.contains("To skip, switch Fry dVPN off."), "{m}");
     assert!(m.contains("also cannot pay"), "{m}");
-    assert!(m.split_whitespace().count() <= 65, "too long: {m}");
+    assert!(m.split_whitespace().count() <= 60, "too long: {m}");
 }
 
 /// (b) the funding card quotes exactly what the pre-check computes.
@@ -142,7 +139,7 @@ fn funding_card_amounts_equal_the_precheck_for_three_balances() {
             .unwrap_err();
         let short = total - amount;
         let send = format!(
-            "To use Fry dVPN, send {} ALGO to {ADDR}",
+            "send {} ALGO to {ADDR}",
             algo3(short.div_ceil(1_000) * 1_000)
         );
         let needs = format!("needs {} ALGO total", algo3(total.div_ceil(1_000) * 1_000));
@@ -162,7 +159,10 @@ fn affordability_amounts_equal_the_precheck_for_three_balances() {
     for spendable in [0u64, 100_000, required - 1] {
         let m = registration_affordability(spendable, required, ADDR).unwrap_err();
         assert!(
-            m.contains(&format!("To use Fry dVPN, send ALGO to {ADDR}")),
+            m.contains(&format!(
+                "Send {} ALGO to {ADDR}",
+                algo3(required - spendable)
+            )),
             "{m}"
         );
         for want in [
@@ -190,7 +190,7 @@ fn heartbeat_amounts_equal_the_precheck_for_three_balances() {
         let n = heartbeat_shortfall_message(amount, MIN_BAL, ADDR).unwrap();
         let s = rule_park_heartbeat_suffix(amount, MIN_BAL, ADDR).unwrap();
         for (m, lead) in [
-            (n, "To keep Fry dVPN running, "),
+            (n, "To keep it running, "),
             (s, "To keep Fry dVPN running — "),
         ] {
             let want_send = format!("{lead}{figure}");
