@@ -161,7 +161,7 @@ fn affordability_amounts_equal_the_precheck_for_three_balances() {
         assert!(
             m.contains(&format!(
                 "Send {} ALGO to {ADDR}",
-                algo3(required - spendable)
+                algo3((required - spendable).div_ceil(1_000) * 1_000)
             )),
             "{m}"
         );
