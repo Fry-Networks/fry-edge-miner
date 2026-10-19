@@ -13,7 +13,7 @@ const SETUP =
   'Awaiting administrator action — Click Retry on the Security hardening banner to allow fryDVPN through Windows Firewall.'
 const COMBINED =
   SETUP +
-  " · This device's own Fry dVPN node wallet also cannot pay the 0.001 ALGO fee of its next heartbeat. Optional, and not a payment to anyone: you can earn without it by running Olostep instead. To skip it, turn Fry dVPN off with its switch and turn Olostep on. To keep Fry dVPN running — send 0.000001 ALGO to YTC4NR6IZHFMXTGNZ3H5BUOS2PKNLVWX3DM5VW643XPN7YHB4LRUS2CHMA."
+  " · This device's own Fry dVPN node wallet also cannot pay the 0.001 ALGO fee of its next heartbeat. To keep Fry dVPN running — send 0.000001 ALGO to YTC4NR6IZHFMXTGNZ3H5BUOS2PKNLVWX3DM5VW643XPN7YHB4LRUS2CHMA. Optional: not Fry's wallet, and not a payment to anyone. To skip, switch Fry dVPN off. Olostep alone earns the full base reward; running both adds 15%."
 
 function card(reason: string) {
   return {
