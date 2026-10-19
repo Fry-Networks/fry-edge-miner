@@ -230,6 +230,81 @@ fn persist_timed_out_diiisco_enable(state: &tauri::State<'_, crate::AppState>, i
     }
 }
 
+/// PURE (G2): set the enable intent of `id` in `map` and return what was
+/// there before (`None` = no entry), so a failed enable can put it back.
+fn apply_enable_intent(
+    map: &mut std::collections::HashMap<String, bool>,
+    id: &str,
+) -> Option<bool> {
+    map.insert(id.to_string(), true)
+}
+
+/// PURE (G2): put the intent of `id` back to what `apply_enable_intent` saw.
+/// Absent before = remove the key; present before = its old value.
+fn apply_intent_restore(
+    map: &mut std::collections::HashMap<String, bool>,
+    id: &str,
+    prior: Option<bool>,
+) {
+    match prior {
+        Some(v) => {
+            map.insert(id.to_string(), v);
+        }
+        None => {
+            map.remove(id);
+        }
+    }
+}
+
+/// PURE (G2): does a failed enable undo its early intent write? Diiisco only,
+/// and only for errors that are NOT a node rejection (a backoff, docker
+/// missing, a plain failure persist nothing; a rejection keeps the intent).
+fn should_restore_intent_after_failed_enable(id: &str, err: &anyhow::Error) -> bool {
+    id == "diiisco" && !should_persist_rejected_enable(id, err)
+}
+
+/// G2: persist a Diiisco enable intent BEFORE its install/start step begins,
+/// so an app exit at any time after the click keeps it. Returns what has to
+/// be restored on a generic failure (`None` = nothing was written).
+fn persist_early_diiisco_intent(
+    state: &tauri::State<'_, crate::AppState>,
+    id: &str,
+) -> Option<Option<bool>> {
+    if id != "diiisco" {
+        return None;
+    }
+    let mut prior = None;
+    match state.config.update(|cfg| {
+        prior = apply_enable_intent(&mut cfg.integrations_enabled, id);
+    }) {
+        Ok(_) => Some(prior),
+        Err(e) => {
+            tracing::warn!(error = %e, "Could not persist the enable intent");
+            None
+        }
+    }
+}
+
+/// G2: a generic (non-rejection) enable failure puts the previous intent back.
+fn restore_intent_after_failed_enable(
+    state: &tauri::State<'_, crate::AppState>,
+    id: &str,
+    err: &anyhow::Error,
+    written: Option<Option<bool>>,
+) {
+    let Some(prior) = written else {
+        return;
+    };
+    if !should_restore_intent_after_failed_enable(id, err) {
+        return;
+    }
+    if let Err(e) = state.config.update(|cfg| {
+        apply_intent_restore(&mut cfg.integrations_enabled, id, prior);
+    }) {
+        tracing::warn!(error = %e, "Could not restore the enable intent");
+    }
+}
+
 fn persist_enable_intent(state: &tauri::State<'_, crate::AppState>, id: &str) {
     if let Err(e) = state.config.update(|cfg| {
         cfg.integrations_enabled.insert(id.to_string(), true);
@@ -454,6 +529,9 @@ pub async fn toggle_integration(
         // async worker because clear_blocked takes the gate mutex.
         tokio::task::block_in_place(|| rearm_docker_prerequisite(integration.requires_docker()));
 
+        // G2: Diiisco's intent is on disk before the slow step begins.
+        let written_intent = persist_early_diiisco_intent(&state, &id);
+
         // Auto-install integrations that have not been deployed yet (e.g., Diiisco).
         if integration.installed_version().is_none() {
             // B3: the toggle is the human gesture, so this is the one install
@@ -465,6 +543,7 @@ pub async fn toggle_integration(
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
                     persist_rejected_diiisco_enable(&state, &id, &e);
+                    restore_intent_after_failed_enable(&state, &id, &e, written_intent);
                     let err_msg = e.to_string();
                     if let Ok(mut errs) = state.last_integration_error.write() {
                         errs.insert(id.clone(), Some(err_msg.clone()));
@@ -490,6 +569,7 @@ pub async fn toggle_integration(
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 persist_rejected_diiisco_enable(&state, &id, &e);
+                restore_intent_after_failed_enable(&state, &id, &e, written_intent);
                 let err_msg = e.to_string();
                 if let Ok(mut errs) = state.last_integration_error.write() {
                     errs.insert(id.clone(), Some(err_msg.clone()));
@@ -1006,6 +1086,11 @@ mod fail1_docker_rearm_tests {
 #[cfg(test)]
 #[path = "integration_enable_intent_tests.rs"]
 mod integration_enable_intent_tests;
+
+/// G2: the enable intent is persisted before the slow step.
+#[cfg(test)]
+#[path = "integration_g2_intent_tests.rs"]
+mod integration_g2_intent_tests;
 
 /// c4 BUG LOOP 4 (BL4-C): a suppressed elevation no longer hides the shortfall.
 #[cfg(test)]
