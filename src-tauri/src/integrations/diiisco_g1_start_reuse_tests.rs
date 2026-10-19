@@ -452,3 +452,18 @@ async fn g1_a_stop_during_the_reuse_proof_returns_stopped() {
     assert_eq!(out.ok(), Some(Outcome::Stopped), "{:?}", r.calls());
     assert!(read_stamp(d.path()).is_none());
 }
+
+/// F3: production turns the start-path reuse ON; the trait default is OFF.
+/// Without this the G1 fix could be silently disabled by removing the
+/// DockerNode override (every fake-based test would still pass).
+#[test]
+fn g1_the_production_docker_node_enables_the_start_path_reuse() {
+    let node = super::super::DockerNode::new(
+        PathBuf::from("unused"),
+        "ADDR".into(),
+        "mnemonic".into(),
+        "bearer".into(),
+        0,
+    );
+    assert!(NodeOps::reuse_unstamped_image(&node));
+}
