@@ -93,6 +93,21 @@ fn the_restore_is_by_key() {
     assert!(m["aem"], "other keys untouched");
 }
 
+/// F2: compare-and-set. A toggle-off (or any other write) that landed while
+/// the enable was in flight is never overwritten by the restore.
+#[test]
+fn the_restore_only_acts_while_the_intent_is_still_the_one_this_call_wrote() {
+    for prior in [Some(true), None] {
+        let mut m = HashMap::from([("diiisco".to_string(), false)]);
+        apply_intent_restore(&mut m, "diiisco", prior);
+        assert_eq!(m.get("diiisco"), Some(&false), "prior {prior:?}");
+    }
+    // The key was removed meanwhile: nothing to restore either.
+    let mut m: HashMap<String, bool> = HashMap::new();
+    apply_intent_restore(&mut m, "diiisco", Some(true));
+    assert!(m.is_empty());
+}
+
 /// Both failure arms call the restore, after the rejection helper and before
 /// returning.
 #[test]

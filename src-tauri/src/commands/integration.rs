@@ -246,6 +246,11 @@ fn apply_intent_restore(
     id: &str,
     prior: Option<bool>,
 ) {
+    // Compare-and-set: only undo the `true` this enable wrote. If the user
+    // toggled off (or anything else wrote) meanwhile, leave that value alone.
+    if map.get(id) != Some(&true) {
+        return;
+    }
     match prior {
         Some(v) => {
             map.insert(id.to_string(), v);
