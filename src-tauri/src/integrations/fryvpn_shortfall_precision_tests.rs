@@ -44,9 +44,7 @@ fn figure_between<'a>(msg: &'a str, before: &str, after: &str) -> &'a str {
 /// The "send X ALGO" figure, read the way the marker text promises it.
 fn displayed_send_microalgos(msg: &str) -> u64 {
     let rest = msg
-        .strip_prefix(FUNDING_MARKER)
-        .and_then(|r| r.split_once("To use Fry dVPN, send "))
-        .map(|(_, r)| r)
+        .strip_prefix(&format!("{FUNDING_MARKER} — send "))
         .unwrap_or_else(|| panic!("the marker text must stay parseable: {msg}"));
     let (figure, _) = rest
         .split_once(&format!(" ALGO to {ADDR}"))
