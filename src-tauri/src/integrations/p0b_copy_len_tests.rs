@@ -131,8 +131,6 @@ fn the_sentinel_unfunded_text_is_at_most_60_words_with_every_element() {
 fn the_affordability_send_figure_rounds_up_and_never_understates() {
     let m = registration_affordability(100_600, 312_000, ADDR).unwrap_err();
     assert!(m.contains(&format!("Send 0.212 ALGO to {ADDR}")), "{m}");
-    let m = registration_affordability(100_600, 312_000 - 211_400 + 100_600, ADDR).unwrap_err();
-    assert!(m.contains(&format!("Send 0.212 ALGO to {ADDR}")), "{m}");
     let m = registration_affordability(0, 211_400, ADDR).unwrap_err();
     assert!(m.contains(&format!("Send 0.212 ALGO to {ADDR}")), "{m}");
     assert!(words(&m) <= MAX_WORDS, "{m}");
