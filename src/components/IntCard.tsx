@@ -345,7 +345,12 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                 }}
               >
                 {SETUP_GUIDANCE[id].what}{' '}
-                <a href={SETUP_GUIDANCE[id].url} target="_blank" rel="noreferrer">
+                <a
+                  href={SETUP_GUIDANCE[id].url}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={id === 'sentinel' ? { overflowWrap: 'normal', wordBreak: 'normal' } : undefined}
+                >
                   {SETUP_GUIDANCE[id].urlLabel}
                 </a>
               </span>
