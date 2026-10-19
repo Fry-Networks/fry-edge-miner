@@ -892,6 +892,10 @@ impl DockerNode {
 
 #[async_trait]
 impl diiisco_rebuild::NodeOps for DockerNode {
+    fn reuse_unstamped_image(&self) -> bool {
+        true
+    }
+
     fn image_exists(&self) -> bool {
         image_built() == diiisco_rebuild::ImageState::Present
     }

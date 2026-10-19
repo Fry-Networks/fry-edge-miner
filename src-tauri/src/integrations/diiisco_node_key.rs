@@ -126,3 +126,7 @@ mod fresh_backoff_tests;
 #[cfg(test)]
 #[path = "diiisco_a4_tests.rs"]
 mod a4_tests;
+
+#[cfg(test)]
+#[path = "diiisco_g1_start_reuse_tests.rs"]
+mod g1_start_reuse_tests;

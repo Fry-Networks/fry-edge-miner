@@ -625,6 +625,12 @@ pub(super) trait NodeOps: Send + Sync {
     }
     /// Take that record back (the alias was not restored after all).
     fn forget_alias_restored(&self) {}
+    /// G1: may `run_node_sequence` try `reuse_verified_latest` before an
+    /// unstamped image is rebuilt? Default `false` (fakes with pinned call
+    /// sequences); the real Docker node turns it on.
+    fn reuse_unstamped_image(&self) -> bool {
+        false
+    }
     /// The stamp file exists but cannot be read, so `stamp_tag` says nothing
     /// about which tag `latest` carries. Default: no.
     fn stamp_unreadable(&self) -> bool {
@@ -1264,6 +1270,16 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
     }
     let plan = gated;
     let tag = image_tag(key_fp, pin_sha);
+    // A6 on the start path: the image is present but unstamped (BuildNew), so
+    // prove and stamp the existing `latest` instead of rebuilding it. Only a
+    // probe pass stamps; anything else falls through to the build below.
+    if have_image && matches!(plan, Plan::BuildNew { .. }) && ops.reuse_unstamped_image() {
+        match reuse_verified_latest(ops, dir, &tag, key_fp, pin_sha).await {
+            Reuse::Reused => return Ok(Outcome::Ran),
+            Reuse::Stopped => return Ok(Outcome::Stopped),
+            Reuse::Build => {}
+        }
+    }
     // With no image there is nothing to protect, so a backoff never blocks it.
     let must_build = !have_image || matches!(plan, Plan::BuildNew { .. });
     let upgrade = have_image && must_build;
