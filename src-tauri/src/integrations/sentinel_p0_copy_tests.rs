@@ -29,11 +29,11 @@ fn unfunded_message_is_plain_optional_and_not_a_payment_to_fry() {
     assert!(m.contains("Sentinel dVPN"), "{m}");
     assert!(m.contains("Sentinel network's token"), "{m}");
     assert!(m.contains("not a Fry token"), "{m}");
-    assert!(m.contains("not a payment to Fry or anyone"), "{m}");
+    assert!(m.contains("Not a payment to Fry or anyone"), "{m}");
     assert!(lower.contains("optional"), "{m}");
-    assert!(m.contains("does not affect your other rewards"), "{m}");
+    assert!(m.contains("register and pay Sentinel network fees"), "{m}");
     assert!(m.contains("switch"), "{m}");
-    assert!(m.split_whitespace().count() <= 70, "too long: {m}");
+    assert!(m.split_whitespace().count() <= 60, "too long: {m}");
 }
 
 #[test]
