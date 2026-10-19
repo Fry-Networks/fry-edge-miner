@@ -430,11 +430,7 @@ async fn g1_a_probe_reject_writes_no_stamp_and_falls_back_as_install_does() {
     r.probe_ok = false;
     let _ = seq(&r).await;
     let c = r.calls();
-    assert_eq!(
-        c.iter().filter(|x| *x == "probe").count() >= 1,
-        true,
-        "{c:?}"
-    );
+    assert!(c.iter().any(|x| x == "probe"), "{c:?}");
     // The reuse probe failed, so the build path ran exactly as before.
     assert_eq!(
         c.iter().filter(|x| x.starts_with("build:")).count(),

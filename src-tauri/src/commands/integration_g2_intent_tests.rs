@@ -87,10 +87,10 @@ fn the_restore_is_by_key() {
     let mut m = HashMap::from([("diiisco".to_string(), false), ("aem".to_string(), true)]);
     let prior = apply_enable_intent(&mut m, "diiisco");
     assert_eq!(prior, Some(false));
-    assert_eq!(m["diiisco"], true);
+    assert!(m["diiisco"]);
     apply_intent_restore(&mut m, "diiisco", prior);
-    assert_eq!(m["diiisco"], false);
-    assert_eq!(m["aem"], true, "other keys untouched");
+    assert!(!m["diiisco"]);
+    assert!(m["aem"], "other keys untouched");
 }
 
 /// Both failure arms call the restore, after the rejection helper and before
