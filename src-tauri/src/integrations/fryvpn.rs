@@ -464,6 +464,8 @@ pub(crate) fn registration_affordability(
     }
     let short = (required - spendable) as f64 / 1_000_000.0;
     let have = spendable as f64 / 1_000_000.0;
+    // Whole 0.001 ALGO, rounded UP so that sending the figure shown is enough.
+    let send = (required - spendable).div_ceil(1_000) as f64 / 1_000.0;
     Err(format!(
         "Fry dVPN needs {:.3} ALGO spendable in this device's own Fry dVPN node wallet for \
          registration fees and the minimum balance. It has {:.3} ALGO, {:.3} ALGO short. Send {:.3} ALGO \
@@ -472,7 +474,7 @@ pub(crate) fn registration_affordability(
         required as f64 / 1_000_000.0,
         have,
         short,
-        short,
+        send,
         address,
         second_required_boost_text()
     ))

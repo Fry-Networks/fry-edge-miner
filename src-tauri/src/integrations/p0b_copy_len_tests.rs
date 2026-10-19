@@ -124,3 +124,16 @@ fn the_sentinel_unfunded_text_is_at_most_60_words_with_every_element() {
     assert!(m.contains("sent1qqqqexample"), "{m}");
     assert!(crate::integrations::awaits_user_action(&m), "{m}");
 }
+
+/// F1: the "Send" figure rounds UP to a whole 0.001 ALGO, so sending it is
+/// always enough (a nearest-rounded 0.2114 would read 0.211 and fall short).
+#[test]
+fn the_affordability_send_figure_rounds_up_and_never_understates() {
+    let m = registration_affordability(100_600, 312_000, ADDR).unwrap_err();
+    assert!(m.contains(&format!("Send 0.212 ALGO to {ADDR}")), "{m}");
+    let m = registration_affordability(100_600, 312_000 - 211_400 + 100_600, ADDR).unwrap_err();
+    assert!(m.contains(&format!("Send 0.212 ALGO to {ADDR}")), "{m}");
+    let m = registration_affordability(0, 211_400, ADDR).unwrap_err();
+    assert!(m.contains(&format!("Send 0.212 ALGO to {ADDR}")), "{m}");
+    assert!(words(&m) <= MAX_WORDS, "{m}");
+}
