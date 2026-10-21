@@ -205,6 +205,14 @@ export function sentinelFundingAddress(health: HealthStatus): string | null {
   return reason?.match(/sent1[0-9a-z]+/)?.[0] ?? null
 }
 
+// The minimum DVPN the backend asks for ("at least N DVPN"), taken from the
+// same health reason so the Rust constant stays the single source. Null when
+// the reason carries no figure.
+export function sentinelFundingMinDvpn(health: HealthStatus): string | null {
+  const reason = unhealthyReason(health)
+  return reason?.match(/at least (\d+) DVPN/)?.[1] ?? null
+}
+
 /** Where the scrubbed debug logs go, and whether anything is going there. */
 export interface DebugLogInfo {
   path: string

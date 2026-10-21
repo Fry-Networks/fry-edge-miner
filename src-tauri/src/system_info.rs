@@ -143,6 +143,7 @@ fn probe_ram_gb() -> Option<f64> {
 }
 
 /// PowerShell emits the invariant/locale-formatted number on its own line.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn parse_float(raw: &str) -> Option<f64> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {

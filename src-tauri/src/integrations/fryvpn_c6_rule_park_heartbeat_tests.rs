@@ -22,8 +22,8 @@ const SETUP: &str = "Awaiting administrator action — Click Retry on the Securi
 /// The D-C6-1 line for a registered node short of `short` ALGO.
 fn setup_and_heartbeat(short: &str) -> String {
     format!(
-        "{SETUP} · This node's wallet also cannot pay the 0.001 ALGO fee of its next \
-         heartbeat — send {short} ALGO to {ADDR}."
+        "{SETUP} · This device's own Fry dVPN node wallet also cannot pay the 0.001 ALGO fee \
+         of its next heartbeat. To keep Fry dVPN running — send {short} ALGO to {ADDR}. Optional: not Fry's wallet, and not a payment to anyone. To skip, switch Fry dVPN off. Olostep alone earns the full base reward; running both adds 15%."
     )
 }
 
@@ -57,8 +57,8 @@ fn a_registered_node_with_its_rule_keeps_only_the_dc42_notice() {
 fn every_rust_matcher_treats_the_combined_line_as_the_setup_line() {
     let combined = format!(
         "Awaiting administrator action — Click Retry on the Security hardening banner to \
-         allow fryDVPN through Windows Firewall. · This node's wallet also cannot pay the \
-         0.001 ALGO fee of its next heartbeat — send 0.000001 ALGO to {ADDR}."
+         allow fryDVPN through Windows Firewall. · This device's own Fry dVPN node wallet \
+         also cannot pay the 0.001 ALGO fee of its next heartbeat. To keep Fry dVPN running — send 0.000001 ALGO to {ADDR}. Optional: not Fry's wallet, and not a payment to anyone. To skip, switch Fry dVPN off. Olostep alone earns the full base reward; running both adds 15%."
     );
     for line in [SETUP, combined.as_str()] {
         assert!(crate::integrations::awaits_user_action(line), "{line}");
@@ -238,10 +238,7 @@ fn registered_with_rule() {
         funding_notice().as_deref(),
         Some(
             format!(
-                "fryDVPN is running, but this node's wallet cannot pay the 0.001 ALGO fee of \
-                 its next heartbeat — send 0.000986 ALGO to {ADDR}. The chain rejects each \
-                 unpaid heartbeat and nothing is spent; heartbeats resume automatically once \
-                 the wallet is funded."
+                "Fry dVPN is running, but this device's own Fry dVPN node wallet cannot pay the 0.001 ALGO fee of its next heartbeat. To keep it running, send 0.000986 ALGO to {ADDR}. Optional: not Fry's wallet, and not a payment to anyone. To skip, switch Fry dVPN off. Olostep alone earns the full base reward; running both adds 15%."
             )
             .as_str()
         ),

@@ -193,6 +193,18 @@ impl SentinelIntegration {
             .filter(|s| s.starts_with("sent1"))
     }
 
+    /// The card text for a node whose account has never received DVPN.
+    fn unfunded_message(addr: &str) -> String {
+        format!(
+            "Sentinel node account not funded — Optional: this device's own Sentinel node account \
+             needs at least {} DVPN to register and pay Sentinel network fees. DVPN is the \
+             Sentinel network's token, not a Fry token. Send it to {}. Not a payment to Fry or \
+             anyone. To skip it, turn Sentinel dVPN off with its switch.",
+            Self::MIN_FUNDING_UDVPN / 1_000_000,
+            addr
+        )
+    }
+
     /// F16: minimum node balance (in udvpn) below which a Sentinel node cannot
     /// register on chain. Each node runs its own Fry-managed wallet.
     const MIN_FUNDING_UDVPN: u64 = 10_000_000; // 10 DVPN (6 decimals)
@@ -456,10 +468,7 @@ impl Integration for SentinelIntegration {
                             if logs.contains("does not exist") && logs.contains("account") {
                                 let addr = Self::node_address(&compose)
                                     .unwrap_or_else(|| "the node account".to_string());
-                                return HealthStatus::Unhealthy(format!(
-                                    "Sentinel node account not funded — send DVPN to {} to activate this node",
-                                    addr
-                                ));
+                                return HealthStatus::Unhealthy(Self::unfunded_message(&addr));
                             }
                             return HealthStatus::Unhealthy(format!(
                                 "Container exited: {}",
@@ -568,3 +577,11 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "sentinel_p0_copy_tests.rs"]
+mod sentinel_p0_copy_tests;
+
+#[cfg(test)]
+#[path = "p0b_copy_len_tests.rs"]
+mod p0b_copy_len_tests;

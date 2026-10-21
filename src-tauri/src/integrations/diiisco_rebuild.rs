@@ -18,7 +18,15 @@ use tracing::{info, warn};
 
 pub(super) const STAMP_FILE: &str = "node-image.stamp";
 pub(super) const BACKOFF_FILE: &str = "node-rebuild.backoff";
+/// A3: the fresh (no image) start path's own cooldown, written only when a
+/// candidate failed to prove the device key. Kept apart from `BACKOFF_FILE`,
+/// which the fresh path deliberately ignores.
+pub(super) const FRESH_COOLDOWN_FILE: &str = "node-fresh-reject.cooldown";
 pub(super) const LATEST_REF: &str = "diiisco-node:latest";
+/// m4 restored `diiisco-node:<tag>` as an alias of `latest` under an unreadable
+/// stamp, so that alias says nothing about which pin `latest` was built for.
+/// The tag is inside. A6 never reuses an image on the strength of such an alias.
+pub(super) const ALIAS_MARKER_FILE: &str = "node-alias-restored.marker";
 const BACKOFF_BASE_SECS: u64 = 3600;
 const BACKOFF_CAP_SECS: u64 = 86_400;
 pub(super) const PROBE_BUDGET_SECS: u64 = 90;
@@ -234,7 +242,11 @@ pub(super) fn read_stamp(dir: &Path) -> Option<Stamp> {
 }
 
 pub(super) fn read_backoff(dir: &Path) -> Option<Backoff> {
-    let t = std::fs::read_to_string(dir.join(BACKOFF_FILE)).ok()?;
+    read_backoff_file(dir, BACKOFF_FILE)
+}
+
+fn read_backoff_file(dir: &Path, file: &str) -> Option<Backoff> {
+    let t = std::fs::read_to_string(dir.join(file)).ok()?;
     let attempts: u32 = field(&t, "attempts")?.parse().ok()?;
     let last_unix: u64 = field(&t, "last")?.parse().ok()?;
     let tag = field(&t, "tag").filter(|v| is_tag(v))?;
@@ -336,6 +348,83 @@ pub(super) fn record_attempt(dir: &Path, tag: &str, now: u64) -> std::io::Result
             prev.saturating_add(1)
         ),
     )
+}
+
+/// A3: record a key-proof rejection of a fresh start for `tag`; the count
+/// continues only for the same target tag.
+pub(super) fn record_fresh_reject(dir: &Path, tag: &str, now: u64) {
+    let prev = read_backoff_file(dir, FRESH_COOLDOWN_FILE)
+        .filter(|b| b.tag == tag)
+        .map_or(0, |b| b.attempts);
+    if let Err(e) = write_atomic(
+        dir,
+        FRESH_COOLDOWN_FILE,
+        &format!(
+            "attempts={}\nlast={now}\ntag={tag}\n",
+            prev.saturating_add(1)
+        ),
+    ) {
+        warn!(error = %e, "Diiisco: cannot record the fresh-start cooldown");
+    }
+}
+
+/// A3: is a fresh start for `tag` still inside its cooldown?
+pub(super) fn fresh_reject_defers(dir: &Path, tag: &str, now: u64) -> bool {
+    backoff_defers(
+        read_backoff_file(dir, FRESH_COOLDOWN_FILE).as_ref(),
+        tag,
+        now,
+    )
+}
+
+/// Record that the alias for `tag` was put back by m4 (stamp unreadable).
+/// False when it could not be written.
+pub(super) fn write_alias_marker(dir: &Path, tag: &str) -> bool {
+    match write_atomic(dir, ALIAS_MARKER_FILE, &format!("{tag}\n")) {
+        Ok(()) => true,
+        Err(e) => {
+            warn!(error = %e, "Diiisco: cannot record the restored image alias");
+            false
+        }
+    }
+}
+
+/// True when the marker names `tag`. A missing or unreadable marker is "not
+/// restored".
+pub(super) fn alias_restored_for(dir: &Path, tag: &str) -> bool {
+    std::fs::read_to_string(dir.join(ALIAS_MARKER_FILE)).is_ok_and(|t| t.trim() == tag)
+}
+
+pub(super) fn clear_alias_marker(dir: &Path) {
+    if let Err(e) = std::fs::remove_file(dir.join(ALIAS_MARKER_FILE)) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            warn!(error = %e, "Diiisco: could not clear the restored-alias marker");
+        }
+    }
+}
+
+/// F3: install() and start() agree. A fresh install (no image yet) whose
+/// candidate did not prove the key arms the same cooldown start() reads, so a
+/// start() right after is not another full build. Docker trouble and installs
+/// that have an image to protect (their own backoff applies) arm nothing.
+pub(super) fn note_install_reject(
+    dir: &Path,
+    tag: &str,
+    now: u64,
+    have_image: bool,
+    key_not_proven: bool,
+) {
+    if !have_image && key_not_proven {
+        record_fresh_reject(dir, tag, now);
+    }
+}
+
+pub(super) fn clear_fresh_cooldown(dir: &Path) {
+    if let Err(e) = std::fs::remove_file(dir.join(FRESH_COOLDOWN_FILE)) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            warn!(error = %e, "Diiisco: could not clear the fresh-start cooldown");
+        }
+    }
 }
 
 /// Put the backoff back as it was before an attempt that turned out to be a
@@ -488,6 +577,12 @@ pub(super) trait NodeOps: Send + Sync {
     fn up_no_build(&self, tag: Option<&str>) -> Result<()>;
     /// The AM3 auth probe, with bounded retries while the node boots.
     async fn probe(&self) -> bool;
+    /// Did the last candidate get as far as the key probe? A rejection after
+    /// the probe is a verdict on the device key; one before it is Docker
+    /// trouble. Default `false`: no cooldown is armed on a guess.
+    fn probe_ran(&self) -> bool {
+        false
+    }
     fn tag_latest(&self, tag: &str) -> Result<()>;
     /// Point `diiisco-node:latest` back at image `id` (undoing `tag_latest`).
     /// Default: nothing; Docker-backed impls override.
@@ -521,6 +616,31 @@ pub(super) trait NodeOps: Send + Sync {
     /// The tag recorded in the current image stamp, if any.
     fn stamp_tag(&self) -> Option<String> {
         None
+    }
+    /// m4 put the `diiisco-node:<tag>` alias back under an unreadable stamp:
+    /// remember that (see `ALIAS_MARKER_FILE`). Default: nothing.
+    /// Returns false when it could not be recorded. Default: recorded.
+    fn note_alias_restored(&self, _tag: &str) -> bool {
+        true
+    }
+    /// Take that record back (the alias was not restored after all).
+    fn forget_alias_restored(&self) {}
+    /// G6: the short pause between two image lookups of `capture_latest_id`
+    /// after an Error (a transient docker error needs a moment to clear).
+    /// At most 2 x 250 ms; test doubles override it.
+    fn retry_pause(&self) {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    /// G1: may `run_node_sequence` try `reuse_verified_latest` before an
+    /// unstamped image is rebuilt? Default `false` (fakes with pinned call
+    /// sequences); the real Docker node turns it on.
+    fn reuse_unstamped_image(&self) -> bool {
+        false
+    }
+    /// The stamp file exists but cannot be read, so `stamp_tag` says nothing
+    /// about which tag `latest` carries. Default: no.
+    fn stamp_unreadable(&self) -> bool {
+        false
     }
     /// Re-point `diiisco-node:<tag>` at image `id`. Default: nothing.
     fn retag_alias(&self, _tag: &str, _id: &str) -> Result<()> {
@@ -580,6 +700,8 @@ pub(super) fn after_fresh_build<O: NodeOps + ?Sized>(
         },
     )?;
     clear_backoff(dir);
+    clear_fresh_cooldown(dir);
+    clear_alias_marker(dir);
     Ok(())
 }
 
@@ -779,6 +901,47 @@ pub(super) fn rmi_log_text(what: &str, removed: bool) -> String {
     }
 }
 
+/// What one `docker rmi <id>` came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RmiOutcome {
+    Removed,
+    /// Docker says the image does not exist: the goal state already holds.
+    AlreadyGone,
+    Failed,
+}
+
+/// PURE: read one `docker rmi` result. Only Docker's own "No such image" on a
+/// failed call counts as already gone; every other failure stays a failure
+/// (the ledger entry is kept for those).
+pub(super) fn rmi_outcome(success: bool, stderr: &str) -> RmiOutcome {
+    if success {
+        RmiOutcome::Removed
+    } else if stderr.contains("No such image") {
+        RmiOutcome::AlreadyGone
+    } else {
+        RmiOutcome::Failed
+    }
+}
+
+/// The id `latest` points at before an upgrade, for the rollback. A lookup
+/// ERROR is not "no image": it is retried (up to 3 lookups) so a transient
+/// docker error cannot leave the rollback with nothing to roll back to. A
+/// lookup that keeps failing still yields `None` (fail closed: keep everything).
+pub(super) fn capture_latest_id<O: NodeOps + ?Sized>(ops: &O) -> Option<String> {
+    for attempt in 0..3 {
+        match ops.image_lookup(LATEST_REF) {
+            ImageLookup::Present(id) => return Some(id),
+            ImageLookup::Absent => return None,
+            ImageLookup::Error => {
+                if attempt < 2 {
+                    ops.retry_pause();
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Undo `tag_latest` after a promotion failed later (the stamp could not be
 /// written): `latest` goes back to the previous image so the node that is
 /// restored is the old, proven one. No previous image = nothing to restore.
@@ -809,6 +972,17 @@ pub(super) fn candidate_to_remove(
     Some(cand.to_string())
 }
 
+/// Why a failed candidate image was kept (L7): when it IS the current image
+/// the log says so, instead of calling the node's own image a failed candidate
+/// kept for a vague reason.
+pub(super) fn kept_reason(cand: Option<&str>, latest: Option<&str>) -> &'static str {
+    if cand.is_some() && cand == latest {
+        "it is the current image"
+    } else {
+        "in use, or containers unknown"
+    }
+}
+
 /// Remove the failed candidate `diiisco-node:<tag>` BY ID, never by tag pattern
 /// and never `latest`. Call it only after the candidate's container was stopped
 /// or replaced.
@@ -833,16 +1007,31 @@ pub(super) fn discard_candidate_by_id<O: NodeOps + ?Sized>(ops: &O, tag: &str) {
             // A rebuild of the stamped tag re-points `diiisco-node:<tag>` at
             // the candidate; removing the candidate by id takes that alias
             // with it, so give `latest` its alias back.
-            if ops.stamp_tag().as_deref() == Some(tag) {
+            // An unreadable stamp (m4) says nothing about the tag, so it is
+            // treated as a match. Such an alias may point a NEW tag at an
+            // old-pin `latest`, so it is marked: A6 never reuses an image on
+            // the strength of a marked alias.
+            let stamped = ops.stamp_tag().as_deref() == Some(tag);
+            if stamped || ops.stamp_unreadable() {
                 if let Some(latest) = latest.as_deref() {
-                    if let Err(e) = ops.retag_alias(tag, latest) {
+                    // Marker first, so a crash between the two steps cannot
+                    // leave an unmarked alias; no marker, no alias.
+                    if !stamped && !ops.note_alias_restored(tag) {
+                        warn!("Diiisco: image alias not restored (marker not written)");
+                    } else if let Err(e) = ops.retag_alias(tag, latest) {
                         warn!(error = %e, "Diiisco: could not restore the image alias");
+                        if !stamped {
+                            ops.forget_alias_restored();
+                        }
                     }
                 }
             }
         }
         None if cand.is_some() => {
-            warn!("Diiisco: failed candidate image kept (in use, current, or containers unknown)");
+            warn!(
+                "Diiisco: failed candidate image kept ({})",
+                kept_reason(cand.as_deref(), latest.as_deref())
+            );
         }
         None => {}
     }
@@ -941,6 +1130,54 @@ pub(super) fn reject_candidate<O: NodeOps + ?Sized>(ops: &O, tag: &str, have_ima
         }
     }
     ops.discard_candidate(tag);
+}
+
+/// What `reuse_verified_latest` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Reuse {
+    /// Not applicable, or the proof did not pass: build as before.
+    Build,
+    /// The existing `latest` proved the key and was stamped: nothing to build.
+    Reused,
+    /// `stop()` ran meanwhile: nothing was promoted.
+    Stopped,
+}
+
+/// A6: install() would rebuild only because no usable stamp exists, although
+/// `diiisco-node:latest` is present and `diiisco-node:<tag>` already points at
+/// that very image (so it was built for this key + pin and promoted). Instead
+/// of a build, bring that image up and run the same F2 probe candidates get.
+/// Only a pass stamps it (the same writer as a fresh build); a rejected or
+/// unknown proof changes nothing and the caller builds as before. The caller
+/// holds the rebuild lock.
+pub(super) async fn reuse_verified_latest<O: NodeOps + ?Sized>(
+    ops: &O,
+    dir: &Path,
+    tag: &str,
+    key_fp: &str,
+    pin_sha: &str,
+) -> Reuse {
+    if read_stamp(dir).is_some() || alias_restored_for(dir, tag) {
+        return Reuse::Build;
+    }
+    let Some(latest) = capture_latest_id(ops) else {
+        return Reuse::Build;
+    };
+    match ops.image_lookup(&format!("diiisco-node:{tag}")) {
+        ImageLookup::Present(id) if id == latest => {}
+        _ => return Reuse::Build,
+    }
+    match gate_candidate(ops, tag, true).await {
+        Gate::Pass => match after_fresh_build(ops, dir, tag, key_fp, pin_sha) {
+            Ok(()) => Reuse::Reused,
+            Err(e) => {
+                warn!(error = %e, "Diiisco: could not stamp the proven image — building instead");
+                Reuse::Build
+            }
+        },
+        Gate::Rejected => Reuse::Build,
+        Gate::Stopped => Reuse::Stopped,
+    }
 }
 
 /// After a promotion: remove the PREVIOUS `latest` image by id, unless it is
@@ -1043,6 +1280,16 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
     }
     let plan = gated;
     let tag = image_tag(key_fp, pin_sha);
+    // A6 on the start path: the image is present but unstamped (BuildNew), so
+    // prove and stamp the existing `latest` instead of rebuilding it. Only a
+    // probe pass stamps; anything else falls through to the build below.
+    if have_image && matches!(plan, Plan::BuildNew { .. }) && ops.reuse_unstamped_image() {
+        match reuse_verified_latest(ops, dir, &tag, key_fp, pin_sha).await {
+            Reuse::Reused => return Ok(Outcome::Ran),
+            Reuse::Stopped => return Ok(Outcome::Stopped),
+            Reuse::Build => {}
+        }
+    }
     // With no image there is nothing to protect, so a backoff never blocks it.
     let must_build = !have_image || matches!(plan, Plan::BuildNew { .. });
     let upgrade = have_image && must_build;
@@ -1057,6 +1304,14 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
     }
 
     if !upgrade {
+        // A3: a rejected fresh node is not rebuilt by every cycle. Read only
+        // here: the upgrade path has its own backoff and a node to protect.
+        if fresh_reject_defers(dir, &tag, now) {
+            return Err(anyhow::Error::new(super::NodeRejected(
+                "Diiisco node image build is backing off after a rejected fresh start; will retry later"
+                    .to_string(),
+            )));
+        }
         info!("Diiisco: no node image — building before start");
         ops.refresh_dockerfile()?;
         if let Err(e) = ops.build(&tag) {
@@ -1083,9 +1338,13 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
                 if let Err(e) = record_attempt(dir, &tag, now) {
                     warn!(error = %e, "Diiisco: cannot record rebuild attempt after a rejected fresh node");
                 }
-                anyhow::bail!(
+                if ops.probe_ran() {
+                    record_fresh_reject(dir, &tag, now);
+                }
+                return Err(anyhow::Error::new(super::NodeRejected(
                     "the new Diiisco node did not prove the device key on start; nothing was promoted"
-                );
+                        .to_string(),
+                )));
             }
             Gate::Stopped => return Ok(Outcome::Stopped),
         }
@@ -1099,7 +1358,7 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
     }
 
     // Upgrade: the old container keeps running while the new image builds.
-    let prev_id = ops.image_lookup(LATEST_REF).into_id();
+    let prev_id = capture_latest_id(ops);
     // The attempt is recorded once the build has finished (like install()):
     // a build interrupted by a stop leaves no backoff, a failed one does.
     let prior_backoff = read_backoff(dir);
@@ -1168,6 +1427,8 @@ pub(super) async fn run_node_sequence<O: NodeOps + ?Sized, C: Fn() -> u64>(
         return unless_stopped(fallback_old(ops, cand));
     }
     clear_backoff(dir);
+    clear_fresh_cooldown(dir);
+    clear_alias_marker(dir);
     if let Some(prev) = prev_id.filter(|p| previous_to_remove(ops, p, &tag)) {
         ops.rmi_labeled(&prev, "previous node image");
     }

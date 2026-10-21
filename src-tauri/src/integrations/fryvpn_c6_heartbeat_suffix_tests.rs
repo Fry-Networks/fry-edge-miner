@@ -12,8 +12,8 @@ fn the_lab_example_reads_exactly_as_ruled() {
         suffix.as_deref(),
         Some(
             format!(
-                "This node's wallet also cannot pay the 0.001 ALGO fee of its next heartbeat \
-                 — send 0.000001 ALGO to {ADDR}."
+                "This device's own Fry dVPN node wallet also cannot pay the 0.001 ALGO fee of its \
+                 next heartbeat. To keep Fry dVPN running — send 0.000001 ALGO to {ADDR}. Optional: not Fry's wallet, and not a payment to anyone. To skip, switch Fry dVPN off. Olostep alone earns the full base reward; running both adds 15%."
             )
             .as_str()
         )
@@ -23,8 +23,8 @@ fn the_lab_example_reads_exactly_as_ruled() {
         line,
         format!(
             "Awaiting administrator action — Click Retry on the Security hardening banner to \
-             allow fryDVPN through Windows Firewall. · This node's wallet also cannot pay the \
-             0.001 ALGO fee of its next heartbeat — send 0.000001 ALGO to {ADDR}."
+             allow fryDVPN through Windows Firewall. · This device's own Fry dVPN node wallet \
+             also cannot pay the 0.001 ALGO fee of its next heartbeat. To keep Fry dVPN running — send 0.000001 ALGO to {ADDR}. Optional: not Fry's wallet, and not a payment to anyone. To skip, switch Fry dVPN off. Olostep alone earns the full base reward; running both adds 15%."
         )
     );
     assert_eq!(line.chars().filter(|&c| c == '\u{2014}').count(), 2);

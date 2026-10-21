@@ -12,7 +12,7 @@ import { awaitsUserSetup, unhealthyReason } from './types'
 
 describe('awaitsUserSetup recognises the fryDVPN funding-needed reason (B7 D4)', () => {
   const FUNDING =
-    'Awaiting fryDVPN funding — fryDVPN needs about 0.312 ALGO in this device\'s wallet to register on-chain, and it currently has 0.100 ALGO — about 0.212 ALGO short. Send ALGO to ADDR and fryDVPN will register automatically on the next check.'
+    "Awaiting fryDVPN funding — send 0.212 ALGO to ADDR, this device's own Fry dVPN node wallet (holds 0.100 ALGO). It needs 0.312 ALGO total for registration fees and minimum balance. Optional: not Fry's wallet or your reward wallet, and not a payment to anyone. To skip, switch Fry dVPN off. Olostep alone earns the full base reward; both add 15%."
 
   it('is true for the funding-needed reason', () => {
     expect(awaitsUserSetup({ Unhealthy: FUNDING })).toBe(true)

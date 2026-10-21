@@ -651,13 +651,24 @@ pub(crate) async fn prepare_for_update_install(
     // hardening for the version we're ABOUT to install, before Defender can
     // scan the freshly-downloaded binary. Best-effort — a decline/failure
     // here must never block the update itself.
-    let recorded = config.get().hardening_applied_version;
-    if security_setup::should_run_hardening(recorded.as_deref(), to_version) {
-        if let Some(install_dir) = exe_path.parent() {
-            let exe_names = ["fry-edge-miner.exe", "frynode.exe"];
-            let frynode = frynode_path
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| install_dir.join("resources").join("frynode.exe"));
+    let recorded_cfg = config.get();
+    if let Some(install_dir) = exe_path.parent() {
+        let exe_names = ["fry-edge-miner.exe", "frynode.exe"];
+        let frynode = frynode_path
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| install_dir.join("resources").join("frynode.exe"));
+        // A2: the running binary can only vouch for its own recipe. With the
+        // same recipe and intact rules there is nothing to approve here; the
+        // new binary's boot pass decides for itself.
+        let (decision, recipe) = tokio::task::block_in_place(|| {
+            security_setup::check_hardening(
+                &frynode,
+                recorded_cfg.hardening_applied_version.as_deref(),
+                recorded_cfg.hardening_recipe_sha.as_deref(),
+                to_version,
+            )
+        });
+        if decision == security_setup::HardeningDecision::Run {
             // B3: an update is not a user action either. `to_version` is the
             // attempt key, so the new version is a new request and still gets
             // its one attempt once the user asks for it.
@@ -673,6 +684,7 @@ pub(crate) async fn prepare_for_update_install(
                 Ok(()) => {
                     if let Err(e) = config.update(|c| {
                         c.hardening_applied_version = Some(to_version.to_string());
+                        c.hardening_recipe_sha = Some(recipe.clone());
                     }) {
                         warn!(error = %e, "Could not persist hardening_applied_version before update");
                     }

@@ -15,8 +15,7 @@ use crate::integrations::fryvpn::{set_funding_notice_for_test, with_heartbeat_sh
 
 const SCENARIO_VAR: &str = "FEM_C5_CARD_SCENARIO";
 const DONE: &str = "FEM-C5-CARD-SCENARIO-DONE";
-const NOTICE: &str = "fryDVPN is running, but this node's wallet cannot pay the 0.001 ALGO fee of \
-                      its next heartbeat — send 0.000986 ALGO to ADDR.";
+const NOTICE: &str = "Fry dVPN is running, but this device's own Fry dVPN node wallet cannot pay the 0.001 ALGO fee of its next heartbeat. To keep it running, send 0.000986 ALGO to ADDR. Optional: not Fry's wallet, and not a payment to anyone. To skip, switch Fry dVPN off. Olostep alone earns the full base reward; running both adds 15%.";
 
 /// Run `scenario` in a child re-execution of this test binary.
 fn run_scenario(scenario: &str) {

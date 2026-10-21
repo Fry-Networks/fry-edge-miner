@@ -118,3 +118,19 @@ mod rc38_tests;
 #[cfg(test)]
 #[path = "diiisco_sweep_tests.rs"]
 mod sweep_tests;
+
+#[cfg(test)]
+#[path = "diiisco_fresh_backoff_tests.rs"]
+mod fresh_backoff_tests;
+
+#[cfg(test)]
+#[path = "diiisco_a4_tests.rs"]
+mod a4_tests;
+
+#[cfg(test)]
+#[path = "diiisco_g1_start_reuse_tests.rs"]
+mod g1_start_reuse_tests;
+
+#[cfg(test)]
+#[path = "diiisco_g6_retry_pause_tests.rs"]
+mod g6_retry_pause_tests;

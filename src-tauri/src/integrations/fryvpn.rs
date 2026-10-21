@@ -434,6 +434,15 @@ const _: () = assert!(
     "nothing would be left to deregister with — measured on LocalNet, this strands the node"
 );
 
+/// "15%": the boost for running both required integrations, from the reward
+/// model's own constant so the card copy cannot drift from it.
+fn second_required_boost_text() -> String {
+    format!(
+        "{}%",
+        (crate::integrations::reward_model::SECOND_REQUIRED_BOOST * 100.0).round() as u32
+    )
+}
+
 /// PURE: what an account can actually spend — algod reports the TOTAL `amount`
 /// and separately the locked `min-balance`. Saturating, so an account below its
 /// own minimum reports 0 rather than underflowing.
@@ -455,12 +464,19 @@ pub(crate) fn registration_affordability(
     }
     let short = (required - spendable) as f64 / 1_000_000.0;
     let have = spendable as f64 / 1_000_000.0;
+    // Whole 0.001 ALGO, rounded UP so that sending the figure shown is enough.
+    let send = (required - spendable).div_ceil(1_000) as f64 / 1_000.0;
     Err(format!(
-        "fryDVPN needs about {:.3} ALGO in this device's wallet to register on-chain, and it          currently has {:.3} ALGO — about {:.3} ALGO short. Send ALGO to {} and fryDVPN will          register automatically on the next check.",
+        "Fry dVPN needs {:.3} ALGO spendable in this device's own Fry dVPN node wallet for \
+         registration fees and the minimum balance. It has {:.3} ALGO, {:.3} ALGO short. Send {:.3} ALGO \
+         to {}. Optional: not Fry's wallet, and not a payment to anyone. To skip, switch Fry dVPN \
+         off. Olostep alone earns the full base reward; running both adds {}.",
         required as f64 / 1_000_000.0,
         have,
         short,
-        address
+        send,
+        address,
+        second_required_boost_text()
     ))
 }
 
@@ -697,11 +713,16 @@ pub(crate) fn registration_funding_message(
     // Whole 0.001 ALGO, rounded so that sending the figure shown is always
     // enough: the shortfall and the total UP, the holdings DOWN.
     Err(format!(
-        "{FUNDING_MARKER} — send {:.3} ALGO to {} (this is this device's own fryDVPN node wallet, created and kept on this device — not your reward wallet; it needs {:.3} ALGO total to register on-chain and holds {:.3} ALGO). fryDVPN registers automatically on the next check.",
+        "{FUNDING_MARKER} — send {:.3} ALGO to {}, this device's own Fry dVPN node wallet \
+         (holds {:.3} ALGO). It needs {:.3} ALGO total for registration fees and minimum \
+         balance. Optional: not Fry's wallet or your reward wallet, and not a payment to \
+         anyone. To skip, switch Fry dVPN off. Olostep alone earns the full base reward; \
+         both add {}.",
         short.div_ceil(1_000) as f64 / 1_000.0,
         address,
+        (amount / 1_000) as f64 / 1_000.0,
         total_needed.div_ceil(1_000) as f64 / 1_000.0,
-        (amount / 1_000) as f64 / 1_000.0
+        second_required_boost_text()
     ))
 }
 
@@ -717,8 +738,8 @@ mod dashbugs_b1_node_wallet_copy {
     #[test]
     fn says_it_is_the_devices_own_node_wallet_not_the_reward_wallet() {
         let m = msg();
-        assert!(m.contains("own fryDVPN node wallet"), "{m}");
-        assert!(m.contains("not your reward wallet"), "{m}");
+        assert!(m.contains("own Fry dVPN node wallet"), "{m}");
+        assert!(m.contains("not Fry's wallet or your reward wallet"), "{m}");
     }
 
     #[test]
@@ -773,9 +794,13 @@ pub(crate) fn heartbeat_shortfall_message(
 ) -> Option<String> {
     let short = heartbeat_shortfall_microalgos(amount, min_balance)?;
     Some(format!(
-        "fryDVPN is running, but this node's wallet cannot pay the {1:.3} ALGO fee of its next heartbeat — send {0:.6} ALGO to {address}. The chain rejects each unpaid heartbeat and nothing is spent; heartbeats resume automatically once the wallet is funded.",
+        "Fry dVPN is running, but this device's own Fry dVPN node wallet cannot pay the {1:.3} ALGO \
+         fee of its next heartbeat. To keep it running, send {0:.6} ALGO to {address}. Optional: \
+         not Fry's wallet, and not a payment to anyone. To skip, switch Fry dVPN off. Olostep \
+         alone earns the full base reward; running both adds {2}.",
         short as f64 / 1_000_000.0,
-        HEARTBEAT_FEE_MICROALGOS as f64 / 1_000_000.0
+        HEARTBEAT_FEE_MICROALGOS as f64 / 1_000_000.0,
+        second_required_boost_text()
     ))
 }
 
@@ -789,9 +814,13 @@ pub(crate) fn rule_park_heartbeat_suffix(
 ) -> Option<String> {
     let short = heartbeat_shortfall_microalgos(amount, min_balance)?;
     Some(format!(
-        "This node's wallet also cannot pay the {1:.3} ALGO fee of its next heartbeat — send {0:.6} ALGO to {address}.",
+        "This device's own Fry dVPN node wallet also cannot pay the {1:.3} ALGO fee of its next \
+         heartbeat. To keep Fry dVPN running — send {0:.6} ALGO to {address}. Optional: not \
+         Fry's wallet, and not a payment to anyone. To skip, switch Fry dVPN off. Olostep alone \
+         earns the full base reward; running both adds {2}.",
         short as f64 / 1_000_000.0,
-        HEARTBEAT_FEE_MICROALGOS as f64 / 1_000_000.0
+        HEARTBEAT_FEE_MICROALGOS as f64 / 1_000_000.0,
+        second_required_boost_text()
     ))
 }
 
@@ -2391,3 +2420,8 @@ mod fryvpn_c6_rule_park_heartbeat_tests;
 #[cfg(test)]
 #[path = "fryvpn_c6_heartbeat_suffix_tests.rs"]
 mod fryvpn_c6_heartbeat_suffix_tests;
+
+/// P0 (rc39): plain-language, optional funding copy.
+#[cfg(test)]
+#[path = "p0_funding_copy_tests.rs"]
+mod p0_funding_copy_tests;

@@ -8,7 +8,7 @@ import { integrationBadge } from '../lib/integrationBadge'
 import { isRequiredIntegration, SETUP_GUIDANCE } from '../lib/integrationMeta'
 import { OFFICIAL_DISABLED_WARNING, REQUIRED_DISABLED_WARNING, SDK_REPORT_LINE } from '../lib/support'
 import { safeInvoke } from '../lib/tauri'
-import { awaitsUserSetup, unhealthyReason, sentinelFundingAddress } from '../lib/types'
+import { awaitsUserSetup, unhealthyReason, sentinelFundingAddress, sentinelFundingMinDvpn } from '../lib/types'
 import CopyField from './primitives/CopyField'
 import Tag from './primitives/Tag'
 import TierBadge from './primitives/TierBadge'
@@ -50,6 +50,7 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
   // account isn't funded, surface its own sent1 address prominently + copyable
   // instead of burying it in a truncated one-liner.
   const fundingAddr = id === 'sentinel' ? sentinelFundingAddress(health) : null
+  const minDvpn = id === 'sentinel' ? sentinelFundingMinDvpn(health) : null
   const isSdk = tier === 'sdk'
   // F17: reward role (required vs boost) is independent of partner provenance.
   const isRequired = isRequiredIntegration(id)
@@ -295,11 +296,12 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                   }}
                 >
                   <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                    <AlertTriangle size={11} style={{ flexShrink: 0 }} /> Send 10 DVPN to this node address to activate it
+                    <AlertTriangle size={11} style={{ flexShrink: 0 }} />
+                    {`Optional: Sentinel dVPN's own node account on this device needs ${minDvpn ? `at least ${minDvpn} DVPN` : 'DVPN'} to register and pay Sentinel network fees. DVPN is the Sentinel network's token, not a Fry token. It is not a payment to Fry. Send it to this node address:`}
                   </span>
                   <CopyField val={fundingAddr} />
                   <span style={{ color: 'var(--t2)' }}>
-                    Fund manually — acquire DVPN on an exchange (e.g. Osmosis, KuCoin). No faucet exists.
+                    {`Buy DVPN on an exchange. To skip it, turn Sentinel dVPN off with its switch.`}
                   </span>
                 </div>
               ) : (
@@ -343,7 +345,12 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                 }}
               >
                 {SETUP_GUIDANCE[id].what}{' '}
-                <a href={SETUP_GUIDANCE[id].url} target="_blank" rel="noreferrer">
+                <a
+                  href={SETUP_GUIDANCE[id].url}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={id === 'sentinel' ? { overflowWrap: 'normal', wordBreak: 'normal' } : undefined}
+                >
                   {SETUP_GUIDANCE[id].urlLabel}
                 </a>
               </span>

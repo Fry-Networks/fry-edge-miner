@@ -6,7 +6,7 @@ describe('sentinelFundingAddress', () => {
   it('extracts the sent1 address from the unfunded health message', () => {
     const health: HealthStatus = {
       Unhealthy:
-        'Sentinel node account not funded — send DVPN to sent1m2cckurf9gkk74fgm2nd3har3ghxxz609prlpm to activate this node'
+        "Sentinel node account not funded — Optional: this device's own Sentinel node account needs at least 10 DVPN to register and pay Sentinel network fees. DVPN is the Sentinel network's token, not a Fry token. Send it to sent1m2cckurf9gkk74fgm2nd3har3ghxxz609prlpm. Not a payment to Fry or anyone. To skip it, turn Sentinel dVPN off with its switch."
     }
     expect(sentinelFundingAddress(health)).toBe('sent1m2cckurf9gkk74fgm2nd3har3ghxxz609prlpm')
   })

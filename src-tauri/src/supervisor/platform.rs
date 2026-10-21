@@ -7,6 +7,7 @@ use std::process::Child;
 
 /// Create a Command with CREATE_NO_WINDOW on Windows to suppress console popups.
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
     let mut cmd = std::process::Command::new(program);
     #[cfg(target_os = "windows")]
     {
@@ -189,6 +190,7 @@ pub fn adopt_into_partner_job(child: &std::process::Child) {
 /// where the CPU actually goes. Lowering priority on same-user processes needs
 /// no elevation, which B20's Done-when ("no popups, no elevation") requires.
 /// Pure so the script is testable with no disk and no Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn below_normal_script(image: &str) -> String {
     format!(
         "Get-Process {image} -ErrorAction SilentlyContinue | \

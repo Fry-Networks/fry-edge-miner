@@ -225,13 +225,27 @@ mod validation_tests {
 
     #[test]
     fn a_configured_root_always_ends_in_the_fem_leaf() {
+        #[cfg(windows)]
         assert_eq!(
             storage_root_for(r"D:\"),
             PathBuf::from(r"D:\FryEdgeMiner\partners")
         );
+        #[cfg(windows)]
         assert_eq!(
             storage_root_for(r"D:\Stuff"),
             PathBuf::from(r"D:\Stuff\FryEdgeMiner\partners")
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            storage_root_for(r"D:\"),
+            PathBuf::from(r"D:\").join("FryEdgeMiner").join("partners")
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            storage_root_for(r"D:\Stuff"),
+            PathBuf::from(r"D:\Stuff")
+                .join("FryEdgeMiner")
+                .join("partners")
         );
     }
 
