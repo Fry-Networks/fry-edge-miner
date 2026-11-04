@@ -18,3 +18,6 @@ mod integration_update_lock_tests;
 
 #[cfg(test)]
 mod docker_desktop_rearm_tests;
+
+#[cfg(test)]
+mod device_token_split_tests;

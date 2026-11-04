@@ -1010,7 +1010,7 @@ fn main() {
                         } else {
                             consecutive_401s = 0;
                         }
-                        if commands::device::should_attempt_recovery(
+                        if commands::device::should_attempt_rejection_recovery(
                             poc_err_status,
                             cfg.device_token.is_some(),
                             *poc_recovery_at.read().unwrap(),
@@ -1029,8 +1029,12 @@ fn main() {
                             // stranded path must re-earn 3 consecutive 401s
                             // before the next attempt (cooldown also applies).
                             consecutive_401s = 0;
-                            if commands::device::attempt_token_recovery(&poc_config, &poc_client)
-                                .await
+                            if commands::device::attempt_token_recovery(
+                                &poc_config,
+                                &poc_client,
+                                cfg.device_token.as_deref(),
+                            )
+                            .await
                             {
                                 poc_result = poc_client
                                     .put_json(&format!("/PoC/{}/hardware", key), &wrapped)

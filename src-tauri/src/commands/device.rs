@@ -81,12 +81,30 @@ pub async fn attempt_registration_completion(
     config: &std::sync::Arc<crate::config::store::ConfigStore>,
     api_client: &std::sync::Arc<crate::api::client::ApiClient>,
 ) -> bool {
+    // Serialized with every other registration path: a concurrent caller finds
+    // the state this one stored and returns instead of minting (and
+    // invalidating) a second token.
+    let _in_flight = REGISTRATION_IN_FLIGHT.lock().await;
     let cfg = config.get();
     let Some(miner_key) = cfg.miner_key.clone() else {
         return false;
     };
     if cfg.install_id.is_some() {
         return false;
+    }
+    if holds_device_token(cfg.device_token.as_deref()) {
+        // A token is already held, so registering would only rotate it. Keep
+        // it and adopt the install id it was minted under, if we know it.
+        let pending = cfg.pending_install_id.clone();
+        return match pending {
+            Some(id) => config
+                .update(|c| {
+                    c.install_id = Some(id.clone());
+                    c.pending_install_id = None;
+                })
+                .is_ok(),
+            None => false,
+        };
     }
 
     // Reuse the pending id if one is already in flight, so a retry re-upserts
@@ -582,8 +600,45 @@ pub async fn set_device_name(
     Ok(())
 }
 
+/// A stored device token counts only when it is non-blank.
+fn holds_device_token(token: Option<&str>) -> bool {
+    token.map(str::trim).is_some_and(|t| !t.is_empty())
+}
+
+/// Base unit for the registration backoff: attempts wait 2x, 4x, 8x this.
+pub const REGISTER_BACKOFF_BASE: Duration = Duration::from_secs(1);
+
+/// Register with bounded retries: one attempt plus up to three retries, only on
+/// connection-level errors and 5xx. Any other outcome returns immediately. No
+/// fallback credential is ever tried.
+pub async fn register_with_backoff(
+    api_client: &crate::api::client::ApiClient,
+    heartbeat: &InstallationHeartbeat,
+    base: Duration,
+) -> Result<crate::api::types::RegistrationResponse, crate::api::client::ApiError> {
+    let mut result = crate::api::installations::register(api_client, heartbeat).await;
+    for attempt in 1..=3u32 {
+        let retryable = matches!(
+            &result,
+            Err(crate::api::client::ApiError::Request(_))
+                | Err(crate::api::client::ApiError::HttpStatus(500..=599, _))
+        );
+        if !retryable {
+            break;
+        }
+        tracing::warn!(
+            attempt,
+            max_retries = 3,
+            "Registration request failed - retrying"
+        );
+        tokio::time::sleep(base * 2u32.pow(attempt)).await;
+        result = crate::api::installations::register(api_client, heartbeat).await;
+    }
+    result
+}
+
 /// Attempt to obtain per-device token at startup if missing.
-/// Fail-safe: any error logs and leaves device on shared token.
+/// Fail-safe: any error logs and leaves the device without a token; it retries on a later launch.
 pub async fn attempt_device_token_migration(
     config: &std::sync::Arc<crate::config::store::ConfigStore>,
     api_client: &std::sync::Arc<crate::api::client::ApiClient>,
@@ -607,6 +662,13 @@ pub async fn attempt_device_token_migration(
         _ => return, // nothing to do
     };
 
+    // Serialized with the version-change hook; whichever runs second finds the
+    // token the first one stored and does nothing.
+    let _in_flight = REGISTRATION_IN_FLIGHT.lock().await;
+    if holds_device_token(config.get().device_token.as_deref()) {
+        return;
+    }
+
     tracing::info!(miner_key = %miner_key, "Attempting device token migration");
 
     // Field sourcing: identical to register_device (device.rs:78-89)
@@ -624,7 +686,7 @@ pub async fn attempt_device_token_migration(
         device_name: cfg.device_name.clone(),
     };
 
-    match crate::api::installations::register(api_client, &heartbeat).await {
+    match register_with_backoff(api_client, &heartbeat, REGISTER_BACKOFF_BASE).await {
         Ok(resp) => {
             if let Some(token) = resp.device_token {
                 match config.update(|c| {
@@ -636,7 +698,7 @@ pub async fn attempt_device_token_migration(
                     }
                     Err(e) => {
                         tracing::warn!(
-                            "Failed to persist device_token: {} — continuing on shared token",
+                            "Failed to persist device_token: {} — continuing without a device token",
                             e
                         );
                     }
@@ -649,7 +711,7 @@ pub async fn attempt_device_token_migration(
             tracing::warn!(
                 miner_key = %miner_key,
                 error = %e,
-                "Device token migration failed — continuing on shared token"
+                "Device token migration failed — continuing without a device token"
             );
         }
     }
@@ -686,6 +748,23 @@ pub fn should_attempt_recovery(
         Some(prev) => now.saturating_duration_since(prev) >= cooldown,
         None => true,
     }
+}
+
+/// Like `should_attempt_recovery`, but a 403 also marks the stored token as
+/// rejected. Same cooldown, so one rejection episode causes one re-registration.
+pub fn should_attempt_rejection_recovery(
+    status: Option<u16>,
+    has_device_token: bool,
+    last_attempt: Option<std::time::Instant>,
+    now: std::time::Instant,
+    cooldown: std::time::Duration,
+) -> bool {
+    let status = if status == Some(403) {
+        Some(401)
+    } else {
+        status
+    };
+    should_attempt_recovery(status, has_device_token, last_attempt, now, cooldown)
 }
 
 /// Consecutive PoC hardware-PUT 401s required before a shared-token device is
@@ -735,13 +814,22 @@ pub fn clear_device_token_in(cfg: &mut crate::config::FemConfig) -> bool {
 /// Recover from a rejected device token: clear it, re-register on the shared
 /// token, and store the freshly issued device token. Returns true on success.
 ///
-/// Fail-safe: any failure leaves the device on the shared token and logs; the
+/// Fail-safe: any failure leaves the device without a token and logs; the
 /// caller retries on a later tick once the cooldown has elapsed.
 pub async fn attempt_token_recovery(
     config: &std::sync::Arc<crate::config::store::ConfigStore>,
     api_client: &std::sync::Arc<crate::api::client::ApiClient>,
+    observed_token: Option<&str>,
 ) -> bool {
+    // Serialized with every other registration path. A 401 observed against
+    // `observed_token` says nothing about a token stored since: skip then, so a
+    // stale rejection never rotates a fresh token.
+    let _in_flight = REGISTRATION_IN_FLIGHT.lock().await;
     let cfg = config.get();
+    if cfg.device_token.as_deref() != observed_token {
+        tracing::info!("Token recovery skipped: the stored token changed since the rejection");
+        return false;
+    }
 
     let (miner_key, install_id) = match (&cfg.miner_key, &cfg.install_id) {
         (Some(k), Some(id)) => {
@@ -762,7 +850,7 @@ pub async fn attempt_token_recovery(
         "Server rejected the device token (HTTP 401) — clearing it and re-registering"
     );
 
-    // Drop the dead token first so the re-registration goes out on the shared token.
+    // Drop the dead token first so the re-registration goes out with no stale credential.
     if let Err(e) = config.update(|c| {
         clear_device_token_in(c);
     }) {
@@ -1136,6 +1224,7 @@ pub fn should_report_version_change(stored: Option<&str>, current: &str) -> bool
 /// and stop us ever retrying, while the device sits on dead credentials.
 /// Treating it as a failure costs one duplicate POST on the next launch, which
 /// is idempotent.
+#[allow(dead_code)] // kept for its pinned unit tests; the version heartbeat no longer registers
 pub fn version_heartbeat_succeeded(device_token: Option<&str>) -> bool {
     device_token.map(str::trim).is_some_and(|t| !t.is_empty())
 }
@@ -1171,54 +1260,53 @@ pub async fn attempt_version_change_heartbeat(
         "App version changed since last report — sending immediate heartbeat + lease action"
     );
 
-    let heartbeat = crate::api::types::InstallationHeartbeat {
-        miner_key: miner_key.clone(),
-        install_id: install_id.clone(),
-        miner_code: Some("FEM".to_string()),
-        software_version_installed: Some(current_version.to_string()),
-        poc_version_installed: Some("1.0.0".to_string()),
-        hostname: std::env::var("COMPUTERNAME")
-            .ok()
-            .or_else(|| std::env::var("HOSTNAME").ok()),
-        os: Some(std::env::consts::OS.to_string()),
-        is_installed: Some(true),
-        device_name: cfg.device_name.clone(),
-    };
-
-    // The server mints a NEW device token on every installation upsert, so the
-    // response must be adopted — discarding it (as this call site used to)
-    // leaves the process authenticating with a token the server just replaced,
-    // which 401s the very next PoC submission. Mirrors attempt_token_recovery.
-    let heartbeat_ok = match crate::api::installations::register(api_client, &heartbeat).await {
-        Ok(resp) => {
-            if !version_heartbeat_succeeded(resp.device_token.as_deref()) {
-                tracing::warn!(
-                    miner_key = %miner_key,
-                    "Version-change heartbeat returned no device token — not recording it, \
-                     so the next launch retries rather than stranding this device"
-                );
-                false
-            } else {
-                let token = resp.device_token.unwrap_or_default();
-                match config.update(|c| c.device_token = Some(token.clone())) {
-                    Ok(()) => {
-                        // Adopt it in-process too: persisting alone would leave
-                        // THIS run 401ing until the app restarts.
-                        api_client.set_bearer_token(token);
-                        true
+    // Registering mints a NEW device token every time, so a device that already
+    // holds one never registers just to report a version: the PoC document
+    // carries the installed version, and the authenticated lease call below
+    // proves the stored token still works. Only a device holding NO token
+    // registers here, serialized with `attempt_device_token_migration` so the
+    // two startup hooks cannot each mint (and invalidate) the other's token.
+    {
+        let _in_flight = REGISTRATION_IN_FLIGHT.lock().await;
+        let cfg = config.get();
+        if !holds_device_token(cfg.device_token.as_deref()) {
+            let heartbeat = InstallationHeartbeat {
+                miner_key: miner_key.clone(),
+                install_id: install_id.clone(),
+                miner_code: Some("FEM".to_string()),
+                software_version_installed: Some(current_version.to_string()),
+                poc_version_installed: Some("1.0.0".to_string()),
+                hostname: std::env::var("COMPUTERNAME")
+                    .ok()
+                    .or_else(|| std::env::var("HOSTNAME").ok()),
+                os: Some(std::env::consts::OS.to_string()),
+                is_installed: Some(true),
+                device_name: cfg.device_name.clone(),
+            };
+            match register_with_backoff(api_client, &heartbeat, REGISTER_BACKOFF_BASE).await {
+                Ok(resp) => {
+                    if let Some(token) = resp.device_token.filter(|t| !t.trim().is_empty()) {
+                        match config.update(|c| c.device_token = Some(token.clone())) {
+                            Ok(()) => api_client.set_bearer_token(token),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Device token could not be persisted");
+                                return;
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            "Registration returned no device token - will retry on next launch"
+                        );
+                        return;
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Rotated device token could not be persisted");
-                        false
-                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Registration failed - will retry on next launch");
+                    return;
                 }
             }
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "Version-change heartbeat failed — will retry on next launch");
-            false
-        }
-    };
+    }
 
     // Best-effort lease action. A failure here doesn't block persisting the
     // heartbeat success — the regular PoC tick's own lease renewal covers it.
@@ -1238,7 +1326,7 @@ pub async fn attempt_version_change_heartbeat(
         tracing::warn!(miner_key = %miner_key, "Version-change lease action did not grant — the next PoC tick will retry");
     }
 
-    if heartbeat_ok {
+    if lease_ok {
         if let Err(e) =
             config.update(|c| c.last_reported_version = Some(current_version.to_string()))
         {
