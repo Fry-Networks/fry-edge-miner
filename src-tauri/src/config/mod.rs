@@ -154,12 +154,10 @@ where
         .serialize(serializer)
 }
 
+/// No shared token is baked in or read from the environment: the client
+/// authenticates with its own per-device token only.
 fn default_api_token() -> String {
-    // Prefer runtime environment variable so the token is not baked into the binary.
-    std::env::var("FEM_API_TOKEN")
-        .ok()
-        .or_else(|| option_env!("FEM_API_TOKEN").map(|s| s.to_string()))
-        .unwrap_or_default()
+    String::new()
 }
 
 impl Default for FemConfig {
