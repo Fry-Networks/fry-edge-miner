@@ -883,3 +883,15 @@ mod partner_exit_adoption_tests;
 #[cfg(test)]
 #[path = "mod_c6_cs_marker_tests.rs"]
 mod mod_c6_cs_marker_tests;
+
+#[cfg(test)]
+#[path = "hardening_loop_u6_tests.rs"]
+mod hardening_loop_u6_tests;
+
+#[cfg(test)]
+#[path = "download_stall_u6_tests.rs"]
+mod download_stall_u6_tests;
+
+#[cfg(test)]
+#[path = "fryvpn_port_fallback_u6_tests.rs"]
+mod fryvpn_port_fallback_u6_tests;

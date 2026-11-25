@@ -79,6 +79,16 @@ export function useDevice() {
     }
   }, [fetch])
 
+  const switchMinerKeyLocal = useCallback(async () => {
+    try {
+      await invoke('switch_miner_key_local')
+      await fetch()
+    } catch (e) {
+      setError(extractErrorMessage(e))
+      throw e
+    }
+  }, [fetch])
+
   const setDeviceName = useCallback(
     async (name: string) => {
       try {
@@ -92,5 +102,5 @@ export function useDevice() {
     [fetch]
   )
 
-  return { device, loading, error, register, deregister, setDeviceName, refetch: fetch }
+  return { device, loading, error, register, deregister, switchMinerKeyLocal, setDeviceName, refetch: fetch }
 }

@@ -49,6 +49,12 @@ pub async fn retry_hardening(state: tauri::State<'_, crate::AppState>) -> Result
         // `AlreadyAttempted` no-op — exactly the B3 "retry gesture was a
         // guaranteed no-op" shape `clear_blocked` exists to prevent.
         crate::elevation_gate::clear_blocked("hardening");
+        if crate::elevation_gate::is_elevation_in_flight() {
+            return Err(
+                "Another administrator prompt is still open — finish or cancel it first"
+                    .to_string(),
+            );
+        }
 
         let current = env!("CARGO_PKG_VERSION");
         let exe_path = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -66,6 +72,7 @@ pub async fn retry_hardening(state: tauri::State<'_, crate::AppState>) -> Result
             ElevationTrigger::UserClick,
         ) {
             Ok(()) => {
+                crate::integrations::fryvpn::clear_rule_park_if_admitted();
                 let recipe = crate::security_setup::hardening_recipe_sha(&frynode_path);
                 if let Err(e) = config.update(|c| {
                     c.hardening_applied_version = Some(current.to_string());

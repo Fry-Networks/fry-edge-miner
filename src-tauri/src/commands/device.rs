@@ -545,6 +545,26 @@ pub fn should_clear_local(api_ok: bool, force: bool) -> bool {
     api_ok || force
 }
 
+pub(crate) fn clear_local_identity_in(
+    store: &crate::config::store::ConfigStore,
+    api_client: &crate::api::client::ApiClient,
+) -> Result<(), String> {
+    store
+        .update(|cfg| {
+            cfg.miner_key = None;
+            cfg.wallet_address = None;
+            cfg.install_id = None;
+            cfg.pending_install_id = None;
+            cfg.device_token = None;
+            cfg.last_reported_version = None;
+        })
+        .map_err(|e| e.to_string())?;
+
+    let cfg = store.get();
+    api_client.set_bearer_token(cfg.effective_api_token());
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn deregister_device(
     force: Option<bool>,
@@ -567,20 +587,21 @@ pub async fn deregister_device(
         }
     }
 
-    state
-        .config
-        .update(|cfg| {
-            cfg.miner_key = None;
-            cfg.wallet_address = None;
-            cfg.install_id = None;
-            cfg.device_token = None;
-        })
-        .map_err(|e| e.to_string())?;
-
-    let cfg = state.config.get();
-    state.api_client.set_bearer_token(cfg.effective_api_token());
+    clear_local_identity_in(&state.config, &state.api_client)?;
 
     tracing::info!("Device deregistered");
+    Ok(())
+}
+
+/// Clear only this PC's local miner key / identity without calling DELETE on
+/// hardwareapi — safe when the user accidentally reused an active key from
+/// another PC and needs to switch this PC to a different key.
+#[tauri::command]
+pub async fn switch_miner_key_local(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    clear_local_identity_in(&state.config, &state.api_client)?;
+    tracing::info!("Local miner key cleared for key switch on this device");
     Ok(())
 }
 

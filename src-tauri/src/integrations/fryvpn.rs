@@ -3,14 +3,62 @@ use crate::config::store::ConfigStore;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, warn};
 
 const ALGOD_SERVER: &str = "https://mainnet-api.algonode.cloud";
-/// The port frynode is started on (`-api-port`) and the one FEM probes.
+/// The preferred port frynode is started on (`-api-port`) and the one FEM probes.
 const FRYNODE_API_PORT: u16 = 8088;
+const FRYNODE_API_PORT_FALLBACK_MAX: u16 = 8120;
+static ACTIVE_API_PORT: AtomicU16 = AtomicU16::new(FRYNODE_API_PORT);
 const FRYNODE_VERSION: &str = "0.1.0";
+
+pub(crate) fn active_api_port() -> u16 {
+    ACTIVE_API_PORT.load(Ordering::Relaxed)
+}
+
+fn preferred_api_port() -> u16 {
+    std::env::var("FRYNODE_API_PORT")
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .filter(|&p| p > 0)
+        .unwrap_or(FRYNODE_API_PORT)
+}
+
+/// Select the preferred API port if free, otherwise the first free port in `fallback_range`.
+pub(crate) fn select_api_port(
+    preferred: u16,
+    fallback_range: std::ops::RangeInclusive<u16>,
+    mut is_free: impl FnMut(u16) -> bool,
+) -> Option<u16> {
+    if is_free(preferred) {
+        return Some(preferred);
+    }
+    fallback_range
+        .into_iter()
+        .find(|&p| p != preferred && is_free(p))
+}
+
+async fn is_frynode_health_endpoint(port: u16) -> bool {
+    let url = format!("http://127.0.0.1:{port}/health");
+    let Ok(Ok(resp)) = tokio::time::timeout(
+        Duration::from_millis(300),
+        reqwest::Client::new().get(&url).send(),
+    )
+    .await
+    else {
+        return false;
+    };
+    if !resp.status().is_success() {
+        return false;
+    }
+    resp.json::<serde_json::Value>()
+        .await
+        .ok()
+        .is_some_and(|v| v.get("registered").and_then(|r| r.as_bool()).is_some())
+}
 
 /// BUG 6: dedicated Windows Firewall rule name for frynode.exe, same pattern
 /// as `firewall::OLOSTEP_RULE_NAME`.
@@ -263,9 +311,9 @@ const NOT_REGISTERED_REASON: &str = "dVPN not registered on-chain";
 
 /// One HTTP probe of the local frynode `/health` endpoint. Extracted so the
 /// health check can retry across the warm-up window (F5).
-async fn probe_health_once() -> HealthStatus {
+async fn probe_health_once(port: u16) -> HealthStatus {
     let client = reqwest::Client::new();
-    let health_url = "http://127.0.0.1:8088/health";
+    let health_url = format!("http://127.0.0.1:{port}/health");
 
     match tokio::time::timeout(Duration::from_secs(5), client.get(health_url).send()).await {
         Ok(Ok(resp)) if resp.status().is_success() => {
@@ -542,10 +590,19 @@ fn frynode_rule_verdict(binary: &str) -> super::firewall::RuleVerdict {
     if !rule_gate_applies(cfg!(target_os = "windows"), binary_override) {
         return super::firewall::RuleVerdict::Admitted;
     }
-    super::firewall::rule_verdict(
-        super::firewall::rule_listing(FRYNODE_RULE_NAME).as_deref(),
-        binary,
-    )
+    let (inbound, outbound) = super::firewall::verify_program_rules(FRYNODE_RULE_NAME, binary);
+    if inbound != super::firewall::RuleVerdict::Admitted {
+        inbound
+    } else {
+        outbound
+    }
+}
+
+/// Clear the parked firewall-rule setup state immediately after `retry_hardening`
+/// succeeds so the card unblocks without waiting on the next health backoff.
+pub(crate) fn clear_rule_park_if_admitted() {
+    *PARKED_RULE_REASON.lock().unwrap() = None;
+    WALLET_WATCH.lock().unwrap().skip = 0;
 }
 
 /// D-C5-2: enter the setup state, and on entry publish the banner the text
@@ -1129,6 +1186,51 @@ impl FryVpnIntegration {
     /// firewall rule comes only from the Security hardening banner (D-C5-2).
     async fn start_inner(&self) -> Result<()> {
         let binary = Self::binary_path()?;
+        let preferred_port = preferred_api_port();
+        let preferred_free = tokio::task::spawn_blocking(move || {
+            super::port_conflict::probe(preferred_port) == super::port_conflict::PortState::Free
+        })
+        .await
+        .unwrap_or(false);
+        let selected_port = if preferred_free || is_frynode_health_endpoint(preferred_port).await {
+            Some(preferred_port)
+        } else {
+            tokio::task::spawn_blocking(move || {
+                let fallback_start = preferred_port.saturating_add(1);
+                select_api_port(
+                    preferred_port,
+                    fallback_start..=FRYNODE_API_PORT_FALLBACK_MAX,
+                    |p| super::port_conflict::probe(p) == super::port_conflict::PortState::Free,
+                )
+            })
+            .await
+            .ok()
+            .flatten()
+        };
+        let api_port = match selected_port {
+            Some(p) => {
+                if p != preferred_port {
+                    info!(
+                        preferred = preferred_port,
+                        selected = p,
+                        "Preferred frynode API port is occupied — using fallback port"
+                    );
+                }
+                ACTIVE_API_PORT.store(p, Ordering::Relaxed);
+                p
+            }
+            None => {
+                let state = tokio::task::spawn_blocking(move || {
+                    super::port_conflict::probe(preferred_port)
+                })
+                .await
+                .unwrap_or(super::port_conflict::PortState::Held);
+                anyhow::bail!(
+                    "{}",
+                    super::port_conflict::conflict_reason(&state, preferred_port)
+                );
+            }
+        };
 
         // Build CLI flags for frynode
         let mut args = vec![
@@ -1143,7 +1245,7 @@ impl FryVpnIntegration {
             "-algod-token".to_string(),
             Self::algod_token(),
             "-api-port".to_string(),
-            "8088".to_string(),
+            api_port.to_string(),
             "-wg-port".to_string(),
             "51820".to_string(),
             "-region".to_string(),
@@ -1329,6 +1431,7 @@ impl Integration for FryVpnIntegration {
             sup.stop_integration("fryvpn")
                 .map_err(|e| anyhow::anyhow!("Failed to stop frynode: {}", e))?;
         }
+        ACTIVE_API_PORT.store(FRYNODE_API_PORT, Ordering::Relaxed);
         info!("Fry dVPN stopped");
         Ok(())
     }
@@ -1344,7 +1447,7 @@ impl Integration for FryVpnIntegration {
     /// keeps calling `stop()`, so a restart storm still costs zero on-chain
     /// fees and leaves the registration in place.
     async fn stop_for_disable(&self) -> Result<()> {
-        if request_graceful_shutdown(FRYNODE_API_PORT, Duration::from_secs(3)).await {
+        if request_graceful_shutdown(active_api_port(), Duration::from_secs(3)).await {
             for _ in 0..20 {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 let alive = {
@@ -1469,21 +1572,15 @@ impl Integration for FryVpnIntegration {
 
         if !process_alive {
             // B10: before blaming frynode, find out whether anything else is
-            // holding its API port. Restarting cannot take a port away from
-            // another program, and doing it every 30 s is how the restart
-            // budget was spent before the user ever read the card.
-            match super::port_conflict::probe(FRYNODE_API_PORT) {
+            // holding its API port. If another program holds the preferred
+            // port, check if a fallback port in 8089..=8120 is free so the
+            // supervisor can restart onto it rather than parking permanently.
+            let port = active_api_port();
+            match super::port_conflict::probe(port) {
                 super::port_conflict::PortState::Free => {}
                 super::port_conflict::PortState::HeldBy { pid, ref image }
                     if image.eq_ignore_ascii_case("frynode.exe") =>
                 {
-                    // An UNTRACKED frynode: one this Supervisor holds no handle
-                    // on, left behind when FEM was killed rather than closed.
-                    // `stop_integration` can only kill what is in its own map,
-                    // which is why users reported having to toggle three or
-                    // four times before the node came up. Clear it by PID (not
-                    // by image name — a second FEM instance's node is not ours
-                    // to kill) and let the ordinary restart below take over.
                     warn!(
                         pid,
                         "An untracked frynode holds the dVPN API port — clearing it"
@@ -1497,10 +1594,17 @@ impl Integration for FryVpnIntegration {
                     }
                 }
                 ref state => {
-                    return HealthStatus::Unhealthy(super::port_conflict::conflict_reason(
-                        state,
-                        FRYNODE_API_PORT,
-                    ))
+                    let preferred = preferred_api_port();
+                    let fallback_free = select_api_port(
+                        preferred,
+                        preferred.saturating_add(1)..=FRYNODE_API_PORT_FALLBACK_MAX,
+                        |p| super::port_conflict::probe(p) == super::port_conflict::PortState::Free,
+                    );
+                    if fallback_free.is_none() {
+                        return HealthStatus::Unhealthy(super::port_conflict::conflict_reason(
+                            state, port,
+                        ));
+                    }
                 }
             }
 
@@ -1523,7 +1627,7 @@ impl Integration for FryVpnIntegration {
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
-            match probe_health_once().await {
+            match probe_health_once(active_api_port()).await {
                 // D-C4-2: a registered node's health is frynode's own; the
                 // wallet only ever moves the UI notice.
                 HealthStatus::Healthy => {

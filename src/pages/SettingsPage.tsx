@@ -26,6 +26,7 @@ import { deriveRewardDisplay } from '../lib/rewardReadiness'
 import {
   DEREGISTER_CONFIRM,
   DEREGISTER_FORCE_CONFIRM,
+  SWITCH_KEY_LOCAL_CONFIRM,
   deregisterFailureState,
   IDLE_DEREGISTER_STATE,
   type DeregisterState
@@ -74,12 +75,13 @@ interface SettingsPageProps {
 }
 
 export default function SettingsPage({ deviceName = 'FEM Device', deregister }: SettingsPageProps) {
-  const { device, register, refetch } = useDevice()
+  const { device, register, switchMinerKeyLocal, refetch } = useDevice()
   const [boot, setBoot] = useState(true)
   const [tray, setTray] = useState(true)
   const [auto, setAuto] = useState(true)
   const [notif, setNotif] = useState(true)
   const [config, setConfig] = useState<FemConfig | null>(null)
+  const [configPath, setConfigPath] = useState<string>('')
   // BUG 2: the wallet was render-only once registered, so a typo at setup was permanent.
   const [walletEditing, setWalletEditing] = useState(false)
   const [walletDraft, setWalletDraft] = useState('')
@@ -128,6 +130,7 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
       .then((cfg) => {
         setConfig(cfg)
         if (cfg) {
+          if (cfg.config_path) setConfigPath(cfg.config_path)
           if (cfg.start_on_boot !== undefined) setBoot(cfg.start_on_boot)
           if (cfg.minimize_to_tray !== undefined) setTray(cfg.minimize_to_tray)
           if (cfg.auto_update !== undefined) setAuto(cfg.auto_update)
@@ -135,6 +138,11 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
         }
       })
       .catch(() => setConfig(null))
+    safeInvoke<{ primary: string }>('get_config_paths')
+      .then((paths) => {
+        if (paths?.primary) setConfigPath(paths.primary)
+      })
+      .catch(() => {})
   }, [])
 
   // No file-picker plugin is installed, so the backend picks a Downloads path
@@ -212,6 +220,18 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
       setWalletError(extractErrorMessage(e))
     } finally {
       setWalletSaving(false)
+    }
+  }
+
+  const handleSwitchKeyLocal = async () => {
+    if (!window.confirm(SWITCH_KEY_LOCAL_CONFIRM)) return
+    try {
+      await switchMinerKeyLocal()
+      setDeregisterState(IDLE_DEREGISTER_STATE)
+      await refetch()
+      await refreshConfig()
+    } catch (e) {
+      setDeregisterState({ error: extractErrorMessage(e), offerForce: false })
     }
   }
 
@@ -325,14 +345,24 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
         {isRegistered ? (
           <>
             <Lbl sx={{ marginBottom: 5 }}>Miner Key</Lbl>
-            <CopyField val={config?.miner_key ?? ''} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <CopyField val={config?.miner_key ?? ''} />
+              <Btn v="g" data-testid="switch-miner-key-local" onClick={handleSwitchKeyLocal}>
+                Use a different key on this device
+              </Btn>
+            </div>
           </>
         ) : (
           <>
             {shouldShowSavedMinerKey(isRegistered, config?.miner_key) && (
               <>
                 <Lbl sx={{ marginBottom: 5 }}>Saved Miner Key</Lbl>
-                <CopyField val={config?.miner_key ?? ''} />
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <CopyField val={config?.miner_key ?? ''} />
+                  <Btn v="g" data-testid="switch-miner-key-local" onClick={handleSwitchKeyLocal}>
+                    Use a different key on this device
+                  </Btn>
+                </div>
                 <div
                   data-testid="unregistered-key-hint"
                   style={{
@@ -393,6 +423,12 @@ export default function SettingsPage({ deviceName = 'FEM Device', deregister }: 
             </Btn>
           </>
         )}
+        <div style={{ marginTop: 12 }}>
+          <Lbl sx={{ marginBottom: 5 }}>Config file</Lbl>
+          <div data-testid="config-file-path">
+            <CopyField val={configPath || config?.config_path || ''} />
+          </div>
+        </div>
       </SettingSection>
 
       <SettingSection Icon={Wallet} ico="var(--amb)" label="Reward Wallet">

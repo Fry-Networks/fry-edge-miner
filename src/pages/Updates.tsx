@@ -300,11 +300,34 @@ export default function Updates() {
             borderRadius: 'var(--rad)',
             fontFamily: 'var(--fb)',
             fontSize: 12,
-            color: 'var(--red)'
+            color: 'var(--red)',
+            display: 'flex',
+            alignItems: 'flex-start',
+            justifyContent: 'space-between',
+            gap: 10
           }}
         >
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>{failed.title}</div>
-          <div style={{ lineHeight: 1.5 }}>{failed.detail}</div>
+          <div>
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>{failed.title}</div>
+            <div style={{ lineHeight: 1.5 }}>{failed.detail}</div>
+          </div>
+          <button
+            type="button"
+            data-testid="update-failed-dismiss"
+            onClick={() => setFailed(null)}
+            style={{
+              flexShrink: 0,
+              background: 'none',
+              border: '1px solid var(--red)40',
+              borderRadius: 'var(--radsm)',
+              color: 'var(--red)',
+              cursor: 'pointer',
+              fontSize: 11,
+              padding: '3px 8px'
+            }}
+          >
+            Dismiss
+          </button>
         </div>
       )}
 

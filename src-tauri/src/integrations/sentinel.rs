@@ -5,22 +5,25 @@ use async_trait::async_trait;
 use std::path::PathBuf;
 use tracing::{info, warn};
 
-fn deploy_dir() -> PathBuf {
-    // B13: this used to resolve `dirs::data_local_dir()` directly and never
-    // consult the storage root, so a user who moved storage left this
-    // deployment stranded at the old location. An existing legacy directory is
-    // grandfathered, so nothing live moves and no migration is needed.
-    super::download::resolve_deploy_dir(
-        dirs::data_local_dir()
-            .expect("no local data dir")
-            .join("FryEdgeMiner")
-            .join("sentinel"),
+pub(crate) fn resolve_local_deploy_dir(local_data_dir: Option<PathBuf>) -> Result<PathBuf> {
+    let base = local_data_dir.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Could not determine this OS's local application data directory — \
+             Sentinel cannot resolve where to deploy"
+        )
+    })?;
+    Ok(super::download::resolve_deploy_dir(
+        base.join("FryEdgeMiner").join("sentinel"),
         super::download::partners_base_dir().join("sentinel"),
-    )
+    ))
 }
 
-fn compose_file() -> PathBuf {
-    deploy_dir().join("docker-compose.yml")
+fn deploy_dir() -> Result<PathBuf> {
+    resolve_local_deploy_dir(dirs::data_local_dir())
+}
+
+fn compose_file() -> Result<PathBuf> {
+    Ok(deploy_dir()?.join("docker-compose.yml"))
 }
 
 /// Verdict derived from the `docker compose ps` container states.
@@ -280,19 +283,16 @@ impl Integration for SentinelIntegration {
         // Ensure Docker is available, auto-installing if needed
         super::docker_manager::ensure_docker().await?;
 
-        let deploy_dir = deploy_dir();
+        let deploy_dir = deploy_dir()?;
+        let compose = compose_file()?;
         tokio::fs::create_dir_all(&deploy_dir).await?;
 
         // Write Docker Compose file from embedded content
-        tokio::fs::write(
-            compose_file(),
-            include_str!("sentinel_deploy/docker-compose.yml"),
-        )
-        .await?;
+        tokio::fs::write(&compose, include_str!("sentinel_deploy/docker-compose.yml")).await?;
 
         info!("Pulling Sentinel dVPN image");
         let output = crate::integrations::docker_manager::docker_command()
-            .args(["compose", "-f", &compose_file().to_string_lossy(), "pull"])
+            .args(["compose", "-f", &compose.to_string_lossy(), "pull"])
             .output_bounded(crate::supervisor::platform::LONG_TIMEOUT)?;
 
         if !output.status.success() {
@@ -306,7 +306,7 @@ impl Integration for SentinelIntegration {
 
         // First run: generate config.toml + a per-device `main` key inside the
         // named volume. `dvpnx start` refuses to boot without both.
-        Self::init_node_config(&compose_file()).await?;
+        Self::init_node_config(&compose).await?;
 
         info!("Sentinel dVPN install complete");
         Ok(())
@@ -314,11 +314,12 @@ impl Integration for SentinelIntegration {
 
     async fn start(&self) -> Result<()> {
         super::docker_manager::ensure_docker().await?;
-        let compose = compose_file();
+        let dir = deploy_dir()?;
+        let compose = compose_file()?;
         if !compose.exists() {
             anyhow::bail!(
                 "Sentinel is not installed yet (deploy directory missing at {}) — toggle it off and on to reinstall",
-                deploy_dir().display()
+                dir.display()
             );
         }
 
@@ -352,7 +353,7 @@ impl Integration for SentinelIntegration {
     }
 
     async fn stop(&self) -> Result<()> {
-        let compose = compose_file();
+        let compose = compose_file()?;
         if compose.exists() {
             crate::integrations::docker_manager::docker_command()
                 .args(["compose", "-f", &compose.to_string_lossy(), "stop"])
@@ -371,7 +372,11 @@ impl Integration for SentinelIntegration {
             ));
         }
 
-        let compose = compose_file();
+        let Ok(compose) = compose_file() else {
+            return HealthStatus::Unhealthy(
+                "Could not determine Sentinel deploy directory".to_string(),
+            );
+        };
         if !compose.exists() {
             return HealthStatus::Stopped;
         }
@@ -500,7 +505,7 @@ impl Integration for SentinelIntegration {
     }
 
     fn installed_version(&self) -> Option<String> {
-        if compose_file().exists() {
+        if compose_file().is_ok_and(|c| c.exists()) {
             Some("installed".into())
         } else {
             None
@@ -508,7 +513,7 @@ impl Integration for SentinelIntegration {
     }
 
     fn collect_poc_data(&self) -> PocGateData {
-        let compose_exists = compose_file().exists();
+        let compose_exists = compose_file().is_ok_and(|c| c.exists());
         PocGateData {
             poa: compose_exists && docker_available(),
             ..Default::default()

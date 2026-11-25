@@ -153,6 +153,7 @@ impl ScrubbingMakeWriter {
 
     /// B23: the main sink's writer — scrubs, and is never gated by the
     /// debug-logging toggle.
+    #[cfg_attr(debug_assertions, allow(dead_code))]
     pub fn always(inner: NonBlocking) -> Self {
         Self {
             inner,

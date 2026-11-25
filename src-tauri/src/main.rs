@@ -14,6 +14,9 @@ mod migration;
 #[path = "nsis_hook_quoting_tests.rs"]
 mod nsis_hook_quoting_tests;
 mod poc;
+#[cfg(test)]
+#[path = "reinstall_crash_u6_tests.rs"]
+mod reinstall_crash_u6_tests;
 mod security_setup;
 mod storage_location;
 mod supervisor;
@@ -1265,11 +1268,13 @@ fn main() {
             commands::device::get_device_info,
             commands::device::register_device,
             commands::device::deregister_device,
+            commands::device::switch_miner_key_local,
             commands::device::set_device_name,
             commands::device::get_reporting_status,
             commands::rewards::get_reward_summary,
             commands::rewards::get_poc_slots,
             commands::settings::get_settings,
+            commands::settings::get_config_paths,
             commands::settings::save_settings,
             commands::settings::set_wallet_address,
             commands::settings::get_storage_location,

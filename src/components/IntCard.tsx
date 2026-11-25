@@ -8,8 +8,17 @@ import { integrationBadge } from '../lib/integrationBadge'
 import { isRequiredIntegration, SETUP_GUIDANCE } from '../lib/integrationMeta'
 import { OFFICIAL_DISABLED_WARNING, REQUIRED_DISABLED_WARNING, SDK_REPORT_LINE } from '../lib/support'
 import { safeInvoke } from '../lib/tauri'
-import { awaitsUserSetup, unhealthyReason, sentinelFundingAddress, sentinelFundingMinDvpn } from '../lib/types'
+import {
+  awaitsUserSetup,
+  unhealthyReason,
+  sentinelFundingAddress,
+  sentinelFundingMinDvpn,
+  fryvpnFundingAddress,
+  fryvpnAlgorandUri,
+  fryvpnFundingGuidance,
+} from '../lib/types'
 import CopyField from './primitives/CopyField'
+import FryvpnQr from './FryvpnQr'
 import Tag from './primitives/Tag'
 import TierBadge from './primitives/TierBadge'
 import Tog from './primitives/Tog'
@@ -51,6 +60,9 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
   // instead of burying it in a truncated one-liner.
   const fundingAddr = id === 'sentinel' ? sentinelFundingAddress(health) : null
   const minDvpn = id === 'sentinel' ? sentinelFundingMinDvpn(health) : null
+  const fryvpnAddr = id === 'fryvpn' ? fryvpnFundingAddress(health) : null
+  const fryvpnUri = id === 'fryvpn' ? fryvpnAlgorandUri(health) : null
+  const fryvpnGuidance = id === 'fryvpn' ? fryvpnFundingGuidance(health) : null
   const isSdk = tier === 'sdk'
   // F17: reward role (required vs boost) is independent of partner provenance.
   const isRequired = isRequiredIntegration(id)
@@ -326,6 +338,30 @@ export default function IntCard({ intg, onToggle, dockerNote, onForceReinstall, 
                   <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 2 }} /> {reason}
                 </span>
               )
+            )}
+            {fryvpnAddr && fryvpnUri && reason && (st === 'err' || stLbl === 'Setup required' || stLbl === 'Upstream unreachable' || awaitsUserSetup(health)) && !startError && (
+              <div
+                data-testid={`fryvpn-fund-${id}`}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 6,
+                  minWidth: 0,
+                  maxWidth: 420,
+                  fontFamily: 'var(--fb)',
+                  fontSize: 11,
+                  color: 'var(--t2)',
+                  whiteSpace: 'normal',
+                  overflowWrap: 'anywhere',
+                  lineHeight: 1.4
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <CopyField val={fryvpnAddr} />
+                  <FryvpnQr value={fryvpnUri} />
+                </div>
+                {fryvpnGuidance && <span>{fryvpnGuidance}</span>}
+              </div>
             )}
             {stLbl === 'Setup required' && SETUP_GUIDANCE[id] && (
               <span
