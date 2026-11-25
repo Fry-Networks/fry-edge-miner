@@ -222,10 +222,12 @@ function applyMaskAndFormat(
 
   const fmt = formatInfoBits(mask)
   for (let i = 0; i < 15; i++) {
-    const bit = ((fmt >>> i) & 1) === 1
+    const bit = ((fmt >>> (14 - i)) & 1) === 1
     if (i < 6) out[8][i] = bit
-    else if (i < 8) out[8][i + 1] = bit
-    else out[8][size - 15 + i] = bit
+    else if (i < 8) {
+      out[8][i + 1] = bit
+      if (i === 7) out[8][size - 8] = bit
+    } else out[8][size - 15 + i] = bit
 
     if (i < 8) out[size - 1 - i][8] = bit
     else if (i < 9) out[15 - i][8] = bit

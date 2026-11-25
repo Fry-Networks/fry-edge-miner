@@ -6,7 +6,12 @@ interface FryvpnQrProps {
 }
 
 export default function FryvpnQr({ value, size = 104 }: FryvpnQrProps) {
-  const matrix = encodeQrMatrix(value)
+  let matrix: boolean[][]
+  try {
+    matrix = encodeQrMatrix(value)
+  } catch {
+    return null
+  }
   const quiet = 4
   const dim = matrix.length + quiet * 2
   const parts: string[] = []
