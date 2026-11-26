@@ -299,12 +299,30 @@ pub fn backup_pre_update_binaries(files: &[(&Path, &str)], prev_dir: &Path) -> s
 ///   left in place for manual recovery / diagnosis; nothing here auto-rolls
 ///   back, since an unattended rollback of a partially-applied Windows
 ///   install carries its own risk.
+fn cleanup_stale_update_failed(app_data_dir: &Path, install_dir: Option<&Path>) {
+    let mut candidates = vec![app_data_dir.join("update-failed.txt")];
+    if let Some(dir) = install_dir {
+        candidates.push(dir.join("update-failed.txt"));
+    }
+    for path in candidates {
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 pub fn check_update_outcome_on_launch(
     app_data_dir: &Path,
     current_version: &str,
 ) -> Option<UpdateOutcome> {
+    let install_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
     let state_path = update_state_path(app_data_dir);
-    let state = read_update_state(&state_path)?;
+    let Some(state) = read_update_state(&state_path) else {
+        cleanup_stale_update_failed(app_data_dir, install_dir.as_deref());
+        return None;
+    };
     let outcome = evaluate_update_outcome(&state, current_version);
     match &outcome {
         UpdateOutcome::Succeeded => {
@@ -315,6 +333,7 @@ pub fn check_update_outcome_on_launch(
             );
             let _ = std::fs::remove_file(&state_path);
             let _ = std::fs::remove_dir_all(prev_binaries_dir(app_data_dir));
+            cleanup_stale_update_failed(app_data_dir, install_dir.as_deref());
         }
         UpdateOutcome::Mismatched { expected, actual } => {
             warn!(

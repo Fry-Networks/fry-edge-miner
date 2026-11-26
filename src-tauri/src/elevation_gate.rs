@@ -86,24 +86,24 @@ impl std::fmt::Display for ElevationSkipped {
     }
 }
 
-#[derive(Default)]
-struct GateState {
-    /// Per purpose, every `attempt_key` a `UserClick` has already spent its one
-    /// shot on.
-    ///
-    /// Keyed by PURPOSE, not a flat set: the retry gesture is per-integration,
-    /// so `clear_blocked` has to be able to re-arm exactly one purpose's
-    /// attempts and nothing else. A flat set could only be cleared wholesale,
-    /// which would let a decline on one card re-arm another.
-    attempted: HashMap<String, HashSet<String>>,
-}
-
 /// Serialises the elevations themselves. Held ACROSS the caller's closure, so
 /// it can be held for as long as a human takes to answer a UAC prompt — never
 /// read it from a UI path.
-fn gate() -> &'static Mutex<GateState> {
-    static GATE: OnceLock<Mutex<GateState>> = OnceLock::new();
-    GATE.get_or_init(|| Mutex::new(GateState::default()))
+fn gate() -> &'static Mutex<()> {
+    static GATE: OnceLock<Mutex<()>> = OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(()))
+}
+
+/// Separate lock for per-purpose attempt tracking so `clear_blocked` never
+/// blocks behind a held UAC prompt in `gate()`.
+fn attempted_map() -> &'static Mutex<HashMap<String, HashSet<String>>> {
+    static ATTEMPTED: OnceLock<Mutex<HashMap<String, HashSet<String>>>> = OnceLock::new();
+    ATTEMPTED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Non-blocking check for whether another elevation is currently holding `gate()`.
+pub fn is_elevation_in_flight() -> bool {
+    gate().try_lock().is_err()
 }
 
 /// The reasons the UI reads. A SEPARATE lock from `gate()` on purpose: a poll
@@ -162,13 +162,15 @@ pub fn run_elevated<T>(
 
     // Held across `f` on purpose: two UAC prompts must never be on screen at
     // once, and a second request must WAIT rather than be dropped.
-    let mut state = gate().lock().unwrap_or_else(|e| e.into_inner());
-    if !state
-        .attempted
-        .entry(purpose.to_string())
-        .or_default()
-        .insert(attempt_key.to_string())
-    {
+    let _gate_guard = gate().lock().unwrap_or_else(|e| e.into_inner());
+    let inserted = {
+        let mut attempted = attempted_map().lock().unwrap_or_else(|e| e.into_inner());
+        attempted
+            .entry(purpose.to_string())
+            .or_default()
+            .insert(attempt_key.to_string())
+    };
+    if !inserted {
         info!(
             purpose,
             trigger = "user_click",
@@ -183,7 +185,7 @@ pub fn run_elevated<T>(
     }
     info!(purpose, trigger = "user_click", "elevation allowed");
     let outcome = f();
-    drop(state);
+    drop(_gate_guard);
 
     match outcome {
         Ok(value) => {
@@ -249,10 +251,9 @@ fn clear_blocked_message(purpose: &str) {
 /// `run_elevated`'s success path uses `clear_blocked_message` for that reason.
 pub fn clear_blocked(purpose: &str) {
     clear_blocked_message(purpose);
-    gate()
+    attempted_map()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .attempted
         .remove(purpose);
 }
 

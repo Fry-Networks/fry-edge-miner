@@ -149,6 +149,29 @@ pub async fn download_file(url: &str, dest: &Path) -> anyhow::Result<()> {
     download_file_with_options(url, dest, DEFAULT_USER_AGENT, None).await
 }
 
+struct PartFileGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl PartFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PartFileGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Download a file with explicit User-Agent and optional Bearer auth token.
 pub async fn download_file_with_options(
     url: &str,
@@ -156,14 +179,27 @@ pub async fn download_file_with_options(
     user_agent: &str,
     auth_token: Option<&str>,
 ) -> anyhow::Result<()> {
-    let client = build_client(user_agent, auth_token);
+    let primary_client = build_client(user_agent, auth_token, false)?;
+    let http1_client = build_client(user_agent, auth_token, true)?;
     let max_attempts = 3u32;
     let base_delay = Duration::from_secs(2);
 
     let mut last_error = None;
+    let mut use_http1_fallback = false;
 
     for attempt in 1..=max_attempts {
-        info!(url = url, dest = ?dest, attempt = attempt, "Downloading file");
+        info!(
+            url = url,
+            dest = ?dest,
+            attempt = attempt,
+            http1_fallback = use_http1_fallback,
+            "Downloading file"
+        );
+        let client = if use_http1_fallback {
+            &http1_client
+        } else {
+            &primary_client
+        };
 
         match client.get(url).send().await {
             Ok(response) => {
@@ -178,21 +214,33 @@ pub async fn download_file_with_options(
                         std::fs::create_dir_all(parent)?;
                     }
                     let part_path = dest.with_extension("part");
+                    let mut part_guard = PartFileGuard::new(part_path.clone());
                     match stream_to_file(response, &part_path).await {
                         Ok(bytes) => {
                             if dest.exists() {
                                 std::fs::remove_file(dest)?;
                             }
                             std::fs::rename(&part_path, dest)?;
+                            part_guard.disarm();
                             info!(dest = ?dest, bytes = bytes, "Download complete");
                             return Ok(());
                         }
                         Err(e) => {
-                            let _ = std::fs::remove_file(&part_path);
-                            warn!(url = url, error = %e, attempt = attempt, "Download body read failed");
+                            let bytes_written =
+                                std::fs::metadata(&part_path).map(|m| m.len()).unwrap_or(0);
+                            drop(part_guard);
+                            use_http1_fallback = true;
+                            warn!(
+                                url = url,
+                                bytes = bytes_written,
+                                error = %e,
+                                attempt = attempt,
+                                "Download body read failed"
+                            );
                             last_error = Some(anyhow::anyhow!(
-                                "Download of {} failed while reading the response body: {}",
+                                "Download of {} failed while reading the response body after {} bytes: {}",
                                 url,
+                                bytes_written,
                                 e
                             ));
                             if attempt < max_attempts {
@@ -240,8 +288,9 @@ pub async fn download_file_with_options(
                 }
             }
             Err(e) => {
+                use_http1_fallback = true;
                 warn!(error = %e, attempt = attempt, "Download request error");
-                last_error = Some(anyhow::anyhow!("Download request error: {}", e));
+                last_error = Some(anyhow::anyhow!("Download request error ({}): {}", url, e));
                 if attempt < max_attempts {
                     let delay = base_delay * 2u32.pow(attempt - 1);
                     tokio::time::sleep(delay).await;
@@ -269,22 +318,30 @@ async fn stream_to_file(mut response: reqwest::Response, dest: &Path) -> anyhow:
 }
 
 /// Build a reqwest client suitable for downloading public release assets.
-fn build_client(user_agent: &str, auth_token: Option<&str>) -> reqwest::Client {
+fn build_client(
+    user_agent: &str,
+    auth_token: Option<&str>,
+    http1_only: bool,
+) -> anyhow::Result<reqwest::Client> {
     let mut headers = reqwest::header::HeaderMap::new();
     if let Some(token) = auth_token {
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token))
-                .expect("invalid auth token header value"),
-        );
+        let value = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token))
+            .map_err(|e| anyhow::anyhow!("invalid auth token header value: {e}"))?;
+        headers.insert(reqwest::header::AUTHORIZATION, value);
     }
 
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(30))
         .timeout(Duration::from_secs(300))
         .user_agent(user_agent)
-        .default_headers(headers)
+        .default_headers(headers);
+    if http1_only {
+        builder = builder.http1_only();
+    }
+    builder
         .build()
-        .expect("failed to build HTTP client")
+        .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))
 }
 
 /// BUG 1/4 (1337, georgeparis): "FEM only shows C: drive storage even when

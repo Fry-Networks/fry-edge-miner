@@ -183,14 +183,33 @@ impl ConfigStore {
         }
     }
 
+    /// Primary config file path on disk.
+    pub fn primary_path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn backup_path(&self) -> &Path {
+        &self.backup_path
+    }
+
+    pub fn roaming_path(&self) -> Option<&Path> {
+        self.roaming_path.as_deref()
+    }
+
     /// Warning produced during load (corrupt/recovered/reset), for the UI.
     pub fn load_warning(&self) -> Option<String> {
-        self.load_warning.read().unwrap().clone()
+        self.load_warning
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Get a clone of the current configuration
     pub fn get(&self) -> FemConfig {
-        self.config.read().unwrap().clone()
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Update the configuration using a closure and persist to disk
@@ -198,14 +217,14 @@ impl ConfigStore {
     where
         F: FnOnce(&mut FemConfig),
     {
-        let mut config = self.config.write().unwrap();
+        let mut config = self.config.write().unwrap_or_else(|e| e.into_inner());
         f(&mut config);
         self.save_to_disk(&config)
     }
 
     /// Persist current config to disk
     pub fn save(&self) -> Result<()> {
-        let config = self.config.read().unwrap();
+        let config = self.config.read().unwrap_or_else(|e| e.into_inner());
         self.save_to_disk(&config)
     }
 
@@ -216,7 +235,9 @@ impl ConfigStore {
         }
         let data = crate::config::migrate::to_disk_string(config)?;
         Self::write_atomic(&self.path, &data)?;
-        // Redundant copies only once a real registration exists.
+        // Redundant copies only once a real registration exists. If identity
+        // was cleared locally and backup/roaming files already exist on disk,
+        // overwrite them too so ConfigStore::new cannot resurrect a removed key.
         if config.miner_key.is_some() {
             if let Err(e) = Self::write_atomic(&self.backup_path, &data) {
                 tracing::warn!(error = %e, "ConfigStore: backup write failed");
@@ -224,6 +245,19 @@ impl ConfigStore {
             if let Some(ref rp) = self.roaming_path {
                 if let Err(e) = Self::write_atomic(rp, &data) {
                     tracing::warn!(error = %e, "ConfigStore: roaming write failed");
+                }
+            }
+        } else {
+            if self.backup_path.exists() {
+                if let Err(e) = Self::write_atomic(&self.backup_path, &data) {
+                    tracing::warn!(error = %e, "ConfigStore: backup clear failed");
+                }
+            }
+            if let Some(ref rp) = self.roaming_path {
+                if rp.exists() {
+                    if let Err(e) = Self::write_atomic(rp, &data) {
+                        tracing::warn!(error = %e, "ConfigStore: roaming clear failed");
+                    }
                 }
             }
         }

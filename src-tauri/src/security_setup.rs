@@ -90,10 +90,8 @@ pub(crate) fn check_hardening(
     current_version: &str,
 ) -> (HardeningDecision, String) {
     let recipe = hardening_recipe_sha(frynode_path);
-    let listing = firewall::rule_listing("FEM-FryNode");
     let program = frynode_path.to_string_lossy();
-    let inbound = firewall::rule_verdict(listing.as_deref(), &program);
-    let outbound = firewall::outbound_rule_verdict(listing.as_deref(), &program);
+    let (inbound, outbound) = firewall::verify_program_rules("FEM-FryNode", &program);
     let decision = hardening_decision(
         recorded_version,
         current_version,
@@ -166,9 +164,12 @@ pub fn build_hardening_script(
 /// (caught below, exit 2); the explicit `$null` guard (exit 3) is defense in
 /// depth for any other path that could leave `$p` unset.
 fn build_outer_elevation_script(inner: &str) -> String {
+    let escaped = inner
+        .replace('`', "``")
+        .replace('"', "`\"")
+        .replace('$', "`$");
     format!(
-        "$ErrorActionPreference = 'Stop'; try {{ $p = Start-Process -FilePath powershell -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command',\"{}\" -Verb RunAs -WindowStyle Hidden -Wait -PassThru; if ($null -eq $p) {{ exit 3 }}; exit $p.ExitCode }} catch {{ exit 2 }}",
-        inner.replace('"', "`\"")
+        "$ErrorActionPreference = 'Stop'; try {{ $p = Start-Process -FilePath powershell -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command',\"{escaped}\" -Verb RunAs -WindowStyle Hidden -Wait -PassThru; if ($null -eq $p) {{ exit 3 }}; exit $p.ExitCode }} catch {{ exit 2 }}"
     )
 }
 
@@ -221,7 +222,10 @@ pub(crate) fn run_hardening_elevated(
 
         // v0.4.29 canary fix: verify the rule ACTUALLY landed before trusting
         // the exit code — see `hardening_outcome`'s docs.
-        let rule_present = firewall::current_rule_program("FEM-FryNode").is_some();
+        let (inb, outb) =
+            firewall::verify_program_rules("FEM-FryNode", &frynode_path.to_string_lossy());
+        let rule_present =
+            inb == firewall::RuleVerdict::Admitted && outb == firewall::RuleVerdict::Admitted;
 
         match hardening_outcome(out.status.code(), rule_present) {
             Ok(()) => {

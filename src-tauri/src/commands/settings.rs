@@ -25,6 +25,8 @@ pub struct FemConfigView {
     pub storage_dir_active: String,
     /// Whether the scrubbed debug-log sink is currently writing.
     pub debug_logging_enabled: bool,
+    /// Primary config file path on disk, exposed in Settings so users can locate it.
+    pub config_path: Option<String>,
 }
 
 impl From<FemConfig> for FemConfigView {
@@ -46,6 +48,7 @@ impl From<FemConfig> for FemConfigView {
                 .to_string_lossy()
                 .into_owned(),
             debug_logging_enabled: cfg.debug_logging_enabled,
+            config_path: None,
         }
     }
 }
@@ -60,6 +63,27 @@ pub struct FemConfigUpdate {
     pub notifications: Option<bool>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ConfigPaths {
+    pub primary: String,
+    pub backup: String,
+    pub roaming: Option<String>,
+}
+
+#[tauri::command]
+pub async fn get_config_paths(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<ConfigPaths, String> {
+    Ok(ConfigPaths {
+        primary: state.config.primary_path().to_string_lossy().into_owned(),
+        backup: state.config.backup_path().to_string_lossy().into_owned(),
+        roaming: state
+            .config
+            .roaming_path()
+            .map(|p| p.to_string_lossy().into_owned()),
+    })
+}
+
 #[tauri::command]
 pub async fn get_settings(
     state: tauri::State<'_, crate::AppState>,
@@ -67,6 +91,7 @@ pub async fn get_settings(
     let mut view: FemConfigView = state.config.get().into();
     // B7: surface any load-time recovery/reset warning to the UI.
     view.config_warning = state.config.load_warning();
+    view.config_path = Some(state.config.primary_path().to_string_lossy().into_owned());
     Ok(view)
 }
 

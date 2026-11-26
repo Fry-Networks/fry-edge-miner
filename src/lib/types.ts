@@ -117,6 +117,7 @@ export interface DeviceInfo {
 export interface FemConfig {
   miner_key: string | null
   wallet_address: string | null
+  config_path?: string | null
   /** BUG 1/4: configured storage override; null/absent = the default location. */
   storage_dir?: string | null
   /** BUG 1/4: the root actually in use this session (differs until restart). */
@@ -211,6 +212,54 @@ export function sentinelFundingAddress(health: HealthStatus): string | null {
 export function sentinelFundingMinDvpn(health: HealthStatus): string | null {
   const reason = unhealthyReason(health)
   return reason?.match(/at least (\d+) DVPN/)?.[1] ?? null
+}
+
+// Fry dVPN node wallet Algorand address (58-char base32) extracted from
+// registration or heartbeat shortfall notices so the UI can show a CopyField
+// and scannable QR code instead of forcing manual copying from a sentence.
+export function fryvpnFundingAddress(health: HealthStatus): string | null {
+  const reason = unhealthyReason(health)
+  if (!reason || (!reason.includes('Fry dVPN') && !reason.includes('fryDVPN'))) {
+    return null
+  }
+  return reason.match(/\bto ([A-Z2-7]{58})(?=[.,\s]|$)/)?.[1] ?? null
+}
+
+export function fryvpnFundingAmountAlgos(health: HealthStatus): string | null {
+  const reason = unhealthyReason(health)
+  if (!reason || !fryvpnFundingAddress(health)) return null
+  return reason.match(/\bsend ([0-9]+(?:\.[0-9]+)?) ALGO to [A-Z2-7]{58}/i)?.[1] ?? null
+}
+
+export function fryvpnAlgorandUri(health: HealthStatus): string | null {
+  const addr = fryvpnFundingAddress(health)
+  if (!addr) return null
+  const amountStr = fryvpnFundingAmountAlgos(health)
+  if (!amountStr) return `algorand://${addr}`
+  const [whole, frac = ''] = amountStr.split('.')
+  const padded = (frac + '000000').slice(0, 6)
+  const micro = Number(whole) * 1_000_000 + Number(padded)
+  return Number.isFinite(micro) && micro > 0
+    ? `algorand://${addr}?amount=${micro}`
+    : `algorand://${addr}`
+}
+
+export function fryvpnFundingGuidance(health: HealthStatus): string | null {
+  const reason = unhealthyReason(health)
+  if (!reason || !fryvpnFundingAddress(health)) return null
+  if (reason.includes('next heartbeat')) {
+    return (
+      'Unfunded Algorand node wallets start at 0 ALGO until your first deposit ' +
+      '(>= 0.100 ALGO minimum balance). Fry dVPN heartbeats use 0.001 ALGO every ~5 min ' +
+      '(~0.288 ALGO/day); consider sending >= 0.100 ALGO (or a multi-day buffer) so it ' +
+      "won't prompt again right away. Optional: Olostep alone earns the full base reward."
+    )
+  }
+  return (
+    'Unfunded Algorand node wallets start at 0 ALGO (explorers report "account not found" ' +
+    'until your first deposit >= 0.100 ALGO minimum balance). Optional: switch Fry dVPN ' +
+    'off to skip; Olostep alone earns the full base reward.'
+  )
 }
 
 /** Where the scrubbed debug logs go, and whether anything is going there. */

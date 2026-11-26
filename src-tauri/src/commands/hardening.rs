@@ -41,6 +41,12 @@ pub async fn get_hardening_status() -> Result<Option<String>, String> {
 pub async fn retry_hardening(state: tauri::State<'_, crate::AppState>) -> Result<(), String> {
     let config = state.config.clone();
     tokio::task::block_in_place(move || {
+        if crate::elevation_gate::is_elevation_in_flight() {
+            return Err(
+                "Another administrator prompt is still open — finish or cancel it first"
+                    .to_string(),
+            );
+        }
         // NB: re-arm the one allowed attempt on EVERY real gesture — the
         // same pattern `toggle_integration` uses (commands/integration.rs,
         // `clear_blocked`) for every other card. Without this, a declined or
@@ -66,6 +72,7 @@ pub async fn retry_hardening(state: tauri::State<'_, crate::AppState>) -> Result
             ElevationTrigger::UserClick,
         ) {
             Ok(()) => {
+                crate::integrations::fryvpn::clear_rule_park_if_admitted();
                 let recipe = crate::security_setup::hardening_recipe_sha(&frynode_path);
                 if let Err(e) = config.update(|c| {
                     c.hardening_applied_version = Some(current.to_string());

@@ -397,6 +397,149 @@ fn normalize_program_with(program: &str, env: impl Fn(&str) -> Option<String>) -
         .to_lowercase()
 }
 
+/// Native Win32 `netsh advfirewall firewall show rule ... verbose` parser.
+/// Used as a `0xe0434352`-safe fallback when PowerShell CIM (`Get-NetFirewallRule`)
+/// fails or crashes on a user's machine.
+pub(crate) fn netsh_rule_verdicts(netsh_output: &str, program: &str) -> (RuleVerdict, RuleVerdict) {
+    let wanted = normalize_program(program);
+    let mut blocks: Vec<Vec<(String, String)>> = Vec::new();
+    let mut current: Vec<(String, String)> = Vec::new();
+
+    for raw in netsh_output.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            if !current.is_empty() {
+                blocks.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        if line.starts_with("---") {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            let key = k.trim().to_ascii_lowercase();
+            let val = v.trim().to_string();
+            if key == "rule name" && !current.is_empty() {
+                blocks.push(std::mem::take(&mut current));
+            }
+            current.push((key, val));
+        }
+    }
+    if !current.is_empty() {
+        blocks.push(current);
+    }
+
+    let rank = |v: RuleVerdict| match v {
+        RuleVerdict::Missing => 0,
+        RuleVerdict::NotInboundAllow => 1,
+        RuleVerdict::WrongProgram => 2,
+        RuleVerdict::Disabled => 3,
+        _ => 4,
+    };
+
+    let eval_dir = |wanted_dir: &str| -> RuleVerdict {
+        let mut closest = RuleVerdict::Missing;
+        for blk in &blocks {
+            let field = |name: &str| -> Option<&str> {
+                blk.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+            };
+            let Some(rule_program) = field("program") else {
+                continue;
+            };
+            if rule_program.is_empty() || rule_program.eq_ignore_ascii_case("any") {
+                continue;
+            }
+            let dir = field("direction").unwrap_or("");
+            let enabled = field("enabled").unwrap_or("");
+            let action = field("action").unwrap_or("");
+            let profiles = field("profiles").unwrap_or("Any");
+
+            let dir_matches = match wanted_dir {
+                "Inbound" => dir.eq_ignore_ascii_case("in") || dir.eq_ignore_ascii_case("inbound"),
+                "Outbound" => {
+                    dir.eq_ignore_ascii_case("out") || dir.eq_ignore_ascii_case("outbound")
+                }
+                _ => false,
+            };
+
+            let verdict = if normalize_program(rule_program) != wanted {
+                RuleVerdict::WrongProgram
+            } else if !dir_matches || !action.eq_ignore_ascii_case("allow") {
+                RuleVerdict::NotInboundAllow
+            } else if !(enabled.eq_ignore_ascii_case("yes") || enabled.eq_ignore_ascii_case("true"))
+            {
+                RuleVerdict::Disabled
+            } else if !profile_covers(profiles, &["Public"])
+                && !profile_covers(profiles, &["Private"])
+            {
+                RuleVerdict::ProfileNotCovered
+            } else {
+                return RuleVerdict::Admitted;
+            };
+
+            if rank(verdict) > rank(closest) {
+                closest = verdict;
+            }
+        }
+        closest
+    };
+
+    (eval_dir("Inbound"), eval_dir("Outbound"))
+}
+
+fn netsh_show_rule(name_arg: &str) -> Option<String> {
+    let out = crate::supervisor::platform::command("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "show",
+            "rule",
+            name_arg,
+            "verbose",
+        ])
+        .output_bounded(crate::supervisor::platform::PROBE_TIMEOUT)
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    if out.status.success() || stdout.contains("No rules match") {
+        Some(stdout)
+    } else {
+        None
+    }
+}
+
+/// Verify inbound + outbound allow rules for `program` using PowerShell CIM
+/// first and falling back to native Win32 `netsh advfirewall` (immune to .NET
+/// CLR `0xe0434352` crashes and also able to spot user-created rules for
+/// `frynode.exe` under any display name).
+pub(crate) fn verify_program_rules(rule_name: &str, program: &str) -> (RuleVerdict, RuleVerdict) {
+    let ps_listing = rule_listing(rule_name);
+    let ps_in = rule_verdict(ps_listing.as_deref(), program);
+    let ps_out = outbound_rule_verdict(ps_listing.as_deref(), program);
+    if ps_in == RuleVerdict::Admitted && ps_out == RuleVerdict::Admitted {
+        return (RuleVerdict::Admitted, RuleVerdict::Admitted);
+    }
+
+    if let Some(named_out) = netsh_show_rule(&format!("name={rule_name}")) {
+        let (nin, nout) = netsh_rule_verdicts(&named_out, program);
+        if nin == RuleVerdict::Admitted && nout == RuleVerdict::Admitted {
+            return (RuleVerdict::Admitted, RuleVerdict::Admitted);
+        }
+        if let Some(all_out) = netsh_show_rule("name=all") {
+            let (ain, aout) = netsh_rule_verdicts(&all_out, program);
+            if ain == RuleVerdict::Admitted && aout == RuleVerdict::Admitted {
+                return (RuleVerdict::Admitted, RuleVerdict::Admitted);
+            }
+            if ps_in == RuleVerdict::Unreadable {
+                return (ain, aout);
+            }
+        } else if ps_in == RuleVerdict::Unreadable {
+            return (nin, nout);
+        }
+    }
+
+    (ps_in, ps_out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

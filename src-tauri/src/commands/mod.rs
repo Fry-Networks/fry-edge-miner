@@ -21,3 +21,6 @@ mod docker_desktop_rearm_tests;
 
 #[cfg(test)]
 mod device_token_split_tests;
+
+#[cfg(test)]
+mod duplicate_key_u6_tests;

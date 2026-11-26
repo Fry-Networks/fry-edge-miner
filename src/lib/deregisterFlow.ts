@@ -14,6 +14,9 @@ export const DEREGISTER_CONFIRM = 'Deregister this device? This cannot be undone
 export const DEREGISTER_FORCE_CONFIRM =
   'The server did not accept the deregistration. Clear this device’s registration locally anyway? The server may still list it, and support may need to remove it there.'
 
+export const SWITCH_KEY_LOCAL_CONFIRM =
+  'Clear the saved miner key on THIS device only? Any other PC using this key will not be affected, and you can enter a different key right away.'
+
 export interface DeregisterState {
   /** Message to show beside the button, already condensed for one line. */
   error: string | null
